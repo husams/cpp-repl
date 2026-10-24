@@ -16,7 +16,7 @@ namespace example {
 //
 //   command   := lib | libs | libinfo | add-path | add | class | info | symbols | hook | hooks | restore | help | quit
 //   lib       := "%lib" { path }                 zero or more paths
-//   libs      := "%libs" [ regex ]               loaded library names only
+//   libs      := "%libs" [ "all" ] [ regex ]     loaded library names only
 //   libinfo   := "%libinfo" library               name, path or regex
 //   add-path  := "%add-path" path { ":" path }   blanks around ':' allowed
 //   add       := "%add" { path }                 zero or more source files
@@ -70,6 +70,7 @@ struct ParsedCommand {
   std::optional<Operand> library_regex;  // %symbols lib
   std::optional<Operand> name_regex;     // %symbols name
   std::optional<Span> all_symbols;       // %symbols all (include system libraries)
+  std::optional<Span> all_libraries;     // %libs all (include system libraries)
   std::optional<Operand> signature;   // %mock / %pre / %post / %restore target
   std::optional<Operand> caller;      // optional direct caller after "in"
   std::optional<Operand> code;        // contents of cpp`...`

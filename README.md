@@ -119,8 +119,11 @@ then compiled and run by the interpreter.
   or `%post`), registered signature and full original C++ body in `cpp\`...\``
   syntax. Multiline bodies preserve their whitespace and comments. Cleared and
   restored entries are omitted; an empty session prints `no active mocks or hooks`.
-- `%libs [regex]` - list loaded library names, including dependencies; no paths,
-  columns or counts. An optional regex filters names. Bare `%lib` lists only
+- `%libs [all] [regex]` - list loaded library names, including dependencies;
+  no paths, columns or counts. System libraries are hidden by default, using
+  the same locations as `%symbols`; `%libs all` includes them. An optional regex
+  filters names, including after `all` (for example `%libs all '^libc[.]'`).
+  Quote `'all'` to use that word as a regex instead of an option. Bare `%lib` lists only
   libraries explicitly loaded with `%lib`, also as names only.
 - `%libinfo <library>` - show a loaded library's full path, recorded version,
   base address, architecture, dependencies and ABI metadata. Accepts a name,
@@ -156,7 +159,7 @@ Grammar (see `src/commands.hpp`):
 
 ```
 lib       := "%lib" { path }
-libs      := "%libs" [ regex ]
+libs      := "%libs" [ "all" ] [ regex ]
 libinfo   := "%libinfo" library
 add       := "%add" { path }
 class     := "%class" [ name ]                  name := ident { "::" ident }
@@ -182,6 +185,8 @@ For example, after loading the points example library:
 %symbols all
 %symbols all lib 'libc[.]|libSystem' name '^malloc$'
 %libs libpoints
+%libs all
+%libs all 'libc[.]|libSystem'
 %libinfo libpoints
 %syminfo 'Point::inc(int)'
 ```
@@ -213,8 +218,8 @@ exports get their own kinds. Hidden/stripped symbols, undeclared C signatures,
 and class/namespace types without runtime symbols cannot be reconstructed from
 exports. Session declarations without emitted definitions are omitted.
 Native enumeration is enabled by default on macOS ARM64 and Linux x86_64;
-`-DREPLXX_RUNTIME_SYMBOLS=OFF` retains session-only listing. Frida Gum is needed when either native hooks or
-native symbol enumeration is enabled; disable both options to avoid it.
+`-DREPLXX_RUNTIME_SYMBOLS=OFF` retains session-only listing. Native inspection uses
+LLVM Object with the OS loader APIs (dyld on macOS, `dl_iterate_phdr` on Linux).
 
 For example, `%info demo::add` produces a plain-text block with aligned labels:
 
@@ -356,9 +361,13 @@ Callers whose entry address is shared by multiple exported symbols are rejected.
 Native caller filters use their own hook set; global library hooks continue
 to affect JIT-generated calls only.
 
-Supported builds fetch a platform-specific SHA-256-pinned Frida Gum 17.24.3 devkit for
-executable memory and branch islands ([Frida Gum](https://github.com/frida/frida-gum),
-wxWindows Library Licence 3.1). Configure with
+Native hooks use Clang/LLVM and native OS APIs, with no additional instrumentation
+dependency. LLVM decodes Linux x86_64 instructions; LLVM Object reads binary
+metadata. Branch islands use `mmap`/`mprotect`. Linux updates private code through
+`/proc/self/mem`, preserving executable-page permissions even with execmod
+restrictions; macOS uses Mach copy-on-write protection APIs and restores the
+original page permissions.
+Configure with
 `-DREPLXX_NATIVE_CALL_PATCHES=OFF` to disable this backend. Other platforms keep
 support for caller filtering within JIT-generated code. 32-bit Linux x86 is not
 supported by the native backend.

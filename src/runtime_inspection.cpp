@@ -22,7 +22,7 @@
 #include "loaded_symbols.hpp"
 #include "native_call_patch.hpp"
 #ifdef CPP_REPL_RUNTIME_SYMBOLS
-#include "gum_runtime.hpp"
+#include "native_runtime.hpp"
 #endif
 
 namespace example {
@@ -160,13 +160,13 @@ void binary_metadata(const LoadedLibrary& library, Fields& fields) {
 #if defined(__APPLE__) && defined(CPP_REPL_RUNTIME_SYMBOLS)
   // Inspect loaded Mach-O metadata as well, including dyld shared-cache images.
   const auto* header = reinterpret_cast<const llvm::MachO::mach_header_64*>(library.base);
-  if (!gum_memory_is_readable(header, sizeof(*header)) ||
+  if (!memory_readable(header, sizeof(*header)) ||
       header->magic != llvm::MachO::MH_MAGIC_64) {
     return;
   }
   auto* data = reinterpret_cast<const unsigned char*>(header + 1);
   std::size_t remaining = header->sizeofcmds;
-  if (remaining > (1u << 24) || !gum_memory_is_readable(data, remaining)) {
+  if (remaining > (1u << 24) || !memory_readable(data, remaining)) {
     return;
   }
   for (unsigned i = 0; i < header->ncmds && remaining >= sizeof(llvm::MachO::load_command); ++i) {
@@ -207,37 +207,15 @@ void binary_metadata(const LoadedLibrary& library, Fields& fields) {
 std::vector<LoadedLibrary> loaded_libraries() {
   std::vector<LoadedLibrary> result;
 #ifdef CPP_REPL_RUNTIME_SYMBOLS
-  initialize_gum();
-  gum_process_enumerate_modules(
-      [](GumModule* module, gpointer data) -> gboolean {
-        if (module == gum_process_get_main_module()) {
-          return TRUE;
-        }
-        auto& result = *static_cast<std::vector<LoadedLibrary>*>(data);
-        const auto* range = gum_module_get_range(module);
-        const auto* version = gum_module_get_version(module);
-        LoadedLibrary library{gum_module_get_name(module),
-                              gum_module_get_path(module),
-                              version ? version : "not recorded",
-                              range->base_address,
-                              range->size,
-                              {}};
-        gum_module_enumerate_dependencies(
-            module,
-            [](const GumDependencyDetails* dependency, gpointer data) -> gboolean {
-              static_cast<std::vector<std::string>*>(data)->push_back(dependency->name);
-              return TRUE;
-            },
-            &library.dependencies);
-        result.push_back(std::move(library));
-        return TRUE;
-      },
-      &result);
+  for (const auto& module : native_modules()) {
+    if (!module.main) result.push_back({module.name, module.path, module.version,
+                                      module.base, module.size, module.dependencies});
+  }
 #endif
   return result;
 }
 
-std::string library_list(const std::string& pattern, std::string& error) {
+std::string library_list(const std::string& pattern, std::string& error, bool include_system) {
   error.clear();
 #ifndef CPP_REPL_RUNTIME_SYMBOLS
   error = "library inspection is unavailable in this build";
@@ -252,7 +230,8 @@ std::string library_list(const std::string& pattern, std::string& error) {
   }
   std::set<std::string> names;
   for (const auto& library : loaded_libraries()) {
-    if (std::regex_search(library.name, filter)) {
+    if ((include_system || !is_system_library(library.path)) &&
+        std::regex_search(library.name, filter)) {
       names.insert(library.name);
     }
   }
@@ -357,54 +336,29 @@ std::vector<SymbolDescription> native_symbol_details(const std::string& input) {
     result.push_back(std::move(block));
   }
 #ifdef CPP_REPL_RUNTIME_SYMBOLS
-  struct Imports {
-    const std::string& query;
-    std::vector<SymbolDescription>& result;
-    std::string path;
-  } imports{query, result, {}};
-
-  gum_process_enumerate_modules(
-      [](GumModule* module, gpointer data) -> gboolean {
-        auto& imports = *static_cast<Imports*>(data);
-        imports.path = gum_module_get_path(module);
-        gum_module_enumerate_imports(
-            module,
-            [](const GumImportDetails* symbol, gpointer data) -> gboolean {
-              auto& imports = *static_cast<Imports*>(data);
-              if (!symbol->name || !matches(imports.query, symbol->name)) {
-                return TRUE;
-              }
-              const auto mangled = normalized(symbol->name);
-              auto block = std::find_if(imports.result.begin(), imports.result.end(),
-                                        [&](const auto& item) { return item.mangled == mangled; });
-              if (block == imports.result.end()) {
-                SymbolDescription undefined;
-                undefined.name = readable_symbol_name(mangled);
-                undefined.mangled = mangled;
-                undefined.fields = {
-                    {"Kind", symbol->type == GUM_IMPORT_FUNCTION   ? "function"
-                             : symbol->type == GUM_IMPORT_VARIABLE ? "variable"
-                                                                   : "unknown"},
-                    {"Mangled", mangled},
-                    {"Defined", "no (undefined import)"},
-                    {"Undefined", "yes (native import)"},
-                    {"Address", symbol->address ? hex(symbol->address) : "unresolved"}};
-                imports.result.push_back(std::move(undefined));
-                block = std::prev(imports.result.end());
-              }
-              block->fields.emplace_back(
-                  "Import", imports.path + (symbol->address ? " (undefined, resolved)"
-                                                            : " (undefined, unresolved)"));
-              if (symbol->slot) {
-                block->fields.emplace_back("Ref site",
-                                           imports.path + " import slot " + hex(symbol->slot));
-              }
-              return TRUE;
-            },
-            &imports);
-        return TRUE;
-      },
-      &imports);
+  for (const auto& module : native_modules()) {
+    for (const auto& symbol : native_imports(module,
+        [&](const auto& name) { return matches(query, name); })) {
+      const auto mangled = normalized(symbol.name);
+      auto block = std::find_if(result.begin(), result.end(),
+          [&](const auto& item) { return item.mangled == mangled; });
+      if (block == result.end()) {
+        SymbolDescription undefined;
+        undefined.name = readable_symbol_name(mangled);
+        undefined.mangled = mangled;
+        undefined.fields = {{"Kind", symbol.kind}, {"Mangled", mangled},
+          {"Defined", "no (undefined import)"}, {"Undefined", "yes (native import)"},
+          {"Binding", symbol.weak ? "weak" : "global"},
+          {"Address", symbol.address ? hex(symbol.address) : "unresolved"}};
+        result.push_back(std::move(undefined));
+        block = std::prev(result.end());
+      }
+      block->fields.emplace_back("Import", module.path +
+          (symbol.address ? " (undefined, resolved)" : " (undefined, unresolved)"));
+      if (symbol.slot) block->fields.emplace_back("Ref site",
+          module.path + " import slot " + hex(symbol.slot));
+    }
+  }
 #endif
   // Loaders may omit unresolved weak imports from their runtime enumeration.
   // Consult the image's undefined-symbol table when no runtime record exists.
@@ -479,7 +433,7 @@ std::vector<SymbolDescription> native_symbol_details(const std::string& input) {
               const auto site = relocation.getOffset() +
                                 (elf->getEType() == llvm::ELF::ET_DYN ? library.base : 0);
               block.fields.emplace_back("Ref site", library.path + " import slot " + hex(site));
-              if (gum_memory_is_readable(reinterpret_cast<void*>(site), sizeof(std::uintptr_t))) {
+              if (memory_readable(reinterpret_cast<void*>(site), sizeof(std::uintptr_t))) {
                 std::uintptr_t destination = 0;
                 std::memcpy(&destination, reinterpret_cast<void*>(site), sizeof(destination));
                 if (destination) {

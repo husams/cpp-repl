@@ -18,7 +18,9 @@ struct LoadedLibrary {
 };
 
 std::vector<LoadedLibrary> loaded_libraries();
-std::string library_list(const std::string& pattern, std::string& error);
+// Sorted names only; hide the same system locations as %symbols by default.
+std::string library_list(const std::string& pattern, std::string& error,
+                         bool include_system = false);
 std::string library_info(const std::string& query, std::string& error);
 std::vector<SymbolDescription> native_symbol_details(const std::string& query);
 

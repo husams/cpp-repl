@@ -307,6 +307,32 @@ TEST(Grammar, LibraryAndSymbolInspectionAcceptsQuotedNames) {
     EXPECT_FALSE(parse_command(input).error.empty()) << input;
 }
 
+TEST(Grammar, LibsAllIncludesSystemLibrariesAndKeepsTheOptionalRegex) {
+  EXPECT_FALSE(parse_command("%libs").all_libraries);
+  const auto all = parse_command("  %libs all  ");
+  EXPECT_EQ(all.kind, CommandKind::Libs);
+  EXPECT_TRUE(all.error.empty());
+  ASSERT_TRUE(all.all_libraries);
+  EXPECT_FALSE(all.symbol);
+  EXPECT_EQ(all.all_libraries->begin, 8u);
+  EXPECT_EQ(all.all_libraries->end, 11u);
+  const auto filtered = parse_command(R"(%libs all 'libc[.]|my lib')");
+  ASSERT_TRUE(filtered.error.empty()) << filtered.error;
+  EXPECT_TRUE(filtered.all_libraries);
+  ASSERT_TRUE(filtered.symbol);
+  EXPECT_EQ(filtered.symbol->value, "libc[.]|my lib");
+  EXPECT_EQ(filtered.symbol->span.begin, 10u);
+  const auto quoted = parse_command("%libs 'all'");
+  EXPECT_FALSE(quoted.all_libraries);
+  ASSERT_TRUE(quoted.symbol);
+  EXPECT_EQ(quoted.symbol->value, "all");
+  EXPECT_FALSE(parse_command("%libs allocation").all_libraries);
+  for (const char* input : {"%libs all x y", "%libs all 'x", "%libs all \"x\"y"}) {
+    EXPECT_FALSE(parse_command(input).error.empty()) << input;
+    EXPECT_FALSE(wants_more_input(input)) << input;
+  }
+}
+
 TEST(InspectionOutput, AddsColorWithoutChangingPlainTextContent) {
   const std::string info = "Symbol: demo::add\n  Kind    : function\n  Address : 0x123\n";
   EXPECT_EQ(color_inspection(info, false), info);

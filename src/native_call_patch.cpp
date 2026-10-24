@@ -10,8 +10,7 @@
 #include <dlfcn.h>
 #include <mach-o/loader.h>
 
-#include "frida-gum.h"
-#include "gum_runtime.hpp"
+#include "native_runtime.hpp"
 #endif
 
 namespace example {
@@ -151,10 +150,7 @@ bool function_bounds(std::uintptr_t caller, std::uintptr_t& end,
 }
 
 bool write_instruction(std::uintptr_t address, std::uint32_t instruction) {
-  return gum_memory_patch_code(
-      reinterpret_cast<void*>(address), sizeof(instruction),
-      [](gpointer memory, gpointer data) { std::memcpy(memory, data, sizeof(std::uint32_t)); },
-      &instruction);
+  return patch_code(address, &instruction, sizeof(instruction));
 }
 
 bool targets_callee(std::uintptr_t address, std::uintptr_t callee,
@@ -179,12 +175,12 @@ bool targets_callee(std::uintptr_t address, std::uintptr_t callee,
     }
     const auto pointer =
         (address & ~std::uintptr_t(0xfff)) + pages * 4096 + ((code[1] >> 10) & 0xfff) * 8;
-    if (!gum_memory_is_readable(reinterpret_cast<void*>(pointer), sizeof(std::uintptr_t))) {
+    if (!memory_readable(reinterpret_cast<void*>(pointer), sizeof(std::uintptr_t))) {
       continue;
     }
     std::uintptr_t target;
     std::memcpy(&target, reinterpret_cast<void*>(pointer), sizeof(target));
-    if (gum_strip_code_address(target) == callee) {
+    if (native_code_address(target) == callee) {
       return true;
     }
   }
@@ -210,7 +206,7 @@ struct NativeCallPatch::Impl {
 
   ~Impl() {
     if (island) {
-      gum_memory_free(island, gum_query_page_size());
+      free_code(island);
     }
   }
 #endif
@@ -233,7 +229,6 @@ bool NativeCallPatch::is_native_address(std::uintptr_t address) {
 std::shared_ptr<NativeCallPatch>
 NativeCallPatch::prepare(std::uintptr_t caller, std::uintptr_t callee, std::string& error) {
 #ifdef CPP_REPL_NATIVE_CALL_PATCHES
-  initialize_gum();
   std::lock_guard<std::mutex> lock(patch_mutex);
   std::uintptr_t end = 0;
   std::vector<std::pair<std::uintptr_t, std::uintptr_t>> data;
@@ -241,27 +236,9 @@ NativeCallPatch::prepare(std::uintptr_t caller, std::uintptr_t callee, std::stri
   if (!function_bounds(caller, end, data, stubs, error)) {
     return nullptr;
   }
-  if (auto* module = gum_process_find_module_by_address(caller)) {
-    struct Aliases {
-      std::uintptr_t address;
-      unsigned count = 0;
-    } aliases{caller};
-
-    gum_module_enumerate_exports(
-        module,
-        [](const GumExportDetails* details, gpointer user) {
-          auto& found = *static_cast<Aliases*>(user);
-          if (details->type == GUM_EXPORT_FUNCTION && details->address == found.address) {
-            ++found.count;
-          }
-          return TRUE;
-        },
-        &aliases);
-    g_object_unref(module);
-    if (aliases.count > 1) {
-      error = "native caller shares its code address with another exported symbol";
-      return nullptr;
-    }
+  if (native_function_has_aliases(caller)) {
+    error = "native caller shares its code address with another exported symbol";
+    return nullptr;
   }
   if (caller == callee || (caller & 3) || end <= caller || end - caller > (1u << 26)) {
     error = "unsupported native caller range";
@@ -321,37 +298,31 @@ bool NativeCallPatch::install(std::uintptr_t destination, std::string& error) {
     return true;
   }
   if (!impl_->island) {
-    const GumAddressSpec spec{reinterpret_cast<void*>(impl_->caller),
-                              GUM_ARM64_B_MAX_DISTANCE - impl_->length};
-    impl_->island =
-        gum_memory_allocate_near(&spec, gum_query_page_size(), gum_query_page_size(), GUM_PAGE_RW);
+    impl_->island = allocate_code_near(impl_->caller, (1u << 27) - 4 - impl_->length);
     if (!impl_->island) {
       error = "cannot allocate an executable branch island near the native caller";
       return false;
     }
-    GumArm64Writer writer;
-    gum_arm64_writer_init(&writer, impl_->island);
-    const bool written =
-        gum_arm64_writer_put_ldr_reg_address(&writer, ARM64_REG_X16, destination) &&
-        gum_arm64_writer_put_br_reg_no_auth(&writer, ARM64_REG_X16) &&
-        gum_arm64_writer_flush(&writer);
-    gum_arm64_writer_clear(&writer);
-    if (!written || !gum_try_mprotect(impl_->island, gum_query_page_size(), GUM_PAGE_RX)) {
+    // LDR X16, literal at +8; BR X16; destination. Only the ABI scratch register is used.
+    const std::uint32_t code[] = {0x58000050, 0xd61f0200};
+    std::memcpy(impl_->island, code, sizeof(code));
+    std::memcpy(static_cast<std::uint8_t*>(impl_->island) + sizeof(code), &destination,
+                sizeof(destination));
+    if (!make_code_executable(impl_->island)) {
       error = "cannot make the native branch island executable";
-      gum_memory_free(impl_->island, gum_query_page_size());
+      free_code(impl_->island);
       impl_->island = nullptr;
       return false;
     }
-    gum_clear_cache(impl_->island, gum_query_page_size());
     impl_->destination = destination;
     for (auto& site : impl_->sites) {
       const auto displacement =
           static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(impl_->island)) -
           static_cast<std::int64_t>(site.address);
       if ((displacement & 3) || displacement < -(1LL << 27) ||
-          displacement > GUM_ARM64_B_MAX_DISTANCE) {
+          displacement > (1LL << 27) - 4) {
         error = "native branch island is out of reach";
-        gum_memory_free(impl_->island, gum_query_page_size());
+        free_code(impl_->island);
         impl_->island = nullptr;
         return false;
       }

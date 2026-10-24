@@ -21,3 +21,11 @@ Verified 27/27 focused tests on each of macOS ARM64 and Linux x86_64, including
 terminal completion and system-export visibility; 24/24 compatibility checks
 also pass with native inspection disabled. Manually confirmed the reported
 `ztbsv` variants are hidden by default and visible with `all` on macOS.
+
+Follow-up: `%libs` uses the same system-library filter by default; `%libs all`
+includes system libraries and accepts an optional name regex. Quoted `'all'`
+remains a regex. Library details still inspect system libraries directly.
+Verified 27/27 focused tests on each of macOS ARM64 and Linux x86_64, including
+terminal completion, names-only output and filtering; 25/25 compatibility
+checks pass with native inspection disabled. Manually confirmed Accelerate is
+hidden by default and visible with `all`, while libpoints remains visible.

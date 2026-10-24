@@ -9,7 +9,7 @@
 #include "llvm/Demangle/Demangle.h"
 
 #ifdef CPP_REPL_RUNTIME_SYMBOLS
-#include "gum_runtime.hpp"
+#include "native_runtime.hpp"
 #endif
 
 namespace example {
@@ -48,53 +48,23 @@ bool is_system_library(const std::string& path) {
 void native_loaded_symbols(const std::regex& library, const std::regex& name,
                            std::vector<LoadedSymbol>& result, bool include_system) {
 #ifdef CPP_REPL_RUNTIME_SYMBOLS
-  initialize_gum();
-
-  struct Query {
-    const std::regex& library;
-    const std::regex& name;
-    std::vector<LoadedSymbol>& result;
-    bool include_system;
-  } query{library, name, result, include_system};
-
-  gum_process_enumerate_modules(
-      [](GumModule* module, gpointer data) -> gboolean {
-        auto& query = *static_cast<Query*>(data);
-        const std::string path = gum_module_get_path(module);
-        if ((!query.include_system && is_system_library(path)) ||
-            !std::regex_search(path, query.library)) {
-          return TRUE;
+  for (const auto& module : native_modules()) {
+    if ((!include_system && is_system_library(module.path)) ||
+        !std::regex_search(module.path, library)) continue;
+    for (const auto& symbol : native_exports(module)) {
+      const auto readable = readable_symbol_name(symbol.name);
+      if (!std::regex_search(readable, name)) continue;
+      std::string kind = symbol.function ? "function" : "variable";
+      for (const auto* prefix : {"vtable for ", "VTT for ", "typeinfo for ",
+                                 "typeinfo name for ", "guard variable for "}) {
+        if (readable.rfind(prefix, 0) == 0) {
+          kind = std::string(prefix).substr(0, std::string(prefix).find(" for "));
+          break;
         }
-        struct Exports {
-          Query& query;
-          const std::string& path;
-        } exports{query, path};
-        gum_module_enumerate_exports(
-            module,
-            [](const GumExportDetails* details, gpointer data) -> gboolean {
-              auto& exports = *static_cast<Exports*>(data);
-              if (!details->name || !*details->name || !details->address) {
-                return TRUE;
-              }
-              const std::string name = readable_symbol_name(details->name);
-              if (!std::regex_search(name, exports.query.name)) {
-                return TRUE;
-              }
-              std::string kind = details->type == GUM_EXPORT_FUNCTION ? "function" : "variable";
-              for (const auto* prefix : {"vtable for ", "VTT for ", "typeinfo for ",
-                                         "typeinfo name for ", "guard variable for "}) {
-                if (name.rfind(prefix, 0) == 0) {
-                  kind = std::string(prefix).substr(0, std::string(prefix).find(" for "));
-                  break;
-                }
-              }
-              exports.query.result.push_back({exports.path, kind, name, details->name, details->address});
-              return TRUE;
-            },
-            &exports);
-        return TRUE;
-      },
-      &query);
+      }
+      result.push_back({module.path, kind, readable, symbol.name, symbol.address});
+    }
+  }
 #else
   (void)library;
   (void)name;

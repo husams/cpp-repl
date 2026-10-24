@@ -327,7 +327,12 @@ def main():
             ("symbols_missing", b"%symbols lib no_such_image_987654321\r", True),
             ("symbols_invalid", b'%symbols name "["\r', True),
             ("symbols_usage", b"%symbols unknown\r", True),
-            ("libraries", b"%libs '^libz[.]'\r", True),
+            ("libs_tab_all", b"%libs a\t"),
+            ("libs_cancel_all", b"\x03", True),
+            ("libraries_hidden", b"%libs '^libz[.]'\r", True),
+            ("libraries", b"%libs all '^libz[.]'\r", True),
+            ("libraries_all", b"%libs all\r", True),
+            ("libraries_invalid", b"%libs all '['\r", True),
             ("library_info", b"%libinfo '^libz[.]'\r", True),
             ("symbol_info", b"%syminfo 'symbol_total'\r", True),
             ("still_runs", b"symbol_total(2, 3)\r", True),
@@ -361,6 +366,12 @@ def main():
         check("symbols reports an invalid regex", "invalid name regex" in plain(out["symbols_invalid"]))
         check("symbols rejects unknown options with usage", "usage: %symbols" in plain(out["symbols_usage"]))
         check("libs lists names without paths", "libz." in plain(out["libraries"]) and "/usr/" not in plain(out["libraries"]))
+        check("libs completes all", "%libs all" in plain(out["libs_tab_all"]))
+        check("libs hides system libraries unless all is requested",
+            "libz." not in plain(out["libraries_hidden"]) and
+            "libz." in plain(out["libraries_all"]))
+        check("libs all validates its regex",
+            "invalid library regex" in plain(out["libraries_invalid"]))
         details = plain(out["library_info"])
         check("libinfo shows a path and version", all(text in details for text in ("Library:", "Path", "Version")))
         check("syminfo shows definition and resolution state", all(text in plain(out["symbol_info"]) for text in ("Defined", "Resolved", "Source refs")))

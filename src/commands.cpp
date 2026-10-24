@@ -188,8 +188,8 @@ void parse_symbol_filters(std::string_view text, ParsedCommand& cmd) {
   }
 }
 
-void parse_inspection_operand(std::string_view text, ParsedCommand& cmd, bool required) {
-  const auto begin = cmd.arg_begin;
+void parse_inspection_operand(std::string_view text, ParsedCommand& cmd, bool required,
+                              std::size_t begin) {
   if (begin == text.size()) {
     if (required) set_error(cmd, cmd.kind == CommandKind::LibInfo ? "missing library name" : "missing symbol name", {begin, begin});
     return;
@@ -283,7 +283,8 @@ const std::vector<CommandInfo>& command_table() {
   static const std::vector<CommandInfo> kTable = {
       {"%lib", CommandKind::Lib, " [path ...]",
        "load shared libraries (no argument: list loaded libraries)"},
-      {"%libs", CommandKind::Libs, " [regex]", "list loaded library names"},
+      {"%libs", CommandKind::Libs, " [all] [regex]",
+       "list loaded library names (all includes system libraries)"},
       {"%libinfo", CommandKind::LibInfo, " <library>", "show library path, versions, ABI requirements and dependencies"},
       {"%add-path", CommandKind::AddPath, " <path[:path...]>",
        "add library search directories, separated by ':'"},
@@ -355,11 +356,19 @@ ParsedCommand parse_command(std::string_view text) {
       break;
     case CommandKind::Info:
     case CommandKind::LibInfo:
-      parse_inspection_operand(text, cmd, true);
+      parse_inspection_operand(text, cmd, true, cmd.arg_begin);
       break;
-    case CommandKind::Libs:
-      parse_inspection_operand(text, cmd, false);
+    case CommandKind::Libs: {
+      auto begin = cmd.arg_begin;
+      auto end = text.find_first_of(kBlank, begin);
+      if (end == std::string_view::npos) end = text.size();
+      if (text.substr(begin, end - begin) == "all") {
+        cmd.all_libraries = Span{begin, end};
+        begin = skip_blank(text, end);
+      }
+      parse_inspection_operand(text, cmd, false, begin);
       break;
+    }
     case CommandKind::Symbols:
       parse_symbol_filters(text, cmd);
       break;

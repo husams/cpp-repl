@@ -493,6 +493,36 @@ TEST_F(CppInterpreterTest, LibraryDetailsIncludePathsDependenciesAndAbiMetadata)
   EXPECT_NE(error.find("invalid library regex"), std::string::npos);
 }
 
+TEST_F(CppInterpreterTest, LibraryListingHidesSystemLibrariesUnlessAllIsRequested) {
+  ASSERT_TRUE(cpp_->load_library(HOOK_TEST_LIBRARY).empty());
+  std::string error;
+  const auto project = std::filesystem::path(HOOK_TEST_LIBRARY).filename().string() + "\n";
+  EXPECT_EQ(library_list("hook_test_library", error), project);
+  EXPECT_TRUE(error.empty()) << error;
+  EXPECT_EQ(library_list("hook_test_library", error, true), project);
+#ifdef __linux__
+  const std::string system = "libc.so.6";
+  const std::string pattern = R"(^libc\.so\.6$)";
+#else
+  const std::string system = "libSystem.B.dylib";
+  const std::string pattern = R"(^libSystem\.B\.dylib$)";
+#endif
+  EXPECT_EQ(library_list(pattern, error), "");
+  EXPECT_TRUE(error.empty()) << error;
+  EXPECT_EQ(library_list(pattern, error, true), system + '\n');
+  EXPECT_TRUE(error.empty()) << error;
+  const auto normal = library_list("", error);
+  EXPECT_NE(normal.find(project), std::string::npos) << normal;
+  EXPECT_EQ(normal.find(system + '\n'), std::string::npos) << normal;
+  const auto all = library_list("", error, true);
+  EXPECT_NE(all.find(project), std::string::npos) << all;
+  EXPECT_NE(all.find(system + '\n'), std::string::npos) << all;
+  EXPECT_NE(library_info(system, error).find("Library: " + system), std::string::npos);
+  EXPECT_TRUE(error.empty()) << error;
+  library_list("[", error, true);
+  EXPECT_NE(error.find("invalid library regex"), std::string::npos);
+}
+
 TEST_F(CppInterpreterTest, NativeSymbolDetailsWorkWithoutHeadersAndShowCallSites) {
   ASSERT_TRUE(cpp_->load_library(HOOK_TEST_LIBRARY).empty());
   std::string error;
@@ -838,10 +868,31 @@ TEST_F(CppInterpreterTest, PrecompiledPrivateCallerSupportsAllHooksWithoutRebuil
   auto* code = static_cast<const char*>(dlsym(handle, "_ZN12hook_library11NativePoint3incEi"));
   ASSERT_NE(code, nullptr);
   const std::string before_code(code, 32);
+#ifdef __linux__
+  auto permissions = [code] {
+    std::ifstream maps("/proc/self/maps");
+    std::string line;
+    while (std::getline(maps, line)) {
+      std::istringstream fields(line);
+      std::uintptr_t begin = 0, end = 0;
+      char separator = 0;
+      std::string protection;
+      fields >> std::hex >> begin >> separator >> end >> protection;
+      const auto address = reinterpret_cast<std::uintptr_t>(code);
+      if (separator == '-' && address >= begin && address < end) return protection;
+    }
+    return std::string{};
+  };
+  const auto before_permissions = permissions();
+  ASSERT_NE(before_permissions.find('x'), std::string::npos);
+#endif
   std::string error;
   ASSERT_TRUE(cpp_->set_hook(HookKind::Pre, "hook_library::add(int a,int b)",
       "++native_visits; ++a;", error, "hook_library::NativePoint::inc(int)")) << error;
   EXPECT_NE(before_code, std::string(code, 32));
+#ifdef __linux__
+  EXPECT_EQ(permissions(), before_permissions);
+#endif
   ASSERT_TRUE(cpp_->set_hook(HookKind::Post, "hook_library::add(int,int)",
       "++native_posts; result += 10;", error, "hook_library::NativePoint::inc(int)")) << error;
   EXPECT_EQ(cpp_->evaluate("native_point.run(3)"), "(int) 28\n");
@@ -867,6 +918,9 @@ TEST_F(CppInterpreterTest, PrecompiledPrivateCallerSupportsAllHooksWithoutRebuil
   ASSERT_TRUE(cpp_->restore("hook_library::add(int,int)", error,
       "hook_library::NativePoint::inc(int)")) << error;
   EXPECT_EQ(before_code, std::string(code, 32));
+#ifdef __linux__
+  EXPECT_EQ(permissions(), before_permissions);
+#endif
   EXPECT_EQ(cpp_->evaluate("native_point.run(3)"), "(int) 6\n");
   EXPECT_EQ(cpp_->evaluate("native_point.double_it(3)"), "(int) 99\n");
   ASSERT_TRUE(cpp_->restore("hook_library::add(int,int)", error)) << error;

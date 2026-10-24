@@ -7,6 +7,8 @@
 // Parse LLVM's ELF enums before link.h introduces conflicting system macros.
 #include "llvm/Object/ELFObjectFile.h"
 #include "llvm/Support/Error.h"
+#include "llvm-c/Disassembler.h"
+#include "llvm-c/Target.h"
 
 #include <algorithm>
 #include <array>
@@ -21,8 +23,7 @@
 #include <elf.h>
 #include <link.h>
 
-#include "frida-gum.h"
-#include "gum_runtime.hpp"
+#include "native_runtime.hpp"
 // clang-format on
 
 namespace example {
@@ -41,40 +42,109 @@ bool contains(const std::vector<Range>& ranges, std::uintptr_t address, std::siz
   });
 }
 
+struct Instruction {
+  std::uintptr_t address = 0, target = 0;
+  std::size_t size = 0, relative_offset = 0;
+  std::array<std::uint8_t, 15> bytes{};
+  bool call = false, jump = false, conditional = false, rip_relative = false;
+  bool padding = false;
+};
+
 struct Decoder {
-  csh handle = 0;
-  cs_insn* instruction = nullptr;
+  LLVMDisasmContextRef handle = nullptr;
+  Instruction instruction;
 
   Decoder() {
-    if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) == CS_ERR_OK) {
-      cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
-      instruction = cs_malloc(handle);
-    }
+    static std::once_flag initialized;
+    std::call_once(initialized, [] {
+      LLVMInitializeNativeTarget();
+      LLVMInitializeNativeDisassembler();
+      LLVMInitializeNativeAsmPrinter();
+    });
+    handle = LLVMCreateDisasm("x86_64-pc-linux-gnu", nullptr, 0, nullptr, nullptr);
   }
 
   ~Decoder() {
-    if (instruction) {
-      cs_free(instruction, 1);
-    }
     if (handle) {
-      cs_close(&handle);
+      LLVMDisasmDispose(handle);
     }
+  }
+
+  bool next(const std::uint8_t*& code, std::size_t& remaining, std::uint64_t& pc) {
+    char text[256];
+    if (!handle) {
+      return false;
+    }
+    const auto length = LLVMDisasmInstruction(handle, const_cast<std::uint8_t*>(code), remaining,
+                                              pc, text, sizeof(text));
+    if (!length || length > instruction.bytes.size()) {
+      return false;
+    }
+    instruction = {};
+    auto& item = instruction;
+    item.address = pc;
+    item.size = length;
+    std::memcpy(item.bytes.data(), code, length);
+    std::size_t opcode = 0;
+    // Decode boundaries with LLVM; recognize only the branch forms we can patch.
+    while (opcode + 1 < length &&
+           (code[opcode] == 0xf2 || code[opcode] == 0xf3 || code[opcode] == 0x66 ||
+            code[opcode] == 0x2e || code[opcode] == 0x3e)) {
+      ++opcode;
+    }
+    const auto byte = code[opcode];
+    std::size_t displacement_size = 0;
+    if ((byte == 0xe8 || byte == 0xe9) && length == opcode + 5) {
+      item.call = byte == 0xe8;
+      item.jump = byte == 0xe9;
+      item.relative_offset = opcode + 1;
+      displacement_size = 4;
+    } else if (byte == 0xeb || (byte >= 0x70 && byte <= 0x7f) || (byte >= 0xe0 && byte <= 0xe3)) {
+      item.jump = byte == 0xeb;
+      item.conditional = !item.jump;
+      item.relative_offset = opcode + 1;
+      displacement_size = 1;
+    } else if (byte == 0x0f && opcode + 1 < length && code[opcode + 1] >= 0x80 &&
+               code[opcode + 1] <= 0x8f) {
+      item.conditional = true;
+      item.relative_offset = opcode + 2;
+      displacement_size = 4;
+    } else if (byte == 0xff && length == opcode + 6 &&
+               (code[opcode + 1] == 0x15 || code[opcode + 1] == 0x25)) {
+      item.call = code[opcode + 1] == 0x15;
+      item.jump = !item.call;
+      item.rip_relative = true;
+      displacement_size = 4;
+    }
+    if (displacement_size && displacement_size <= length) {
+      std::int64_t displacement;
+      if (displacement_size == 4) {
+        std::int32_t relative;
+        std::memcpy(&relative, code + length - 4, 4);
+        displacement = relative;
+      } else {
+        displacement = static_cast<std::int8_t>(code[length - 1]);
+      }
+      item.target = pc + length + displacement;
+    }
+    item.padding = byte == 0x90 ||
+                   (byte == 0x0f && opcode + 1 < length && code[opcode + 1] == 0x1f) ||
+                   (length == 4 && std::memcmp(code, "\xf3\x0f\x1e\xfa", 4) == 0);
+    code += length;
+    remaining -= length;
+    pc += length;
+    return true;
   }
 };
 
-bool got_target(const cs_insn& instruction, const std::vector<Range>& got, std::uintptr_t callee) {
-  const auto& x86 = instruction.detail->x86;
-  if (x86.op_count != 1 || x86.operands[0].type != X86_OP_MEM) {
+bool got_target(const Instruction& instruction, const std::vector<Range>& got,
+                std::uintptr_t callee) {
+  if (!instruction.rip_relative) {
     return false;
   }
-  const auto& memory = x86.operands[0].mem;
-  if (memory.base != X86_REG_RIP || memory.index != X86_REG_INVALID ||
-      memory.segment != X86_REG_INVALID) {
-    return false;
-  }
-  const auto pointer = instruction.address + instruction.size + memory.disp;
+  const auto pointer = instruction.target;
   if (!contains(got, pointer, sizeof(std::uintptr_t)) ||
-      !gum_memory_is_readable(reinterpret_cast<void*>(pointer), sizeof(std::uintptr_t))) {
+      !memory_readable(reinterpret_cast<void*>(pointer), sizeof(std::uintptr_t))) {
     return false;
   }
   std::uintptr_t destination;
@@ -91,7 +161,7 @@ bool branch_target(std::uintptr_t address, std::uintptr_t callee, const std::vec
     return false;
   }
   Decoder decoder;
-  if (!decoder.instruction) {
+  if (!decoder.handle) {
     return false;
   }
   auto* code = reinterpret_cast<const std::uint8_t*>(address);
@@ -103,13 +173,12 @@ bool branch_target(std::uintptr_t address, std::uintptr_t callee, const std::vec
   }
   std::uint64_t pc = address;
   // CET PLT entries may start with ENDBR64 or padding before their GOT jump.
-  for (unsigned n = 0;
-       n < 3 && cs_disasm_iter(decoder.handle, &code, &size, &pc, decoder.instruction); ++n) {
-    const auto& instruction = *decoder.instruction;
-    if (instruction.id == X86_INS_JMP) {
+  for (unsigned n = 0; n < 3 && decoder.next(code, size, pc); ++n) {
+    const auto& instruction = decoder.instruction;
+    if (instruction.jump) {
       return got_target(instruction, got, callee);
     }
-    if (instruction.id != X86_INS_ENDBR64 && instruction.id != X86_INS_NOP) {
+    if (!instruction.padding) {
       return false;
     }
   }
@@ -132,7 +201,7 @@ bool function_bounds(std::uintptr_t caller, std::uintptr_t& end, std::vector<Ran
     return false;
   }
   end = caller + symbol->st_size;
-  if (end <= caller || !gum_memory_is_readable(reinterpret_cast<void*>(caller), symbol->st_size)) {
+  if (end <= caller || !memory_readable(reinterpret_cast<void*>(caller), symbol->st_size)) {
     error = "native caller's ELF function range is unreadable";
     return false;
   }
@@ -166,13 +235,7 @@ bool function_bounds(std::uintptr_t caller, std::uintptr_t& end, std::vector<Ran
 }
 
 bool write_bytes(std::uintptr_t address, const std::vector<std::uint8_t>& bytes) {
-  return gum_memory_patch_code(
-      reinterpret_cast<void*>(address), bytes.size(),
-      [](gpointer memory, gpointer data) {
-        const auto& code = *static_cast<const std::vector<std::uint8_t>*>(data);
-        std::memcpy(memory, code.data(), code.size());
-      },
-      const_cast<std::vector<std::uint8_t>*>(&bytes));
+  return patch_code(address, bytes.data(), bytes.size());
 }
 
 bool matches(std::uintptr_t address, const std::vector<std::uint8_t>& bytes) {
@@ -199,7 +262,7 @@ struct NativeCallPatch::Impl {
 
   ~Impl() {
     if (island) {
-      gum_memory_free(island, gum_query_page_size());
+      free_code(island);
     }
   }
 };
@@ -214,7 +277,6 @@ bool NativeCallPatch::is_native_address(std::uintptr_t address) {
 
 std::shared_ptr<NativeCallPatch>
 NativeCallPatch::prepare(std::uintptr_t caller, std::uintptr_t callee, std::string& error) {
-  initialize_gum();
   std::lock_guard<std::mutex> lock(patch_mutex);
   auto impl = std::make_unique<Impl>();
   std::uintptr_t end = 0;
@@ -226,30 +288,12 @@ NativeCallPatch::prepare(std::uintptr_t caller, std::uintptr_t callee, std::stri
     error = "native caller and target must be distinct functions";
     return nullptr;
   }
-  if (auto* module = gum_process_find_module_by_address(caller)) {
-    struct Aliases {
-      std::uintptr_t address;
-      unsigned count = 0;
-    } aliases{caller};
-
-    gum_module_enumerate_exports(
-        module,
-        [](const GumExportDetails* details, gpointer data) -> gboolean {
-          auto& found = *static_cast<Aliases*>(data);
-          if (details->type == GUM_EXPORT_FUNCTION && details->address == found.address) {
-            ++found.count;
-          }
-          return TRUE;
-        },
-        &aliases);
-    g_object_unref(module);
-    if (aliases.count > 1) {
-      error = "native caller shares its code address with another exported symbol";
-      return nullptr;
-    }
+  if (native_function_has_aliases(caller)) {
+    error = "native caller shares its code address with another exported symbol";
+    return nullptr;
   }
   Decoder decoder;
-  if (!decoder.instruction) {
+  if (!decoder.handle) {
     error = "cannot initialize the x86_64 instruction decoder";
     return nullptr;
   }
@@ -257,40 +301,36 @@ NativeCallPatch::prepare(std::uintptr_t caller, std::uintptr_t callee, std::stri
   std::size_t remaining = end - caller;
   std::uint64_t pc = caller;
   while (remaining) {
-    if (!cs_disasm_iter(decoder.handle, &code, &remaining, &pc, decoder.instruction)) {
+    if (!decoder.next(code, remaining, pc)) {
       error = "cannot decode the complete native caller; no calls were changed";
       return nullptr;
     }
-    const auto& instruction = *decoder.instruction;
-    const bool call = instruction.id == X86_INS_CALL;
-    const bool jump = instruction.id == X86_INS_JMP;
-    const bool other_jump = cs_insn_group(decoder.handle, &instruction, CS_GRP_JUMP);
+    const auto& instruction = decoder.instruction;
+    const bool call = instruction.call;
+    const bool jump = instruction.jump;
+    const bool other_jump = instruction.conditional;
     if (!call && !jump && !other_jump) {
       continue;
     }
-    const auto& x86 = instruction.detail->x86;
-    if (x86.op_count != 1) {
-      continue;
-    }
     const bool direct =
-        x86.operands[0].type == X86_OP_IMM && branch_target(x86.operands[0].imm, callee, plt, got);
+        instruction.relative_offset && branch_target(instruction.target, callee, plt, got);
     const bool through_got = got_target(instruction, got, callee);
     if (!direct && !through_got) {
       continue;
     }
     if ((!call && !jump) || instruction.size < 5 ||
-        (direct &&
-         (x86.encoding.imm_size != 4 || x86.encoding.imm_offset + 4 != instruction.size)) ||
+        (direct && instruction.relative_offset + 4 != instruction.size) ||
         (through_got && (instruction.size != 6 || instruction.bytes[0] != 0xff))) {
       error = "native caller uses an unsupported short or conditional branch to the target";
       return nullptr;
     }
-    std::vector<std::uint8_t> original(instruction.bytes, instruction.bytes + instruction.size);
+    std::vector<std::uint8_t> original(instruction.bytes.begin(),
+                                       instruction.bytes.begin() + instruction.size);
     impl->sites.push_back({instruction.address,
                            std::move(original),
                            {},
                            call,
-                           direct ? x86.encoding.imm_offset : std::size_t(0)});
+                           direct ? instruction.relative_offset : std::size_t(0)});
   }
   if (impl->sites.empty()) {
     error = "native caller has no supported native call to the target; inlined and dynamic "
@@ -314,11 +354,8 @@ bool NativeCallPatch::install(std::uintptr_t destination, std::string& error) {
     return true;
   }
   if (!impl_->island) {
-    const GumAddressSpec spec{reinterpret_cast<void*>(impl_->caller),
-                              std::size_t(std::numeric_limits<std::int32_t>::max()) -
-                                  impl_->length - 16};
-    impl_->island =
-        gum_memory_allocate_near(&spec, gum_query_page_size(), gum_query_page_size(), GUM_PAGE_RW);
+    impl_->island = allocate_code_near(
+        impl_->caller, std::size_t(std::numeric_limits<std::int32_t>::max()) - impl_->length - 16);
     if (!impl_->island) {
       error = "cannot allocate a branch island within x86_64 rel32 reach";
       return false;
@@ -328,13 +365,12 @@ bool NativeCallPatch::install(std::uintptr_t destination, std::string& error) {
     std::memcpy(impl_->island, jump.data(), jump.size());
     std::memcpy(static_cast<std::uint8_t*>(impl_->island) + jump.size(), &destination,
                 sizeof(destination));
-    if (!gum_try_mprotect(impl_->island, gum_query_page_size(), GUM_PAGE_RX)) {
+    if (!make_code_executable(impl_->island)) {
       error = "cannot make the native branch island executable";
-      gum_memory_free(impl_->island, gum_query_page_size());
+      free_code(impl_->island);
       impl_->island = nullptr;
       return false;
     }
-    gum_clear_cache(impl_->island, gum_query_page_size());
     impl_->destination = destination;
     for (auto& site : impl_->sites) {
       const auto displacement =
@@ -344,7 +380,7 @@ bool NativeCallPatch::install(std::uintptr_t destination, std::string& error) {
       if (displacement < std::numeric_limits<std::int32_t>::min() ||
           displacement > std::numeric_limits<std::int32_t>::max()) {
         error = "native branch island is out of reach";
-        gum_memory_free(impl_->island, gum_query_page_size());
+        free_code(impl_->island);
         impl_->island = nullptr;
         return false;
       }
@@ -433,11 +469,16 @@ bool NativeCallPatch::active() const {
   return impl_->installed;
 }
 
-std::vector<std::uintptr_t> NativeCallPatch::reference_sites(std::uintptr_t caller, std::uintptr_t callee) {
+std::vector<std::uintptr_t> NativeCallPatch::reference_sites(std::uintptr_t caller,
+                                                             std::uintptr_t callee) {
   std::string error;
   auto patch = prepare(caller, callee, error);
   std::vector<std::uintptr_t> result;
-  if (patch) for (const auto& site : patch->impl_->sites) result.push_back(site.address);
+  if (patch) {
+    for (const auto& site : patch->impl_->sites) {
+      result.push_back(site.address);
+    }
+  }
   return result;
 }
 

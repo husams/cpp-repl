@@ -66,6 +66,10 @@ Replxx::completions_t complete(CppInterpreter& cpp, const std::string& input,
          complete_path(typed, cmd.kind == CommandKind::AddPath)) {
       out.emplace_back(p);
     }
+  } else if (cmd.kind == CommandKind::Libs && !cmd.all_libraries) {
+    const std::string typed = input.substr(cmd.arg_begin);
+    context_len = static_cast<int>(utf8_length(typed));
+    if (starts_with("all", typed)) out.emplace_back("all");
   } else if (cmd.kind == CommandKind::LibInfo) {
     const std::string typed = input.substr(cmd.arg_begin);
     context_len = static_cast<int>(utf8_length(typed));
@@ -209,7 +213,8 @@ bool execute(LibraryManager& libs, CppInterpreter& cpp, const std::string& line)
   if ((cmd.kind == CommandKind::Libs || cmd.kind == CommandKind::LibInfo) && cmd.error.empty()) {
     std::string error;
     const auto query = cmd.symbol ? cmd.symbol->value : "";
-    const auto result = cmd.kind == CommandKind::Libs ? library_list(query, error) : library_info(query, error);
+    const auto result = cmd.kind == CommandKind::Libs ?
+        library_list(query, error, cmd.all_libraries.has_value()) : library_info(query, error);
     std::cout << color_inspection(error.empty() ? result : "error: " + error + '\n',
         inspection_colors_enabled(), cmd.kind == CommandKind::Libs);
     return true;
