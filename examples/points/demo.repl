@@ -1,0 +1,25 @@
+%lib ./build/libpoints.so
+#include "point.hpp"
+#include <iostream>
+Point p;
+p.run(3)
+p.double_it(3)
+%pre add(int a, int b) in Point::inc(int) cpp`
+  std::cout << "pre: add(" << a << ", " << b << ")\n";
+`
+%mock add(int a, int b) in Point::inc(int) cpp`
+  return a + b + 100;
+`
+%post add(int, int) in Point::inc(int) cpp`
+  std::cout << "post: result=" << result << "\n";
+  result += 10;
+`
+p.run(3)
+p.double_it(3)
+add(3, 1)
+%hooks
+%restore add(int, int) in Point::inc(int)
+p.run(3)
+p.double_it(3)
+%hooks
+%quit
