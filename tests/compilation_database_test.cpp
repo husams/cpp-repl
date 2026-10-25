@@ -102,6 +102,19 @@ void write_database(const TemporaryProject& project, const std::string& entries,
   project.write(relative, "[" + entries + "]\n");
 }
 
+TEST(CompilationDatabase, CompileScopesPreserveClangKeywordCompatibility) {
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->add_compile_options({"-DCOMPILE_SCOPE_CHECK=1"}, error))
+      << error;
+  // Older libstdc++ headers use builtin-trait spellings as member names.
+  // Clang downgrades those keywords while parsing their declarations.
+  ASSERT_TRUE(cpp->execute("#include <string>\n#include <vector>"));
+  ASSERT_TRUE(cpp->execute("#include <iostream>"));
+  EXPECT_EQ(cpp->evaluate("int(std::string(\"abc\").size())"), "(int) 3\n");
+}
+
 TEST(CompilationDatabase,
      LoadsAncestorBuildDatabaseAndPerFileOptionsAtStartup) {
   TemporaryProject project;

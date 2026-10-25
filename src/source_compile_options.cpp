@@ -42,6 +42,9 @@ void set_keywords(clang::IdentifierTable& table,
   for (const auto& entry : desired) names.push_back(entry.getKey().str());
   for (const auto& name : names) {
     const auto& from = desired.get(name);
+    // Clang deliberately turns some builtin-trait keywords into identifiers
+    // for libstdc++ compatibility. Keep that parser decision across scopes.
+    if (table.get(name).hasRevertedTokenIDToIdentifier()) continue;
     auto& to = table.get(name, from.getTokenID());
     to.setIsExtensionToken(from.isExtensionToken());
     to.setIsFutureCompatKeyword(from.isFutureCompatKeyword());
