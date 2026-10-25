@@ -334,7 +334,7 @@ bool CppInterpreter::run_raw(const std::string& code, clang::Value& value,
     llvm::errs() << "error: 'return' is only allowed inside a function\n";
     return false;
   }
-  llvm::Expected<clang::PartialTranslationUnit&> ptu = interp_->Parse(code);
+  llvm::Expected<clang::PartialTranslationUnit&> ptu = parse_input(*interp_, code);
   if (!ptu) return report(ptu.takeError());
   if (ptu->TheModule) {
     const auto instrumented = hooks_.instrument(*ptu);

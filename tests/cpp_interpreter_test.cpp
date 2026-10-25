@@ -452,6 +452,100 @@ TEST_F(CppInterpreterTest, StaysUsableAfterALinkError) {
   EXPECT_EQ(cpp_->evaluate("use"), "(int) 7\n");
 }
 
+TEST(IncludeRecovery, StandardNamespaceSurvivesLinkFailure) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  EXPECT_FALSE(cpp->execute(
+      "namespace std { int lookup_missing(); } int lookup_result = std::lookup_missing();"));
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  ASSERT_TRUE(cpp->execute("std::string recovered = \"ss\";"));
+  EXPECT_EQ(cpp->evaluate("int(recovered.size())"), "(int) 2\n");
+  ASSERT_TRUE(cpp->execute("int lookup_result = 7;"));
+  EXPECT_EQ(cpp->evaluate("lookup_result"), "(int) 7\n");
+}
+
+TEST(IncludeRecovery, StandardNamespaceSurvivesParseFailure) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  EXPECT_FALSE(cpp->execute("namespace std { int lookup_broken = ; }"));
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  ASSERT_TRUE(cpp->execute("std::string recovered = \"ss\";"));
+  EXPECT_EQ(cpp->evaluate("int(recovered.size())"), "(int) 2\n");
+}
+
+TEST(IncludeRecovery, FirstSystemHeaderNamespaceLookupSurvivesParseFailure) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  EXPECT_FALSE(cpp->execute("#include <string>\nnamespace std { int lookup_broken = ; }"));
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  // Parsing a rejected first include need not emit the header's inline code.
+  // This regression covers name lookup; successful execution is tested above.
+  ASSERT_TRUE(cpp->execute("static_assert(sizeof(std::string) > 0);"));
+}
+
+TEST(IncludeRecovery, EarlierNamespaceSurvivesRepeatedFailures) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("namespace Kept { int value = 42; }"));
+  ASSERT_TRUE(cpp->execute("namespace Kept { int other = 7; }"));
+  EXPECT_FALSE(cpp->execute("namespace Kept { int broken = ; }"));
+  EXPECT_EQ(cpp->evaluate("Kept::value + Kept::other"), "(int) 49\n");
+  EXPECT_FALSE(cpp->execute(
+      "namespace Kept { int missing(); } int result = Kept::missing();"));
+  EXPECT_EQ(cpp->evaluate("Kept::value + Kept::other"), "(int) 49\n");
+}
+
+TEST(IncludeRecovery, RestoresEveryOverloadAndPreservesSurvivingOverloads) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute(
+      "int lookup_pick(int) { return 42; } int lookup_pick(double) { return 7; }"));
+  EXPECT_FALSE(cpp->execute(
+      "int lookup_pick(int); extern int absent; int result = absent;"));
+  EXPECT_EQ(cpp->evaluate("lookup_pick(1)"), "(int) 42\n");
+  EXPECT_EQ(cpp->evaluate("lookup_pick(0.5)"), "(int) 7\n");
+  EXPECT_FALSE(cpp->execute(
+      "int lookup_pick(int); int lookup_pick(double); extern int absent; int result = absent;"));
+  EXPECT_EQ(cpp->evaluate("lookup_pick(1)"), "(int) 42\n");
+  EXPECT_EQ(cpp->evaluate("lookup_pick(0.5)"), "(int) 7\n");
+  EXPECT_FALSE(cpp->execute(
+      "int lookup_pick(int); int lookup_pick(double); int broken = ;"));
+  EXPECT_EQ(cpp->evaluate("lookup_pick(1)"), "(int) 42\n");
+  EXPECT_EQ(cpp->evaluate("lookup_pick(0.5)"), "(int) 7\n");
+}
+
+TEST(IncludeRecovery, EarlierClassDefinitionSurvivesRejectedForwardDeclaration) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("struct LookupRecord { int value = 42; };"));
+  EXPECT_FALSE(cpp->execute("struct LookupRecord; int broken = ;"));
+  EXPECT_EQ(cpp->evaluate("LookupRecord{}.value"), "(int) 42\n");
+  EXPECT_FALSE(cpp->execute(
+      "struct LookupRecord; extern int absent; int result = absent;"));
+  EXPECT_EQ(cpp->evaluate("LookupRecord{}.value"), "(int) 42\n");
+}
+
+TEST(IncludeRecovery, DoesNotPublishNamespacesFromRejectedUserCode) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  EXPECT_FALSE(cpp->execute(
+      "namespace Rejected { int leaked = 17; } extern int absent; int result = absent;"));
+  EXPECT_FALSE(cpp->execute(
+      "namespace Rejected { int other = 23; } extern int absent; int result = absent;"));
+  EXPECT_FALSE(cpp->execute("int use = Rejected::leaked;"));
+  ASSERT_TRUE(cpp->execute("namespace Rejected { int leaked = 42; }"));
+  EXPECT_EQ(cpp->evaluate("Rejected::leaked"), "(int) 42\n");
+}
+
 TEST_F(CppInterpreterTest, UndoSurvivesAnonymousNamespace) {
   EXPECT_FALSE(cpp_->execute(
       "namespace { int undo_anon_local = 1; } extern int undo_anon_missing; "
@@ -652,6 +746,33 @@ TEST_F(CppInterpreterTest, AddSourceReportsErrors) {
   const std::string good = dir.write("good.cpp", "struct FromFile { int a; };\n");
   ASSERT_TRUE(cpp_->add_source(good).ok);
   EXPECT_TRUE(has(cpp_->class_names(), "FromFile"));
+}
+
+TEST(IncludeRecovery, FailedAddPreservesEarlierHeaderDeclarations) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  const auto source = std::filesystem::path(__FILE__).parent_path().parent_path() /
+                      "examples/include-recovery/failed.cpp";
+  EXPECT_FALSE(cpp->add_source(source.string()).ok);
+  EXPECT_TRUE(cpp->sources().empty());
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  ASSERT_TRUE(cpp->execute("std::string recovered = \"ss\";"));
+  EXPECT_EQ(cpp->evaluate("int(recovered.size())"), "(int) 2\n");
+}
+
+TEST(IncludeRecovery, FailedAddPreservesNewSystemHeaderNamespaces) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  const auto source = std::filesystem::path(__FILE__).parent_path().parent_path() /
+                      "examples/include-recovery/failed.cpp";
+  EXPECT_FALSE(cpp->add_source(source.string()).ok);
+  EXPECT_TRUE(cpp->sources().empty());
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  ASSERT_TRUE(cpp->execute("std::string recovered = \"ss\";"));
+  EXPECT_EQ(cpp->evaluate("int(recovered.size())"), "(int) 2\n");
 }
 
 TEST_F(CppInterpreterTest, AddSourceWithAnonymousNamespaceCanBeRetriedAfterRollback) {

@@ -232,7 +232,7 @@ struct FunctionHooks::Impl {
     const std::string helper = "__cpp_repl_signature_" + std::to_string(++next_id);
     Signature signature;
     if (!split_signature(text, helper, signature, error)) return nullptr;
-    auto parsed = interp.Parse(signature.declaration);
+    auto parsed = parse_input(interp, signature.declaration);
     if (!parsed) {
       error = llvm::toString(parsed.takeError());
       return nullptr;
@@ -289,7 +289,7 @@ struct FunctionHooks::Impl {
 
   bool compile(const std::string& source, bool instrument_input, FunctionHooks& hooks,
                std::string& error) {
-    auto compiled = interp.Parse(source);
+    auto compiled = parse_input(interp, source);
     if (!compiled) {
       error = llvm::toString(compiled.takeError());
       return false;
@@ -356,7 +356,7 @@ struct FunctionHooks::Impl {
         return false;
       }
     }
-    auto input = interp.Parse(";");
+    auto input = parse_input(interp, ";");
     if (!input) {
       error = llvm::toString(input.takeError());
       return false;
@@ -397,7 +397,7 @@ struct FunctionHooks::Impl {
     }
     auto patch = NativeCallPatch::prepare(caller_address->getValue(), callee_address->getValue(), error);
     if (!patch) return false;
-    auto input = interp.Parse(";");
+    auto input = parse_input(interp, ";");
     if (!input) {
       error = llvm::toString(input.takeError());
       return false;
