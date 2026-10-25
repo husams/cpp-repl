@@ -254,6 +254,9 @@ keep their literal contents; substitutions belong outside those bodies.
   `#include "..."` lines resolve next to it. Each file can be added once. Its
   functions, variables and classes can be used, completed and shown with
   `%class` like typed input. With no argument it lists the added files.
+  Earlier declarations remain available after a failed input; see the
+  [include recovery example](examples/include-recovery/README.md) for the
+  checked reproducer and compiler-state limits.
   At startup, the REPL searches the current directory and its ancestors for
   `compile_commands.json`, also checking `build/` and `build-linux/` at each
   level. The first database found is validated and loaded once using Clang
