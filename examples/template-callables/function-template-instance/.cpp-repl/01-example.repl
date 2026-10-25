@@ -1,7 +1,7 @@
 #include <api.hpp>
 
-template<class T> std::string function_instance_demo::describe(T value) { return "value " + std::to_string(value); }
-template std::string function_instance_demo::describe<int>(int);
+%define std::string function_instance_demo::describe<int>(int value) cpp` return "value " + std::to_string(value); `
+%define std::string function_instance_demo::describe<long>(long value) cpp` return "value " + std::to_string(value); `
 
 function_instance_demo::describe<int>(7)
 std::string name = function_instance_demo::describe<int>(7);

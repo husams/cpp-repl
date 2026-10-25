@@ -1,0 +1,7 @@
+#include <api.hpp>
+%define std::string specialized_method_demo::Person<int>::getName() const cpp` return "specialized int " + std::to_string(value); `
+specialized_method_demo::Person<int> person{7};
+std::string name = person.getName();
+bool matches = name == "specialized int 7";
+matches
+%quit

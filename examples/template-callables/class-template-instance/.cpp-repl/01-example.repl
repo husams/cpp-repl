@@ -1,6 +1,7 @@
 #include <api.hpp>
 
-template<class T> std::string class_instance_demo::Person<T>::getName() const { return "Person " + std::to_string(value); }
+%define std::string class_instance_demo::Person<int>::getName() const cpp` return "Person " + std::to_string(value); `
+%define std::string class_instance_demo::Person<long>::getName() const cpp` return "Person " + std::to_string(value); `
 
 class_instance_demo::Person<int> person{7};
 class_instance_demo::Person<long> other{9};

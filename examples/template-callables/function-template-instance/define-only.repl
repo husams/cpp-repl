@@ -1,0 +1,6 @@
+#include <api.hpp>
+%define std::string function_instance_demo::describe<int>(int value) cpp` return "value " + std::to_string(value); `
+std::string name = function_instance_demo::describe<int>(7);
+bool matches = name == "value 7";
+matches
+%quit

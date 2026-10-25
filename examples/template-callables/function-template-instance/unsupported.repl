@@ -1,3 +1,0 @@
-#include <api.hpp>
-%define std::string function_instance_demo::describe<int>(int value) cpp` return "Sample"; `
-%quit

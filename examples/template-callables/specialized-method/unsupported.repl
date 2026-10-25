@@ -1,3 +1,0 @@
-#include <api.hpp>
-%define std::string specialized_method_demo::Person<int>::getName() const cpp` return "Sample"; `
-%quit

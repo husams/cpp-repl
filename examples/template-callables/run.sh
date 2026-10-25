@@ -26,7 +26,7 @@ if [[ "${2:-}" == "--probe-define" ]]; then
   scratch="$(mktemp -d "${TMPDIR:-/tmp}/cpp-repl-template-probe.XXXXXX")"
   trap 'rm -rf "$scratch"' EXIT
   cd "$scratch"
-  "$repl" -fvisibility=hidden -I "$case_dir/include" < "$case_dir/unsupported.repl"
+  "$repl" -fvisibility=hidden -I "$case_dir/include" < "$case_dir/define-only.repl"
 else
   cd "$case_dir"
   exec "$repl" -fvisibility=hidden -I "$case_dir/include"
