@@ -17,6 +17,7 @@
 #include "clang/Interpreter/Interpreter.h"
 #include "clang/Interpreter/PartialTranslationUnit.h"
 #include "cpp_lexer.hpp"
+#include "interpreter_undo.hpp"
 #include "native_call_patch.hpp"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/IRBuilder.h"
@@ -270,7 +271,7 @@ struct FunctionHooks::Impl {
           error = "parameter names self, result and __cpp_repl_* are reserved in hooks";
         names->push_back(std::move(name));
       }
-    if (auto undo = interp.Undo()) error = llvm::toString(std::move(undo));
+    if (auto undo = undo_input(interp, parsed->TUPart)) error = llvm::toString(std::move(undo));
     if (error.empty() && !selected) error = "no function matches '" + text + "'";
     return error.empty() ? selected : nullptr;
   }
@@ -290,7 +291,7 @@ struct FunctionHooks::Impl {
     const auto added = instrument_input ? hooks.instrument(compiled) : HookInstrumentation{};
     auto fail = [&] {
       hooks.discard(added);
-      if (llvm::Error undo = interp.Undo()) llvm::consumeError(std::move(undo));
+      if (llvm::Error undo = undo_input(interp, compiled.TUPart)) llvm::consumeError(std::move(undo));
       return false;
     };
     // Check before Execute: failed ORC initializers otherwise poison later inputs.
@@ -363,7 +364,7 @@ struct FunctionHooks::Impl {
     input->TheModule = release_module(*generator);
     if (!input->TheModule) {
       error = "failed to emit function for hook routing";
-      if (auto undo = interp.Undo()) llvm::consumeError(std::move(undo));
+      if (auto undo = undo_input(interp, input->TUPart)) llvm::consumeError(std::move(undo));
       return false;
     }
     return execute(*input, true, hooks, error);
@@ -400,7 +401,7 @@ struct FunctionHooks::Impl {
     auto* original = input->TheModule ? input->TheModule->getFunction(callee_symbol) : nullptr;
     if (!original) {
       error = "cannot emit the native target's ABI declaration";
-      if (auto undo = interp.Undo()) llvm::consumeError(std::move(undo));
+      if (auto undo = undo_input(interp, input->TUPart)) llvm::consumeError(std::move(undo));
       return false;
     }
     target = Target{"__cpp_repl_native_slot_" + id, callee_symbol, {},

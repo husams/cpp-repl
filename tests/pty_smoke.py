@@ -251,6 +251,21 @@ def main():
         check("%add lists the added files", "geometry.cpp" in plain(out["list"]))
         check("%quit exits with status 0 after %add", status == 0)
 
+        undo_example = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "..", "examples", "undo-crash", "anonymous.cpp")
+        out, status = session(binary, cwd, [
+            ("add", ('%add "' + undo_example + '"\r').encode(), True),
+            ("redefine", b"int undo_result = 7; int undo_local = 2;\r", True),
+            ("result", b"undo_result + undo_local\r", True),
+            ("quit", b"%quit\r"),
+        ])
+        check("%add reports an undefined symbol in an anonymous namespace",
+            "error: undefined symbol: undo_missing" in plain(out["add"]))
+        check("%add rollback returns a live prompt", PROMPT in out["add"])
+        check("rejected declarations can be reused after %add rollback",
+            "error:" not in plain(out["redefine"]) and "(int) 9" in plain(out["result"]))
+        check("%quit exits after the former rollback crash", status == 0)
+
         for name, function in (("option file.cpp", "terminal_file_flag"),
                                ("other option.cpp", "terminal_other_flag")):
             with open(os.path.join(cwd, name), "w", encoding="utf8") as f:
