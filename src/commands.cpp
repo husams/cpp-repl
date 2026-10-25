@@ -286,6 +286,7 @@ const std::vector<CommandInfo>& command_table() {
       {"%libs", CommandKind::Libs, " [all] [regex]",
        "list loaded library names (all includes system libraries)"},
       {"%libinfo", CommandKind::LibInfo, " <library>", "show library path, versions, ABI requirements and dependencies"},
+      {"%paths", CommandKind::Paths, "", "show library search paths and loader settings"},
       {"%add-path", CommandKind::AddPath, " <path[:path...]>",
        "add library search directories, separated by ':'"},
       {"%add", CommandKind::Add, " [path ...]",
@@ -386,6 +387,7 @@ ParsedCommand parse_command(std::string_view text) {
       break;
     }
     case CommandKind::Hooks:
+    case CommandKind::Paths:
     case CommandKind::Help:
     case CommandKind::Quit:
       if (cmd.arg_begin < text.size()) {
@@ -445,6 +447,9 @@ bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out)
         const auto r = libs.add_path(p.value);
         out << (r.ok ? "" : "error: ") << r.message << '\n';
       }
+      break;
+    case CommandKind::Paths:
+      out << color_inspection(libs.describe_search_paths(), inspection_colors_enabled());
       break;
     case CommandKind::Lib:
       if (cmd.paths.empty()) {

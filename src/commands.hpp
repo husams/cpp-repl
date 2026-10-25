@@ -17,6 +17,7 @@ namespace example {
 //   command   := lib | libs | libinfo | add-path | add | class | info | symbols | hook | hooks | restore | help | quit
 //   lib       := "%lib" { path }                 zero or more paths
 //   libs      := "%libs" [ "all" ] [ regex ]     loaded library names only
+//   paths     := "%paths"                       current library search paths
 //   libinfo   := "%libinfo" library               name, path or regex
 //   add-path  := "%add-path" path { ":" path }   blanks around ':' allowed
 //   add       := "%add" { path }                 zero or more source files
@@ -31,7 +32,7 @@ namespace example {
 //   path      := '"' { any char but '"' } '"'    quoted, may contain blanks
 //              | word                            no blanks (and no ':' in
 //                                                %add-path)
-enum class CommandKind { Cpp, Lib, Libs, LibInfo, AddPath, Add, Class, Info, Symbols, Mock, Pre, Post, Restore, Hooks, Help, Quit, Unknown };
+enum class CommandKind { Cpp, Lib, Libs, LibInfo, Paths, AddPath, Add, Class, Info, Symbols, Mock, Pre, Post, Restore, Hooks, Help, Quit, Unknown };
 
 struct CommandInfo {
   const char* name;  // including the leading '%'

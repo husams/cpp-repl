@@ -168,7 +168,7 @@ def main():
             ],
         )
         help_text = plain(out["help"])
-        check("%help lists the sixteen commands", all(c in help_text for c in ("%lib", "%libs", "%libinfo", "%syminfo", "%add-path", "%add", "%class", "%info", "%symbols", "%mock", "%pre", "%post", "%restore", "%hooks", "%help", "%quit")))
+        check("%help lists the seventeen commands", all(c in help_text for c in ("%lib", "%libs", "%libinfo", "%syminfo", "%paths", "%add-path", "%add", "%class", "%info", "%symbols", "%mock", "%pre", "%post", "%restore", "%hooks", "%help", "%quit")))
         check("%add-path rejects a missing dir", "error:" in plain(out["bad_path"]))
         check("%add-path accepts an existing dir", "error:" not in plain(out["good_path"]))
         path_list = plain(out["path_list"])
@@ -333,6 +333,8 @@ def main():
             ("libraries", b"%libs all '^libz[.]'\r", True),
             ("libraries_all", b"%libs all\r", True),
             ("libraries_invalid", b"%libs all '['\r", True),
+            ("paths_tab", b"%pat\t"),
+            ("paths", b"\r", True),
             ("library_info", b"%libinfo '^libz[.]'\r", True),
             ("symbol_info", b"%syminfo 'symbol_total'\r", True),
             ("still_runs", b"symbol_total(2, 3)\r", True),
@@ -372,6 +374,9 @@ def main():
             "libz." in plain(out["libraries_all"]))
         check("libs all validates its regex",
             "invalid library regex" in plain(out["libraries_invalid"]))
+        check("paths completes and reports loader settings",
+            "%paths" in plain(out["paths_tab"]) and all(text in plain(out["paths"]) for text in
+                ("Library search paths:", "Added", "Dependency fallback", "Native loader")))
         details = plain(out["library_info"])
         check("libinfo shows a path and version", all(text in details for text in ("Library:", "Path", "Version")))
         check("syminfo shows definition and resolution state", all(text in plain(out["symbol_info"]) for text in ("Defined", "Resolved", "Source refs")))

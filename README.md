@@ -94,6 +94,10 @@ then compiled and run by the interpreter.
   `%add-path` dir is tried, then the system lookup, as `<name>`,
   `lib<name>.dylib` and `lib<name>.so` (e.g. `%lib z c++`). No argument lists
   the loaded libraries.
+  The native loader is tried first. If dependencies are missing, LLVM reads
+  their names and the REPL tries the requesting library's directory, then
+  `%add-path` directories, recursively. This supports sibling and nested
+  dependencies without changing the library files or rebuilding them.
 - `%add-path <path[:path...]>` - add one or more library search directories,
   separated by `:` (each must exist), e.g. `%add-path /opt/lib:~/lib`.
 - `%add [path ...]` - parse and run C++ source files in the session, as if
@@ -125,6 +129,11 @@ then compiled and run by the interpreter.
   filters names, including after `all` (for example `%libs all '^libc[.]'`).
   Quote `'all'` to use that word as a regex instead of an option. Bare `%lib` lists only
   libraries explicitly loaded with `%lib`, also as names only.
+- `%paths` - show added library directories in search order, executable and loaded
+  library RPATH/RUNPATH entries, loader environment variables and dependency
+  fallback rules. Output is aligned and colored in terminals. OS loader caches
+  and system defaults remain loader-managed; environment values shown are the
+  current process values, which the native loader may have cached at startup.
 - `%libinfo <library>` - show a loaded library's full path, recorded version,
   base address, architecture, dependencies and ABI metadata. Accepts a name,
   full path or regex. Linux shows the running glibc version and recorded
@@ -160,6 +169,7 @@ Grammar (see `src/commands.hpp`):
 ```
 lib       := "%lib" { path }
 libs      := "%libs" [ "all" ] [ regex ]
+paths     := "%paths"
 libinfo   := "%libinfo" library
 add       := "%add" { path }
 class     := "%class" [ name ]                  name := ident { "::" ident }
@@ -187,6 +197,7 @@ For example, after loading the points example library:
 %libs libpoints
 %libs all
 %libs all 'libc[.]|libSystem'
+%paths
 %libinfo libpoints
 %syminfo 'Point::inc(int)'
 ```

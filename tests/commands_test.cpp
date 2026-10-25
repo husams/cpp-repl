@@ -383,7 +383,29 @@ TEST(Dispatch, QuitStopsAndHelpListsCommands) {
   for (const std::string& name : command_names()) {
     EXPECT_NE(out.str().find(name), std::string::npos) << name;
   }
-  EXPECT_EQ(command_names().size(), 16u);
+  EXPECT_EQ(command_names().size(), 17u);
+}
+
+TEST(Dispatch, PathsShowsConfiguredDirectoriesAndLoaderSettings) {
+  LibraryManager libraries;
+  EXPECT_EQ(parse_command("%paths").kind, CommandKind::Paths);
+  EXPECT_TRUE(parse_command("%paths").error.empty());
+  EXPECT_FALSE(parse_command("%paths extra").error.empty());
+  EXPECT_FALSE(wants_more_input("%paths ("));
+  const auto directory = std::filesystem::canonical(std::filesystem::temp_directory_path()).string();
+  ASSERT_TRUE(libraries.add_path(directory).ok);
+  std::ostringstream output;
+  EXPECT_TRUE(dispatch(parse_command("%paths"), libraries, output));
+  EXPECT_EQ(output.str().find("Library search paths:\n"), 0u);
+  EXPECT_NE(output.str().find(directory), std::string::npos);
+  EXPECT_NE(output.str().find("Dependency fallback"), std::string::npos);
+  EXPECT_NE(output.str().find("Native loader"), std::string::npos);
+#ifdef __APPLE__
+  EXPECT_NE(output.str().find("DYLD_LIBRARY_PATH"), std::string::npos);
+#else
+  EXPECT_NE(output.str().find("LD_LIBRARY_PATH"), std::string::npos);
+#endif
+  EXPECT_EQ(libraries.search_paths(), std::vector<std::string>{directory});
 }
 
 TEST(Dispatch, UnknownCommandSuggestsHelp) {

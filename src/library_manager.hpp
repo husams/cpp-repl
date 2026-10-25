@@ -48,10 +48,12 @@ class LibraryManager {
 
   const std::vector<std::string>& search_paths() const { return paths_; }
   const std::vector<Loaded>& loaded() const { return loaded_; }
+  std::string describe_search_paths() const;
 
  private:
   std::vector<std::string> paths_;
   std::vector<Loaded> loaded_;
+  std::vector<void*> dependency_handles_;
   LoadHook hook_;
 };
 

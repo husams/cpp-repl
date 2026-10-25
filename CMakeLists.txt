@@ -46,9 +46,10 @@ set(CMAKE_INSTALL_RPATH "${LLVM_LIBRARY_DIR}")
 
 add_library(example_core STATIC
   src/commands.cpp src/cpp_lexer.cpp src/highlight_cpp.cpp
-  src/highlight_repl.cpp src/library_manager.cpp src/inspection_output.cpp)
+  src/highlight_repl.cpp src/library_manager.cpp src/library_dependencies.cpp src/inspection_output.cpp)
 target_include_directories(example_core PUBLIC src)
-target_link_libraries(example_core PUBLIC replxx ${CMAKE_DL_LIBS})
+target_include_directories(example_core SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+target_link_libraries(example_core PUBLIC replxx ${CMAKE_DL_LIBS} PRIVATE LLVM)
 target_compile_options(example_core PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(cpp_interp STATIC src/cpp_interpreter.cpp src/cpp_inspect.cpp src/cpp_symbols.cpp src/function_hooks.cpp src/loaded_symbols.cpp src/runtime_inspection.cpp)
@@ -122,6 +123,41 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
   target_link_libraries(commands_test PRIVATE example_core GTest::gtest_main)
   target_compile_options(commands_test PRIVATE -Wall -Wextra -Wpedantic)
   gtest_discover_tests(commands_test)
+
+  # These libraries deliberately have no rpath: dependencies must be found by
+  # the REPL rather than by CMake's usual build-directory rpath.
+  foreach(fixture direct_dependency direct_root nested_leaf nested_middle nested_root retry_dependency retry_root)
+    add_library(ctk_${fixture} SHARED tests/fixtures/dependencies/${fixture}.cpp)
+    set_target_properties(ctk_${fixture} PROPERTIES
+      SOVERSION 1 SKIP_BUILD_RPATH TRUE INSTALL_RPATH ""
+      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/dependency-fixtures/${fixture}")
+    if(APPLE)
+      set_target_properties(ctk_${fixture} PROPERTIES
+        MACOSX_RPATH TRUE INSTALL_NAME_DIR "@rpath" BUILD_WITH_INSTALL_NAME_DIR TRUE)
+    endif()
+  endforeach()
+  # Direct and nested fixtures share their root's directory.
+  foreach(fixture direct_dependency direct_root)
+    set_target_properties(ctk_${fixture} PROPERTIES
+      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/dependency-fixtures/direct")
+  endforeach()
+  foreach(fixture nested_leaf nested_middle nested_root)
+    set_target_properties(ctk_${fixture} PROPERTIES
+      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/dependency-fixtures/nested")
+  endforeach()
+  target_link_libraries(ctk_direct_root PRIVATE ctk_direct_dependency)
+  target_link_libraries(ctk_nested_middle PRIVATE ctk_nested_leaf)
+  target_link_libraries(ctk_nested_root PRIVATE ctk_nested_middle)
+  target_link_libraries(ctk_retry_root PRIVATE ctk_retry_dependency)
+  add_executable(library_dependency_test tests/library_dependency_test.cpp)
+  target_link_libraries(library_dependency_test PRIVATE example_core GTest::gtest_main)
+  target_compile_definitions(library_dependency_test PRIVATE
+    DIRECT_ROOT_LIBRARY="$<TARGET_FILE:ctk_direct_root>"
+    NESTED_ROOT_LIBRARY="$<TARGET_FILE:ctk_nested_root>"
+    RETRY_ROOT_LIBRARY="$<TARGET_FILE:ctk_retry_root>"
+    RETRY_DEPENDENCY_DIRECTORY="$<TARGET_FILE_DIR:ctk_retry_dependency>")
+  add_dependencies(library_dependency_test ctk_direct_root ctk_nested_root ctk_retry_root)
+  gtest_discover_tests(library_dependency_test)
 
   add_executable(cpp_interpreter_test tests/cpp_interpreter_test.cpp)
   add_library(hook_test_library SHARED tests/fixtures/hook_library.cpp)
