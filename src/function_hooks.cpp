@@ -17,6 +17,7 @@
 #include "clang/Interpreter/Interpreter.h"
 #include "clang/Interpreter/PartialTranslationUnit.h"
 #include "cpp_lexer.hpp"
+#include "interpreter_symbols.hpp"
 #include "definition_shadowing.hpp"
 #include "interpreter_undo.hpp"
 #include "native_call_patch.hpp"
@@ -209,7 +210,8 @@ bool split_signature(const std::string& text, const std::string& helper, Signatu
 }  // namespace
 
 struct FunctionHooks::Impl {
-  explicit Impl(clang::Interpreter& interpreter) : interp(interpreter) {}
+  Impl(clang::Interpreter& interpreter, llvm::orc::LLJIT& engine)
+      : interp(interpreter), jit(engine) {}
   struct Body {
     std::string text;
     std::vector<std::string> names;
@@ -224,6 +226,7 @@ struct FunctionHooks::Impl {
     std::shared_ptr<NativeCallPatch> native = nullptr;
   };
   clang::Interpreter& interp;
+  llvm::orc::LLJIT& jit;
   std::map<std::string, Target> targets;
   std::map<std::pair<std::string, std::string>, Target> calls;
   unsigned next_id = 0;
@@ -314,7 +317,7 @@ struct FunctionHooks::Impl {
           return true;
         if (const auto* function = llvm::dyn_cast<llvm::Function>(&value))
           if (function->isIntrinsic()) return true;
-        auto address = interp.getSymbolAddress(value.getName());
+        auto address = lookup_symbol(jit, value.getName());
         if (address) return true;
         llvm::consumeError(address.takeError());
         error = "undefined symbol in hook: " + value.getName().str();
@@ -344,7 +347,7 @@ struct FunctionHooks::Impl {
     bool native_definition = false;
 #ifdef CPP_REPL_NATIVE_CALL_PATCHES
     if (function.getDefinition()) {
-      auto address = interp.getSymbolAddress(symbol_name(context, function));
+      auto address = lookup_symbol(jit, symbol_name(context, function));
       if (address) native_definition = NativeCallPatch::is_native_address(address->getValue());
       else llvm::consumeError(address.takeError());
     }
@@ -352,7 +355,7 @@ struct FunctionHooks::Impl {
     if (!function.getDefinition()) {
       // Loaded-library symbols have no AST body to emit. Resolve their native
       // address directly through ORC, without a C++ member-access expression.
-      auto address = interp.getSymbolAddress(symbol_name(context, function));
+      auto address = lookup_symbol(jit, symbol_name(context, function));
       if (!address) {
         error = "cannot resolve external function: " + llvm::toString(address.takeError());
         return false;
@@ -387,12 +390,12 @@ struct FunctionHooks::Impl {
                    FunctionHooks& hooks, Target& target, std::string& error) {
     auto& context = interp.getASTContext();
     const auto callee_symbol = symbol_name(context, callee);
-    auto caller_address = interp.getSymbolAddress(symbol_name(context, caller));
+    auto caller_address = lookup_symbol(jit, symbol_name(context, caller));
     if (!caller_address) {
       error = llvm::toString(caller_address.takeError());
       return false;
     }
-    auto callee_address = interp.getSymbolAddress(callee_symbol);
+    auto callee_address = lookup_symbol(jit, callee_symbol);
     if (!callee_address) {
       error = llvm::toString(callee_address.takeError());
       return false;
@@ -431,7 +434,7 @@ struct FunctionHooks::Impl {
     std::vector<std::pair<NativeCallPatch*, std::uintptr_t>> native;
     for (auto& entry : selected) {
       if (!entry.first->native || !entry.first->native->active()) continue;
-      auto address = interp.getSymbolAddress(entry.first->entry);
+      auto address = lookup_symbol(jit, entry.first->entry);
       if (!address) {
         error = llvm::toString(address.takeError());
         return false;
@@ -457,8 +460,8 @@ struct FunctionHooks::Impl {
   }
 };
 
-FunctionHooks::FunctionHooks(clang::Interpreter& interpreter)
-    : impl_(std::make_unique<Impl>(interpreter)) {}
+FunctionHooks::FunctionHooks(clang::Interpreter& interpreter, llvm::orc::LLJIT& jit)
+    : impl_(std::make_unique<Impl>(interpreter, jit)) {}
 FunctionHooks::~FunctionHooks() = default;
 
 std::optional<CallableDefinition> FunctionHooks::definition(const std::string& signature,
@@ -591,7 +594,7 @@ HookInstrumentation FunctionHooks::instrument(clang::PartialTranslationUnit& inp
       continue;
 #else
       if (found != impl_->targets.end() && found->second.entry.empty()) continue;
-      auto address = impl_->interp.getSymbolAddress(name);
+      auto address = lookup_symbol(impl_->jit, name);
       if (!address) {
         llvm::consumeError(address.takeError());
         continue;
@@ -722,7 +725,7 @@ bool FunctionHooks::restore(const std::string& signature, std::string& error,
                         [](const Impl::Body& body) { return body.text.empty(); }) &&
             (!target.native || !target.native->active()))
           continue;
-        auto address = impl_->interp.getSymbolAddress(target.slot);
+        auto address = lookup_symbol(impl_->jit, target.slot);
         if (!address) {
           error = llvm::toString(address.takeError());
           return false;
@@ -741,6 +744,7 @@ bool FunctionHooks::update(std::optional<HookKind> kind, const std::string& sign
                            const std::string& body, std::string& error,
                            const std::string& caller_text) {
   auto& interp = impl_->interp;
+  auto& jit = impl_->jit;
   auto& context = interp.getASTContext();
   const std::string id = std::to_string(++impl_->next_id);
   std::vector<std::string> names;
@@ -760,7 +764,7 @@ bool FunctionHooks::update(std::optional<HookKind> kind, const std::string& sign
   if (!kind && !caller) {
     std::vector<std::pair<Impl::Target*, std::uintptr_t*>> clear;
     auto add = [&](Impl::Target& target) {
-      auto address = interp.getSymbolAddress(target.slot);
+      auto address = lookup_symbol(jit, target.slot);
       if (!address) {
         error = llvm::toString(address.takeError());
         return false;
@@ -788,7 +792,7 @@ bool FunctionHooks::update(std::optional<HookKind> kind, const std::string& sign
 #ifdef CPP_REPL_NATIVE_CALL_PATCHES
       const auto routed = impl_->targets.find(key.first);
       if (!native_caller && (routed == impl_->targets.end() || !routed->second.entry.empty())) {
-        auto address = interp.getSymbolAddress(key.first);
+        auto address = lookup_symbol(jit, key.first);
         if (address) native_caller = NativeCallPatch::is_native_address(address->getValue());
         else llvm::consumeError(address.takeError());
       }
@@ -822,7 +826,7 @@ bool FunctionHooks::update(std::optional<HookKind> kind, const std::string& sign
                                                    caller_text};
   else
     target.bodies = {};
-  auto slot_address = interp.getSymbolAddress(target.slot);
+  auto slot_address = lookup_symbol(jit, target.slot);
   if (!slot_address) {
     error = llvm::toString(slot_address.takeError());
     return false;
@@ -834,7 +838,7 @@ bool FunctionHooks::update(std::optional<HookKind> kind, const std::string& sign
     *destination = std::move(target);
     return true;
   }
-  auto original = interp.getSymbolAddress(target.original);
+  auto original = lookup_symbol(jit, target.original);
   if (!original) {
     error = llvm::toString(original.takeError());
     return false;
@@ -904,13 +908,13 @@ bool FunctionHooks::update(std::optional<HookKind> kind, const std::string& sign
   if (!is_void) source += "return static_cast<" + result_type + "&&>(result);\n";
   source += "}\n#pragma clang diagnostic pop\n";
   if (!impl_->compile(source, false, *this, error)) return false;
-  auto replacement = interp.getSymbolAddress(wrapper);
+  auto replacement = lookup_symbol(jit, wrapper);
   if (!replacement) {
     error = llvm::toString(replacement.takeError());
     return false;
   }
   if (target.native && !target.native->active()) {
-    auto entry = interp.getSymbolAddress(target.entry);
+    auto entry = lookup_symbol(jit, target.entry);
     if (!entry) {
       error = llvm::toString(entry.takeError());
       return false;

@@ -78,7 +78,7 @@ if(REPLXX_NATIVE_PLATFORM_SUPPORTED)
   endif()
 endif()
 target_sources(cpp_interp PRIVATE ${REPLXX_NATIVE_SOURCE}
-  src/definition_shadowing.cpp src/source_reload.cpp)
+  src/definition_shadowing.cpp src/source_reload.cpp src/interpreter_symbols.cpp)
 target_include_directories(cpp_interp PUBLIC src)
 target_include_directories(cpp_interp SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
 separate_arguments(CPP_REPL_LLVM_DEFINITIONS NATIVE_COMMAND "${LLVM_DEFINITIONS}")

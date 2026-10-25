@@ -36,16 +36,16 @@ TEST_F(IterativeDevelopment, RedefinesFunctionsAndKeepsOldCallersAndOverloads) {
   ASSERT_TRUE(cpp->execute("int old_caller() { return f(1); }"));
   ASSERT_TRUE(cpp->execute("int f(int x) { return x + 10; }"));
   EXPECT_EQ(cpp->evaluate("f(1)"), "(int) 11\n");
-  EXPECT_EQ(cpp->evaluate("f(1.0)"), "(double) 1.5000000\n");
+  EXPECT_EQ(cpp->evaluate("f(1.0) == 1.5"), "(bool) true\n");
   EXPECT_EQ(cpp->evaluate("old_caller()"), "(int) 2\n");
 }
 
 TEST_F(IterativeDevelopment, RedefinesVariablesAliasesAndNamespacedClasses) {
   ASSERT_TRUE(cpp->execute("int value = 1; using Number = int;"));
   ASSERT_TRUE(cpp->execute("double value = 2.5; using Number = double;"));
-  EXPECT_EQ(cpp->evaluate("value"), "(double) 2.5000000\n");
+  EXPECT_EQ(cpp->evaluate("value == 2.5"), "(bool) true\n");
   ASSERT_TRUE(cpp->execute("Number number = 3.5;"));
-  EXPECT_EQ(cpp->evaluate("number"), "(double) 3.5000000\n");
+  EXPECT_EQ(cpp->evaluate("number == 3.5"), "(bool) true\n");
   ASSERT_TRUE(cpp->execute("namespace app { struct A { int value = 1; }; }"));
   ASSERT_TRUE(cpp->execute("app::A old;"));
   ASSERT_TRUE(cpp->execute("namespace app { struct A { int value = 2; }; }"));

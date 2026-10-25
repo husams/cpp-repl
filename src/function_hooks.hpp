@@ -11,6 +11,10 @@ class Interpreter;
 struct PartialTranslationUnit;
 }  // namespace clang
 
+namespace llvm::orc {
+class LLJIT;
+}
+
 namespace example {
 
 enum class HookKind { Mock, Pre, Post };
@@ -42,7 +46,7 @@ struct CallableDefinition {
 // compilation, so earlier JIT callers and pointers observe later hook changes.
 class FunctionHooks {
  public:
-  explicit FunctionHooks(clang::Interpreter& interpreter);
+  FunctionHooks(clang::Interpreter& interpreter, llvm::orc::LLJIT& jit);
   ~FunctionHooks();
   HookInstrumentation instrument(clang::PartialTranslationUnit& input);
   void discard(const HookInstrumentation& added);

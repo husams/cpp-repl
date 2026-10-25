@@ -24,6 +24,7 @@
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclBase.h"
 #include "clang/Basic/Diagnostic.h"
+#include "clang/Basic/TargetOptions.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Interpreter/CodeCompletion.h"
 #include "clang/Interpreter/Interpreter.h"
@@ -34,10 +35,15 @@
 #include "cpp_symbols.hpp"
 #include "definition_shadowing.hpp"
 #include "interpreter_undo.hpp"
+#include "interpreter_symbols.hpp"
 #include "library_manager.hpp"
 #include "llvm/Config/llvm-config.h"
+#if LLVM_VERSION_MAJOR >= 22
+#include "clang/Interpreter/IncrementalExecutor.h"
+#endif
 #include "llvm/Demangle/Demangle.h"
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
+#include "llvm/ExecutionEngine/Orc/Debugging/DebuggerSupport.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
@@ -47,6 +53,7 @@
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Host.h"
 #include "loaded_symbols.hpp"
 #include "native_symbol_exports.hpp"
 #include "project_compilation_database.hpp"
@@ -250,7 +257,7 @@ bool value_pending(const clang::PartialTranslationUnit& ptu) {
 
 // The external symbols `module` refers to that the JIT cannot resolve (from
 // earlier inputs, loaded libraries or the process), demangled.
-std::vector<std::string> missing_symbols(const clang::Interpreter& interp,
+std::vector<std::string> missing_symbols(llvm::orc::LLJIT& jit,
                                          const llvm::Module& module) {
   std::vector<std::string> missing;
   auto check = [&](const llvm::GlobalValue& gv) {
@@ -258,7 +265,7 @@ std::vector<std::string> missing_symbols(const clang::Interpreter& interp,
     if (const auto* f = llvm::dyn_cast<llvm::Function>(&gv); f != nullptr && f->isIntrinsic()) {
       return;
     }
-    llvm::Expected<llvm::orc::ExecutorAddr> addr = interp.getSymbolAddress(gv.getName());
+    auto addr = lookup_symbol(jit, gv.getName());
     if (addr) return;
     llvm::consumeError(addr.takeError());
     missing.push_back(llvm::demangle(gv.getName()));
@@ -271,10 +278,11 @@ std::vector<std::string> missing_symbols(const clang::Interpreter& interp,
 }  // namespace
 
 CppInterpreter::CppInterpreter(std::unique_ptr<clang::Interpreter> interp,
+                               llvm::orc::LLJIT& jit,
                                std::vector<std::string> args,
                                std::unique_ptr<ProjectCompilationDatabase> database)
     : native_exports_(std::make_unique<NativeSymbolExports>()),
-      interp_(std::move(interp)), hooks_(*interp_), args_(std::move(args)),
+      interp_(std::move(interp)), jit_(jit), hooks_(*interp_, jit_), args_(std::move(args)),
       database_(std::move(database)) {
   source_reload_ = std::make_unique<SourceReload>(*interp_->getCompilerInstance());
 }
@@ -309,13 +317,59 @@ std::unique_ptr<CppInterpreter> CppInterpreter::create(
     error = llvm::toString(ci.takeError());
     return nullptr;
   }
-  auto interp = clang::Interpreter::create(std::move(*ci));
+  // Retain access to the JIT for hidden-symbol lookups. LLVM 22's executor
+  // interface no longer exposes it. Keep Clang's native target/debugger setup.
+  const llvm::Triple triple((*ci)->getTargetOpts().Triple);
+  llvm::Expected<llvm::orc::JITTargetMachineBuilder> target =
+      triple == llvm::Triple(llvm::sys::getProcessTriple())
+          ? llvm::orc::JITTargetMachineBuilder::detectHost()
+          : llvm::orc::JITTargetMachineBuilder(triple);
+  if (!target) {
+    error = llvm::toString(target.takeError());
+    return nullptr;
+  }
+  auto builder = std::make_unique<llvm::orc::LLJITBuilder>();
+  builder->setJITTargetMachineBuilder(std::move(*target));
+  builder->setPrePlatformSetup([](llvm::orc::LLJIT& jit) {
+    llvm::consumeError(llvm::orc::enableDebuggerSupport(jit));
+    return llvm::Error::success();
+  });
+  // The builder retains the callback: do not capture a stack reference.
+  auto jit = std::make_shared<llvm::orc::LLJIT*>(nullptr);
+  builder->setNotifyCreatedCallback([jit](llvm::orc::LLJIT& created) {
+    *jit = &created;
+    return llvm::Error::success();
+  });
+#if LLVM_VERSION_MAJOR >= 22
+  auto executor = std::make_unique<clang::IncrementalExecutorBuilder>();
+  executor->JITBuilder = std::move(builder);
+  auto interp = clang::Interpreter::create(std::move(*ci), std::move(executor));
+#else
+  auto interp = clang::Interpreter::create(std::move(*ci), std::move(builder));
+#endif
   if (!interp) {
     error = llvm::toString(interp.takeError());
     return nullptr;
   }
+  // Ensure the callback has run before borrowing the executor's JIT.
+  auto engine = (*interp)->getExecutionEngine();
+  if (!engine) {
+    error = llvm::toString(engine.takeError());
+    return nullptr;
+  }
+#if LLVM_VERSION_MAJOR == 21
+  // Clang 21 parses its runtime PTU without executing it. Emit the missing
+  // value-capture tag with Clang's own type and linker name in this JIT.
+  const std::string runtime_tag =
+      "__clang_Interpreter_NewTag __cpp_repl_runtime_newtag asm(\"" +
+      (*jit)->mangle("__ci_newtag") + "\");";
+  if (auto runtime = (*interp)->ParseAndExecute(runtime_tag)) {
+    error = llvm::toString(std::move(runtime));
+    return nullptr;
+  }
+#endif
   return std::unique_ptr<CppInterpreter>(
-      new CppInterpreter(std::move(*interp), *flags, std::move(database)));
+      new CppInterpreter(std::move(*interp), **jit, *flags, std::move(database)));
 }
 
 // ParseAndExecute(), split up so a failed Execute can be undone.
@@ -347,7 +401,11 @@ bool CppInterpreter::run_raw(const std::string& code, clang::Value& value,
   }
   DefinitionTransaction definitions(*interp_->getCompilerInstance());
   bool source_committed = false;
+#if LLVM_VERSION_MAJOR >= 22
   auto source_scope = llvm::scope_exit([&] { source_reload_->finish(source_committed); });
+#else
+  auto source_scope = llvm::make_scope_exit([&] { source_reload_->finish(source_committed); });
+#endif
   std::string source_error;
   if (!source_reload_->begin(source_input_, reloading_source_, source_error)) {
     llvm::errs() << "error: " << source_error << '\n';
@@ -378,7 +436,7 @@ bool CppInterpreter::run_raw(const std::string& code, clang::Value& value,
     // failed module's initializer on every later input (its platform does not
     // forget initializers of removed modules), so check before executing.
     const std::vector<std::string> missing =
-        missing_symbols(*interp_, *ptu->TheModule);
+        missing_symbols(jit_, *ptu->TheModule);
     if (!missing.empty()) {
       hooks_.discard(instrumented);
       std::string list;
@@ -458,7 +516,7 @@ bool CppInterpreter::define_callable(const std::string& signature, const std::st
   if (!callable) {
     return false;
   }
-  auto address = interp_->getSymbolAddress(callable->mangled);
+  auto address = lookup_symbol(jit_, callable->mangled);
   if (address && address->getValue()) {
     error = "function already resolves to an existing implementation: " + signature;
     return false;
@@ -480,7 +538,7 @@ bool CppInterpreter::define_callable(const std::string& signature, const std::st
   exports.insert(exports.begin(), callable->mangled);
   std::vector<std::pair<std::string, std::uintptr_t>> addresses;
   for (const auto& symbol : exports) {
-    auto implementation = interp_->getSymbolAddress(symbol);
+    auto implementation = lookup_symbol(jit_, symbol);
     if (!implementation || !implementation->getValue()) {
       if (!implementation) {
         llvm::consumeError(implementation.takeError());
@@ -516,7 +574,7 @@ bool CppInterpreter::define_variable(const std::string& name,
     error = "native publication of thread-local storage is not supported: " + name;
     return false;
   }
-  auto address = interp_->getSymbolAddress(variable->mangled);
+  auto address = lookup_symbol(jit_, variable->mangled);
   if (address && address->getValue()) {
     error = "variable already resolves to existing storage: " + name;
     return false;
@@ -531,7 +589,7 @@ bool CppInterpreter::define_variable(const std::string& name,
     error = "could not define variable: " + name;
     return false;
   }
-  auto storage = interp_->getSymbolAddress(variable->mangled);
+  auto storage = lookup_symbol(jit_, variable->mangled);
   if (!storage || !storage->getValue()) {
     if (!storage) llvm::consumeError(storage.takeError());
     error = "variable is defined, but its storage address is unavailable: " + name;
@@ -583,7 +641,7 @@ std::optional<std::string> CppInterpreter::symbol_list(
       if (decl.defined == undefined_only) continue;
       const auto readable = unversioned_name(readable_symbol_name(decl.mangled));
       if (!std::regex_search(readable, name)) continue;
-      auto address = interp_->getSymbolAddress(decl.mangled);
+      auto address = lookup_symbol(jit_, decl.mangled);
       if (undefined_only) {
         if (address && address->getValue()) continue;
         if (!address) llvm::consumeError(address.takeError());
@@ -993,7 +1051,7 @@ std::optional<std::string> CppInterpreter::symbol_info(const std::string& name,
   error.clear();
   auto address_text = [&](const std::string& symbol,
                           const std::string& unavailable) {
-    auto address = interp_->getSymbolAddress(symbol);
+    auto address = lookup_symbol(jit_, symbol);
     if (!address) {
       llvm::consumeError(address.takeError());
       return unavailable;
@@ -1008,7 +1066,7 @@ std::optional<std::string> CppInterpreter::symbol_info(const std::string& name,
   bool inspect_native = symbols.empty();
   for (const auto& symbol : symbols) {
     if (symbol.mangled.empty()) continue;
-    auto address = interp_->getSymbolAddress(symbol.mangled);
+    auto address = lookup_symbol(jit_, symbol.mangled);
     if (address) {
       Dl_info info{};
       if (dladdr(address->toPtr<void*>(), &info) && info.dli_fbase) inspect_native = true;
@@ -1033,7 +1091,7 @@ std::optional<std::string> CppInterpreter::symbol_info(const std::string& name,
       if (field.first != "Kind" && field.first != "Mangled" && field.first != "Address") symbol.fields.push_back(field);
   }
   if (symbols.empty()) {
-    auto address = interp_->getSymbolAddress(name);
+    auto address = lookup_symbol(jit_, name);
     if (!address) {
       llvm::consumeError(address.takeError());
       address = interp_->getSymbolAddressFromLinkerName(name);

@@ -16,7 +16,7 @@ import tempfile
 import time
 
 
-def session(binary, cwd, steps, home=None):
+def session(binary, cwd, steps, home=None, args=()):
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(cwd)
@@ -25,7 +25,7 @@ def session(binary, cwd, steps, home=None):
         os.environ["TERM"] = "xterm-256color"
         # Keep the user's actual ~/.cpp-repl out of test sessions.
         os.environ["HOME"] = home if home is not None else cwd
-        os.execv(binary, [binary])
+        os.execv(binary, [binary, *args])
 
     # Reads until the output goes quiet; with `wait`, first until the next
     # prompt appears (compiling and running C++ takes a moment).
@@ -420,6 +420,22 @@ def main():
         check("callable define accepts multiline private method bodies after errors",
               status == 0 and "error:" in plain(out["bad"])
               and "error:" not in plain(out["define"]) and "(int) 42" in plain(out["call"]))
+
+        person_header = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "fixtures", "newtag_person.hpp")
+        out, status = session(binary, cwd, [
+            ("header", f'#include "{person_header}"\r'.encode(), True),
+            ("define", b'%define std::string Person::getName() const cpp`return "Sample";`\r', True),
+            ("object", b"Person p;\r", True),
+            ("call", b"p.getName();\r", True),
+            ("capture", b"p.getName()\r", True),
+            ("compare", b'p.getName() == "Sample"\r', True),
+            ("quit", b"%quit\r"),
+        ], args=("-fvisibility=hidden",))
+        check("hidden visibility supports string-returning percent-define methods and value capture",
+              status == 0 and "error:" not in plain(b"".join(out.values()))
+              and "basic_string" in plain(out["capture"])
+              and "(bool) true" in plain(out["compare"]))
 
         if len(sys.argv) > 3:
             with tempfile.TemporaryDirectory(dir=cwd) as callable_home:
