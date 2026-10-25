@@ -529,9 +529,11 @@ bool CppInterpreter::define_callable(const std::string& signature, const std::st
   }
   clang::Value value;
   std::vector<std::string> exports;
-  if (!run_raw("__attribute__((used)) " + callable->declaration + " {\n" + body + "\n}\n", value,
+  std::string prefix;
+  for (unsigned i = 0; i < callable->template_specializations; ++i) prefix += "template<> ";
+  if (!run_raw(prefix + "__attribute__((used)) " + callable->declaration + " {\n" + body + "\n}\n", value,
                &exports)) {
-    discard_failed_callable_definition(interp_->getASTContext(), callable->mangled);
+    discard_failed_callable_definition(*callable->function);
     error = "could not define callable: " + signature;
     return false;
   }

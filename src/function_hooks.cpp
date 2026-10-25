@@ -9,6 +9,8 @@
 
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclCXX.h"
+#include "clang/AST/DeclTemplate.h"
+#include "clang/AST/Expr.h"
 #include "clang/AST/Mangle.h"
 #include "clang/AST/QualTypeNames.h"
 #include "clang/Basic/SourceManager.h"
@@ -143,34 +145,65 @@ struct Signature {
   bool is_const = false;
   bool is_volatile = false;
   bool has_return_type = true;
+  bool template_target = false;
   clang::RefQualifierKind ref = clang::RQ_None;
 };
 
 // Clang validates the types and parameter declarations. Here we only separate
-// the qualified name and member qualifiers from an ordinary function signature.
+// the qualified name and member qualifiers. Template arguments stay as source
+// text: Clang, rather than this splitter, resolves their meaning.
 bool split_signature(const std::string& text, const std::string& helper, Signature& signature,
                      std::string& error) {
   const auto tokens = lex_cpp(text).tokens;
-  std::size_t open = 0;
-  while (open < tokens.size() &&
-         text.substr(tokens[open].begin, tokens[open].end - tokens[open].begin) != "(")
-    ++open;
-  if (open < 1 || open == tokens.size() || tokens[open - 1].kind != TokenKind::Identifier) {
+  auto word = [&](std::size_t i) {
+    return text.substr(tokens[i].begin, tokens[i].end - tokens[i].begin);
+  };
+  // Parenthesized non-type template arguments can precede the parameter list.
+  std::size_t open = tokens.size();
+  for (std::size_t i = 0; i < tokens.size(); ++i)
+    if (word(i) == "(" && tokens[i].depth == 0) open = i;
+  auto component_start = [&](std::size_t end) -> std::optional<std::size_t> {
+    if (word(end) == ">" || word(end) == ">>") {
+      int angles = 0;
+      for (std::size_t i = end + 1; i-- > 0;) {
+        if (tokens[i].depth != 0) continue;
+        const auto token = word(i);
+        if (token == ">") ++angles;
+        else if (token == ">>") angles += 2;
+        else if (token == "<") --angles;
+        if (!angles) {
+          if (i && tokens[i - 1].kind == TokenKind::Identifier) return i - 1;
+          return std::nullopt;
+        }
+      }
+      return std::nullopt;
+    }
+    if (tokens[end].kind == TokenKind::Identifier) return end;
+    return std::nullopt;
+  };
+  auto first_component = open && open < tokens.size()
+                             ? component_start(open - 1) : std::nullopt;
+  if (!first_component) {
     error = "use a signature, e.g. ns::function(int x) or int Class::method() const";
     return false;
   }
-  std::size_t first = open - 1;
-  while (first >= 2 &&
-         text.substr(tokens[first - 1].begin, tokens[first - 1].end - tokens[first - 1].begin) ==
-             "::" &&
-         tokens[first - 2].end == tokens[first - 1].begin &&
-         tokens[first - 2].kind == TokenKind::Identifier)
-    first -= 2;
-  if (first > 0 &&
-      text.substr(tokens[first - 1].begin, tokens[first - 1].end - tokens[first - 1].begin) == "::")
+  std::size_t first = *first_component;
+  // A space before a leading :: can separate a qualified return type from
+  // the target, e.g. ns::Result ::ns::function(...).
+  while (first >= 2 && word(first - 1) == "::" &&
+         tokens[first - 2].end == tokens[first - 1].begin) {
+    const auto previous = component_start(first - 2);
+    if (!previous) break;
+    first = *previous;
+  }
+  if (first > 0 && word(first - 1) == "::")
     --first;
-  for (std::size_t i = first; i < open; ++i)
-    signature.name += text.substr(tokens[i].begin, tokens[i].end - tokens[i].begin);
+  signature.template_target = text.substr(tokens[first].begin,
+      tokens[open - 1].end - tokens[first].begin).find('<') != std::string::npos;
+  if (signature.template_target)
+    signature.name = text.substr(tokens[first].begin, tokens[open - 1].end - tokens[first].begin);
+  else
+    for (std::size_t i = first; i < open; ++i) signature.name += word(i);
   if (signature.name.rfind("::", 0) == 0) signature.name.erase(0, 2);
   std::size_t close = open + 1;
   for (; close < tokens.size(); ++close) {
@@ -232,11 +265,16 @@ struct FunctionHooks::Impl {
   unsigned next_id = 0;
 
   clang::FunctionDecl* resolve(const std::string& text, std::vector<std::string>* names,
-                               std::string& error, bool defining = false) {
+                               std::string& error, bool defining = false,
+                               std::string* target_name = nullptr) {
     auto& context = interp.getASTContext();
     const std::string helper = "__cpp_repl_signature_" + std::to_string(++next_id);
     Signature signature;
     if (!split_signature(text, helper, signature, error)) return nullptr;
+    if (signature.template_target && !defining) {
+      error = "template targets are supported by %define; template hooks are unsupported";
+      return nullptr;
+    }
     auto parsed = parse_input(interp, signature.declaration);
     if (!parsed) {
       error = llvm::toString(parsed.takeError());
@@ -251,7 +289,87 @@ struct FunctionHooks::Impl {
       functions(*tu, declarations, context.getSourceManager());
     clang::FunctionDecl* selected = nullptr;
     std::set<const clang::FunctionDecl*> seen;
-    if (probe)
+    if (probe && signature.template_target && probe->isVariadic()) {
+      error = "variadic template callable definitions are unsupported";
+    } else if (probe && signature.template_target) {
+      // An unevaluated address expression lets Clang instantiate declarations
+      // and select the exact overload, without instantiating a missing body.
+      // Deducing R also supports signatures that omit their return type.
+      std::string parameters;
+      auto policy = context.getPrintingPolicy();
+      policy.FullyQualifiedName = true;
+      for (unsigned i = 0; i < probe->getNumParams(); ++i) {
+        if (i) parameters += ", ";
+        parameters += clang::TypeName::getFullyQualifiedType(
+            probe->getParamDecl(i)->getType(), context, true).getAsString(policy);
+      }
+      std::string qualifiers;
+      if (signature.is_const) qualifiers += " const";
+      if (signature.is_volatile) qualifiers += " volatile";
+      if (signature.ref == clang::RQ_LValue) qualifiers += " &";
+      if (signature.ref == clang::RQ_RValue) qualifiers += " &&";
+      const bool nothrow = probe->getType()->castAs<clang::FunctionProtoType>()->isNothrow();
+      const std::string exception = nothrow ? " noexcept" : "";
+      const auto selector = helper + "_select";
+      const auto result = helper + "_target";
+      std::string source;
+      if (signature.has_return_type) {
+        const auto return_type = helper + "_return";
+        source = "using " + return_type + " = " + clang::TypeName::getFullyQualifiedType(
+            probe->getReturnType(), context, true).getAsString(policy) + ";\n";
+        source += "void " + selector + "(" + return_type + " (*)(" + parameters + ")" +
+                  exception + ");\n";
+        source += "template<class __cpp_repl_C> void " + selector + "(" + return_type +
+                  " (__cpp_repl_C::*)(" + parameters + ")" + qualifiers + exception + ");\n";
+      } else {
+        source = "template<class __cpp_repl_R> __cpp_repl_R " + selector +
+                 "(__cpp_repl_R (*)(" + parameters + ")" + exception + ");\n";
+        source += "template<class __cpp_repl_R, class __cpp_repl_C> __cpp_repl_R " + selector +
+                  "(__cpp_repl_R (__cpp_repl_C::*)(" + parameters + ")" + qualifiers +
+                  exception + ");\n";
+      }
+      source += "using " + result + " = decltype(" + selector + "(&" + signature.name + "));";
+      // Like the declaration scan for ordinary %define, internal resolution
+      // must find private/protected members. Restore the user's checks before
+      // compiling the supplied body or any subsequent user input.
+      auto& language = interp.getCompilerInstance()->getLangOpts();
+      const bool access_control = language.AccessControl;
+      language.AccessControl = false;
+      auto target = parse_input(interp, source);
+      language.AccessControl = access_control;
+      if (!target) error = llvm::toString(target.takeError());
+      else {
+        for (auto* decl : target->TUPart->decls()) {
+          auto* alias = llvm::dyn_cast<clang::TypeAliasDecl>(decl);
+          if (!alias || alias->getNameAsString() != result) continue;
+          const auto* type = llvm::dyn_cast<clang::DecltypeType>(alias->getUnderlyingType());
+          auto* call = type ? llvm::dyn_cast<clang::CallExpr>(
+              type->getUnderlyingExpr()->IgnoreParenImpCasts()) : nullptr;
+          if (!call || call->getNumArgs() != 1) continue;
+          auto* address = llvm::dyn_cast<clang::UnaryOperator>(
+              call->getArg(0)->IgnoreParenImpCasts());
+          auto* reference = address ? llvm::dyn_cast<clang::DeclRefExpr>(
+              address->getSubExpr()->IgnoreParenImpCasts()) : nullptr;
+          if (reference) selected = llvm::dyn_cast<clang::FunctionDecl>(reference->getDecl());
+        }
+        if (selected && signature.has_return_type &&
+            !context.hasSameType(selected->getReturnType(), probe->getReturnType())) {
+          selected = nullptr;
+          error = "return type does not match the template target";
+        }
+        if (selected) {
+          const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(selected);
+          const bool instance = method && !method->isStatic();
+          if (signature.is_const != (instance && method->isConst()) ||
+              signature.is_volatile != (instance && method->isVolatile()) ||
+              signature.ref != (instance ? method->getRefQualifier() : clang::RQ_None)) {
+            selected = nullptr;
+            error = "member qualifiers do not match the template target";
+          }
+        }
+        if (auto undo = undo_input(interp, target->TUPart)) error = llvm::toString(std::move(undo));
+      }
+    } else if (probe)
       for (auto* function : declarations) {
         if (unversioned_name(function->getQualifiedNameAsString()) != signature.name ||
             function->getNumParams() != probe->getNumParams() ||
@@ -288,6 +406,7 @@ struct FunctionHooks::Impl {
         names->push_back(std::move(name));
       }
     if (auto undo = undo_input(interp, parsed->TUPart)) error = llvm::toString(std::move(undo));
+    if (target_name) *target_name = signature.name;
     if (error.empty() && !selected) error = "no function matches '" + text + "'";
     return error.empty() ? selected : nullptr;
   }
@@ -467,7 +586,8 @@ FunctionHooks::~FunctionHooks() = default;
 std::optional<CallableDefinition> FunctionHooks::definition(const std::string& signature,
                                                             std::string& error) {
   std::vector<std::string> names;
-  auto* function = impl_->resolve(signature, &names, error, true);
+  std::string target_name;
+  auto* function = impl_->resolve(signature, &names, error, true, &target_name);
   if (!function) {
     return std::nullopt;
   }
@@ -481,11 +601,12 @@ std::optional<CallableDefinition> FunctionHooks::definition(const std::string& s
     error = "pure virtual definitions are unsupported; define a concrete override instead";
     return std::nullopt;
   }
-  if (!type || function->isTemplated() || function->isDependentContext() ||
+  if (!type || function->getDescribedFunctionTemplate() || function->isDependentContext() ||
+      function->getType()->isDependentType() ||
       function->isConstexpr() || function->isVariadic() || function->isDeleted() ||
       function->getFormalLinkage() != clang::Linkage::External ||
       type->getCallConv() != clang::CC_C) {
-    error = "callable definitions require external, non-template, non-constexpr, "
+    error = "callable definitions require external, concrete, non-constexpr, "
             "non-variadic functions with the default calling convention";
     return std::nullopt;
   }
@@ -495,7 +616,7 @@ std::optional<CallableDefinition> FunctionHooks::definition(const std::string& s
   auto qualified = [&](clang::QualType type) {
     return clang::TypeName::getFullyQualifiedType(type, context, true);
   };
-  std::string declaration = unversioned_name(function->getQualifiedNameAsString()) + "(";
+  std::string declaration = target_name + "(";
   for (unsigned i = 0; i < function->getNumParams(); ++i) {
     if (i) {
       declaration += ", ";
@@ -523,7 +644,14 @@ std::optional<CallableDefinition> FunctionHooks::definition(const std::string& s
     declaration += " noexcept";
   }
   qualified(function->getReturnType()).getAsStringInternal(declaration, policy);
-  return CallableDefinition{std::move(declaration), symbol_name(context, *function)};
+  unsigned specializations = function->getPrimaryTemplate() ? 1 : 0;
+  for (auto* owner = function->getDeclContext(); owner; owner = owner->getParent()) {
+    if (auto* record = llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(owner))
+      if (record->getSpecializationKind() != clang::TSK_ExplicitSpecialization)
+        ++specializations;
+  }
+  return CallableDefinition{std::move(declaration), symbol_name(context, *function),
+                            specializations, function};
 }
 
 std::vector<ActiveHook> FunctionHooks::active() const {

@@ -278,16 +278,15 @@ void discard_failed_variable_definition(clang::ASTContext& context,
   }
 }
 
-void discard_failed_callable_definition(clang::ASTContext& context, const std::string& mangled) {
-  for (const auto* decl : declarations(context)) {
-    const auto* function = llvm::dyn_cast<clang::FunctionDecl>(decl);
-    if (!function || mangled_name(context, function) != mangled) {
-      continue;
-    }
+void discard_failed_callable_definition(clang::FunctionDecl& function) {
+  // Instantiated functions are held in their template's specialization table,
+  // not necessarily in the ordinary declaration list. Clean the selected
+  // entity's redeclarations directly, leaving other instances intact.
+  for (auto* decl : function.redecls()) {
     // Parse failure retains the redeclaration chain. Keep a valid prototype:
     // leaving an invalid redeclaration poisons later calls after a retry.
-    const_cast<clang::FunctionDecl*>(function)->setInvalidDecl(false);
-    if (auto* body = const_cast<clang::FunctionDecl*>(function->getDefinition())) {
+    decl->setInvalidDecl(false);
+    if (auto* body = decl->getDefinition()) {
       body->setBody(nullptr);
       body->setInvalidDecl(false);
     }

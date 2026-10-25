@@ -437,6 +437,26 @@ def main():
               and "basic_string" in plain(out["capture"])
               and "(bool) true" in plain(out["compare"]))
 
+        template_header = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       "fixtures", "template_callables.hpp")
+        out, status = session(binary, cwd, [
+            ("header", f'#include "{template_header}"\r'.encode(), True),
+            ("bad", b'%define std::string template_callables::describe<int>(int x) cpp`return unknown;`\r', True),
+            ("function", b'%define std::string template_callables::describe<int>(int x) cpp`return std::to_string(x);`\r', True),
+            ("method", b'%define std::string template_callables::Person<int>::name() const & noexcept cpp`\nreturn std::to_string(value_);\n`\r', True),
+            ("specialization", b'%define std::string template_callables::Person<long>::name() const & noexcept cpp`return "specialized";`\r', True),
+            ("objects", b'template_callables::Person<int> a{42}; template_callables::Person<long> b{7};\r', True),
+            ("capture", b'a.name()\r', True),
+            ("check", b'bool matches = a.name() == "42" && b.name() == "specialized" && template_callables::describe<int>(9) == "9";\r', True),
+            ("value", b'matches\r', True),
+            ("quit", b'%quit\r'),
+        ], args=("-fvisibility=hidden",))
+        check("percent-define supports template instances, declared specializations and retry",
+              status == 0 and "error:" in plain(out["bad"])
+              and all("error:" not in plain(value) for key, value in out.items() if key != "bad")
+              and "basic_string" in plain(out["capture"])
+              and "(bool) true" in plain(out["value"]))
+
         if len(sys.argv) > 3:
             with tempfile.TemporaryDirectory(dir=cwd) as callable_home:
                 project = os.path.join(callable_home, "project")

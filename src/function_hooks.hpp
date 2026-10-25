@@ -7,6 +7,7 @@
 #include <vector>
 
 namespace clang {
+class FunctionDecl;
 class Interpreter;
 struct PartialTranslationUnit;
 }  // namespace clang
@@ -40,6 +41,8 @@ struct HookSymbolDetails {
 struct CallableDefinition {
   std::string declaration;
   std::string mangled;
+  unsigned template_specializations = 0;
+  clang::FunctionDecl* function = nullptr;  // Borrowed from the interpreter AST.
 };
 
 // Instruments user definitions and references to library functions before JIT
