@@ -23,7 +23,10 @@ FetchContent_Declare(
   replxx
   GIT_REPOSITORY https://github.com/AmokHuginnsson/replxx.git
   GIT_TAG ${REPLXX_REV}
-  GIT_SHALLOW FALSE)
+  GIT_SHALLOW FALSE
+  PATCH_COMMAND ${CMAKE_COMMAND} -Dsource=<SOURCE_DIR>
+    -Dpatch=${CMAKE_CURRENT_SOURCE_DIR}/cmake/replxx-display.patch
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch-replxx.cmake)
 FetchContent_MakeAvailable(replxx)
 
 # Clang's incremental interpreter (the clang-repl engine). Configure with
@@ -52,7 +55,7 @@ target_include_directories(example_core SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
 target_link_libraries(example_core PUBLIC replxx ${CMAKE_DL_LIBS} PRIVATE LLVM)
 target_compile_options(example_core PRIVATE -Wall -Wextra -Wpedantic)
 
-add_library(cpp_interp STATIC src/cpp_interpreter.cpp src/cpp_inspect.cpp src/cpp_symbols.cpp src/function_hooks.cpp src/loaded_symbols.cpp src/runtime_inspection.cpp src/project_compilation_database.cpp src/source_compile_options.cpp src/startup_files.cpp src/session_commands.cpp src/native_symbol_exports.cpp)
+add_library(cpp_interp STATIC src/cpp_interpreter.cpp src/editor_analysis.cpp src/cpp_inspect.cpp src/cpp_symbols.cpp src/function_hooks.cpp src/loaded_symbols.cpp src/runtime_inspection.cpp src/project_compilation_database.cpp src/source_compile_options.cpp src/startup_files.cpp src/session_commands.cpp src/native_symbol_exports.cpp)
 find_program(CPP_REPL_CLANG_EXECUTABLE NAMES clang
   HINTS "${LLVM_TOOLS_BINARY_DIR}" "${LLVM_INSTALL_PREFIX}/bin" REQUIRED)
 set(REPLXX_NATIVE_SOURCE src/native_call_patch.cpp)
@@ -77,7 +80,7 @@ if(REPLXX_NATIVE_PLATFORM_SUPPORTED)
     target_sources(cpp_interp PRIVATE src/native_runtime.cpp)
   endif()
 endif()
-target_sources(cpp_interp PRIVATE ${REPLXX_NATIVE_SOURCE}
+target_sources(cpp_interp PRIVATE ${REPLXX_NATIVE_SOURCE} src/editor_ui.cpp
   src/definition_shadowing.cpp src/source_reload.cpp src/interpreter_symbols.cpp)
 target_include_directories(cpp_interp PUBLIC src)
 target_include_directories(cpp_interp SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
@@ -228,6 +231,9 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
 
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_FOUND AND NOT WIN32)
+    add_test(NAME editor_pty
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/editor_pty.py
+                     $<TARGET_FILE:cpp-repl>)
     add_test(NAME pty_smoke
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/pty_smoke.py
                      $<TARGET_FILE:cpp-repl>

@@ -288,7 +288,8 @@ bool is_current_definition(const clang::NamedDecl &declaration) {
   const clang::NamedDecl *current = &declaration;
   for (auto *parent = current->getDeclContext(); parent;
        parent = parent->getParent()) {
-    if (parent->isFileContext()) {
+    // Anonymous namespaces have no lookup name, but their members still do.
+    if (parent->isFileContext() && !current->getDeclName().isEmpty()) {
       const clang::NamedDecl *identity = current;
       if (auto *record = llvm::dyn_cast<clang::CXXRecordDecl>(current))
         if (auto *templ = record->getDescribedClassTemplate())

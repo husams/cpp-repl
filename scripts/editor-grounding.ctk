@@ -1,0 +1,20 @@
+// Run with ctk --compile-commands ROOT/build/compile_commands.json --script
+// scripts/editor-grounding.ctk root=/absolute/worktree/path (and --server if needed).
+let interpreter_path = "{arg.root}/src/cpp_interpreter.cpp"
+let interpreter = parse interpreter_path
+let functions = match cxxMethodDecl(isDefinition(), matchesName("example::CppInterpreter::(complete|semantic_tokens)$")).bind("f") in interpreter
+foreach row in functions do print row.f.qualified_name
+let analysis_calls = match callExpr(callee(functionDecl(hasName("example::analyze_editor")))).bind("c") in functions.f
+print analysis_calls.length
+let engine_path = "{arg.root}/src/editor_analysis.cpp"
+let engine = parse engine_path
+let entry = match functionDecl(isDefinition(), hasName("example::analyze_editor")).bind("f") in engine
+let execution = match callExpr(callee(cxxMethodDecl(ofClass(hasName("clang::Interpreter")), matchesName("(ParseAndExecute|Execute)$")))).bind("c") in entry.f
+print execution.length
+let syntax_only = match callExpr(callee(functionDecl(matchesName("clang::CompilerInstance::ExecuteAction$")))).bind("c") in entry.f
+foreach row in syntax_only do print row.c.call_site.static_callee_name
+let ui_path = "{arg.root}/src/editor_ui.cpp"
+let ui = parse ui_path
+let overlay = match functionDecl(isDefinition(), hasName("example::highlight_editor_input")).bind("f") in ui
+let color_calls = match callExpr(callee(functionDecl(matchesName("(highlight_input|semantic_tokens|lex_cpp|semantic_color)$")))).bind("c") in overlay.f
+foreach row in color_calls do print row.c.call_site.static_callee_name

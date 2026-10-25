@@ -6,6 +6,8 @@
 #include <vector>
 
 #include "commands.hpp"
+#include "cpp_lexer.hpp"
+#include "editor_ui.hpp"
 #include "highlight_repl.hpp"
 #include "runtime_inspection.hpp"
 #include "session_commands.hpp"
@@ -18,6 +20,22 @@ using replxx::Replxx;
 
 bool starts_with(const std::string& s, std::string_view prefix) {
   return s.compare(0, prefix.size(), prefix) == 0;
+}
+
+Replxx::completions_t cpp_completions(CppInterpreter& cpp, const std::string& input,
+                                      int& context_len) {
+  Replxx::completions_t out;
+  const auto result = cpp.complete(input);
+  context_len = static_cast<int>(utf8_length(result.prefix));
+  for (const auto& item : result.items) {
+    auto display = item.label;
+    if (!item.detail.empty()) {
+      display += " -> " + item.detail;
+    }
+    display += " [" + std::string(semantic_kind_name(item.kind)) + "]";
+    out.emplace_back(item.text, display, semantic_color(item.kind));
+  }
+  return out;
 }
 
 // Start of the path being typed at the end of a %lib / %add-path / %add line:
@@ -35,18 +53,12 @@ Replxx::completions_t complete(CppInterpreter& cpp, const std::string& input,
                                int& context_len) {
   Replxx::completions_t out;
   if (!is_command_line(input)) {
-    const CppInterpreter::Completions c = cpp.complete(input);
-    context_len = static_cast<int>(utf8_length(c.prefix));
-    for (const std::string& name : c.names) out.emplace_back(name);
-    return out;
+    return cpp_completions(cpp, input, context_len);
   }
   const ParsedCommand cmd = parse_command(input);
 
   if (cmd.code && cmd.incomplete) {
-    const auto completion = cpp.complete(cmd.code->value);
-    context_len = static_cast<int>(utf8_length(completion.prefix));
-    for (const auto& name : completion.names) out.emplace_back(name);
-    return out;
+    return cpp_completions(cpp, cmd.code->value, context_len);
   }
 
   if (cmd.name_end == input.size()) {  // still typing the command word
@@ -172,10 +184,22 @@ Replxx::completions_t complete(CppInterpreter& cpp, const std::string& input,
   return out;
 }
 
-Replxx::hints_t hint(const std::string& input, int& context_len,
+Replxx::hints_t hint(CppInterpreter& cpp, const std::string& input, int& context_len,
                      Replxx::Color& color) {
   Replxx::hints_t out;
-  if (!is_command_line(input)) return out;
+  if (!is_command_line(input)) {
+    if (lex_cpp(input).open_brackets.find('(') == std::string::npos) {
+      return out;
+    }
+    const auto result = cpp.complete(input);
+    context_len = 0;
+    color = Replxx::Color::GRAY;
+    for (const auto& signature : result.signatures) {
+      out.push_back("  " + signature + " [argument " + std::to_string(result.active_parameter + 1) +
+                    "]");
+    }
+    return out;
+  }
   const ParsedCommand cmd = parse_command(input);
   color = Replxx::Color::GRAY;
 
@@ -212,8 +236,12 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
   rx.set_completion_callback([&cpp](const std::string& input, int& context_len) {
     return complete(cpp, input, context_len);
   });
-  rx.set_hint_callback(hint);
-  rx.set_highlighter_callback(highlight_input);
+  rx.set_hint_callback([&cpp](const std::string& input, int& length, Replxx::Color& color) {
+    return hint(cpp, input, length, color);
+  });
+  rx.set_highlighter_callback([&cpp](const std::string& input, Replxx::colors_t& colors) {
+    highlight_editor_input(cpp, input, colors);
+  });
   rx.set_max_hint_rows(4);
 
   // Custom binding: Ctrl+L clears the screen and redraws the prompt.

@@ -1,0 +1,97 @@
+diff --git a/include/replxx.hxx b/include/replxx.hxx
+index ab3c5e5..30ac2d7 100644
+--- a/include/replxx.hxx
++++ b/include/replxx.hxx
+@@ -211,6 +211,7 @@ public:
+ 	typedef std::vector<Color> colors_t;
+ 	class Completion {
+ 		std::string _text;
++		std::string _display;
+ 		Color _color;
+ 	public:
+ 		Completion( char const* text_ )
+@@ -225,6 +226,11 @@ public:
+ 			: _text( text_ )
+ 			, _color( color_ ) {
+ 		}
++		Completion( std::string const& text_, std::string const& display_, Color color_ )
++			: _text( text_ ), _display( display_ ), _color( color_ ) {}
++		std::string const& display( void ) const {
++			return _display.empty() ? _text : _display;
++		}
+ 		std::string const& text( void ) const {
+ 			return ( _text );
+ 		}
+diff --git a/src/replxx_impl.cxx b/src/replxx_impl.cxx
+index 22ee748..95f9621 100644
+--- a/src/replxx_impl.cxx
++++ b/src/replxx_impl.cxx
+@@ -1106,7 +1106,9 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+ 	int longestCommonPrefix = 0;
+ 	int completionsCount( static_cast<int>( _completions.size() ) );
+ 	int selectedCompletion( 0 );
+-	if ( _hintSelection != -1 ) {
++	if ( ( _hintSelection >= 0 ) && ( _hintSelection < completionsCount )
++		&& ( _hintSelection < static_cast<int>( _hintsCache.size() ) )
++		&& ( _hintsCache[_hintSelection] == _completions[_hintSelection].text() ) ) {
+ 		selectedCompletion = _hintSelection;
+ 		completionsCount = 1;
+ 	}
+@@ -1181,7 +1183,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+ 	if ( showCompletions ) {
+ 		int longestCompletion( 0 );
+ 		for ( size_t j( 0 ); j < _completions.size(); ++ j ) {
+-			int itemLength( static_cast<int>( _completions[j].text().length() ) );
++			int itemLength( static_cast<int>( _completions[j].display().length() ) );
+ 			if ( itemLength > longestCompletion ) {
+ 				longestCompletion = itemLength;
+ 			}
+@@ -1253,7 +1255,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+ 				size_t index = (column * rowCount) + row;
+ 				if ( index < _completions.size() ) {
+ 					Completion const& c( _completions[index] );
+-					int itemLength = static_cast<int>(c.text().length());
++					int itemLength = static_cast<int>(c.display().length());
+ 					fflush(stdout);
+ 
+ 					if ( longestCommonPrefix > 0 ) {
+@@ -1271,7 +1273,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+ 						UnicodeString ac( ansi_color( c.color() ) );
+ 						_terminal.write32( ac.get(), ac.length() );
+ 					}
+-					_terminal.write32( c.text().get() + longestCommonPrefix, itemLength - longestCommonPrefix );
++					_terminal.write32( c.display().get() + longestCommonPrefix, itemLength - longestCommonPrefix );
+ 					if ( !_noColor && ( c.color() != Replxx::Color::DEFAULT ) ) {
+ 						_terminal.write32( res.get(), res.length() );
+ 					}
+diff --git a/src/replxx_impl.hxx b/src/replxx_impl.hxx
+index 8f6357b..9761f9d 100644
+--- a/src/replxx_impl.hxx
++++ b/src/replxx_impl.hxx
+@@ -53,20 +53,26 @@ class Replxx::ReplxxImpl {
+ public:
+ 	class Completion {
+ 		UnicodeString _text;
++		UnicodeString _display;
+ 		Replxx::Color _color;
+ 	public:
+ 		Completion( UnicodeString const& text_, Replxx::Color color_ )
+ 			: _text( text_ )
++			, _display( text_ )
+ 			, _color( color_ ) {
+ 		}
+ 		Completion( Replxx::Completion const& completion_ )
+ 			: _text( completion_.text() )
++			, _display( completion_.display() )
+ 			, _color( completion_.color() ) {
+ 		}
+ 		Completion( Completion const& ) = default;
+ 		Completion& operator = ( Completion const& ) = default;
+ 		Completion( Completion&& ) = default;
+ 		Completion& operator = ( Completion&& ) = default;
++		UnicodeString const& display( void ) const {
++			return _display;
++		}
+ 		UnicodeString const& text( void ) const {
+ 			return ( _text );
+ 		}

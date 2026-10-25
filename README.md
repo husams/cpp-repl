@@ -767,23 +767,39 @@ session's global scope and accesses members using ordinary C++ access rules.
   `%` lines are colored by the command grammar: command names bright green,
   paths bright blue, `:` separators yellow, and the first grammar error (an
   unknown command, a dangling `:`, extra arguments...) bright red. Works across
-  embedded newlines.
+  embedded newlines. Embedded Clang analysis overlays semantic identifier
+  colors: types bright cyan, namespaces bright blue, functions bright green,
+  methods green, fields cyan, parameters yellow, variables light gray, and enum
+  constants bright magenta. The overlay resolves the current edited buffer
+  against session declarations without executing it. Strings, comments, command
+  operands and shell blocks keep their existing colors. Unresolved or incomplete
+  constructs retain lexical coloring; buffers larger than 64 KiB use lexical
+  coloring alone. Repaints reuse results until the buffer, session or flags change.
+  Analysis currently runs synchronously; large sessions or header-heavy edited
+  input can delay a repaint.
 - **Multiline**: Enter is bound to a handler that inserts a newline in the same
   buffer while the input is incomplete (open `() [] {}`, unterminated
   string/char/raw string, open `/*`, trailing `\` in a `#` line, or a line
   ending in an operator or comma) and submits otherwise. The block stays
   editable and becomes one history entry. Blank lines continue an incomplete
   block; Ctrl+C cancels it. Ctrl+J always inserts a newline.
-- **Completion** (Tab): Clang's code completion (`clang::ReplCodeCompleter`,
-  as in clang-repl). Each request runs a fresh compiler that imports the
-  session's declarations, so it offers your variables, functions and types,
-  standard-library names, keywords and, after `.` / `->`, methods. Clang
-  offers only methods after `.` / `->`, so cpp-repl adds the data members
-  (inherited ones included) of a variable or of a field chain such as
-  `a.b->`. Tab also completes `%` commands, filesystem paths after `%lib `,
+- **Completion** (Tab): embedded Clang semantic completion in a disposable
+  compiler importing the session's current declarations; no LSP is required.
+  Tab extends the common name prefix; another Tab lists colored suggestions
+  with parameter names, return/data types and kind labels. Overloads appear as
+  separate rows, but only the identifier is inserted into the input. Suggestions
+  follow Clang's context/type priorities and omit inaccessible or unavailable
+  members. Completion handles locals in unfinished multiline input, inheritance,
+  `const` receivers, namespaces and member access after calls. While entering a
+  function call, gray hints show its signatures and the current argument number.
+  Tab also completes `%` commands, filesystem paths after `%lib `,
   `%add-path `, `%add ` and `%reload `, and class names after `%class `,
   `%methods ` and `%fields `. The member commands also complete their option
   keywords, access values and parent traversal booleans.
+  The pinned replxx dependency carries a small local display-label extension;
+  `cmake/replxx-display.patch` preserves its existing insertion and pagination
+  behavior. `scripts/editor-grounding.ctk` traces the AST analysis and rendering
+  paths using this build's compilation database.
 - History persists in `./.replxx_history`; Ctrl+L clears the screen; Ctrl+D
   (or `%quit`) exits.
 

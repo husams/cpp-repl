@@ -1,0 +1,2 @@
+# Patch context preserves the pinned dependency's tabs and blank lines verbatim.
+cmake/replxx-display.patch -whitespace

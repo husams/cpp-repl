@@ -50,7 +50,11 @@ def session(binary, cwd, steps, home=None, args=()):
 
     outputs = {"start": read(wait=True)}
     for name, keys, *wait in steps:
-        os.write(fd, keys)
+        try:
+            os.write(fd, keys)
+        except OSError as error:
+            previous = "\n".join(f"{label}: {plain(output)}" for label, output in list(outputs.items())[-3:])
+            raise RuntimeError(f"REPL exited before {name}; recent output:\n{previous}") from error
         outputs[name] = read(wait=bool(wait and wait[0]))
     time.sleep(0.5)
     done, status = os.waitpid(pid, os.WNOHANG)
@@ -818,4 +822,5 @@ def main():
     sys.exit(1 if failures else 0)
 
 
-main()
+if __name__ == "__main__":
+    main()

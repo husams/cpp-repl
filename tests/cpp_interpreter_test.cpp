@@ -16,6 +16,8 @@
 #include "commands.hpp"
 #include "cpp_interpreter.hpp"
 #include "cpp_symbols.hpp"
+#include "editor_ui.hpp"
+#include "highlight_repl.hpp"
 #include "library_manager.hpp"
 #include "loaded_symbols.hpp"
 #include "native_symbol_exports.hpp"
@@ -1937,3 +1939,263 @@ TEST_F(CppInterpreterTest, LoadHookErrorRejectsLibrary) {
 
 }  // namespace
 }  // namespace example
+
+namespace example {
+namespace {
+TEST_F(CppInterpreterTest, RichCompletionKeepsOverloadsAndInsertionSeparate) {
+  ASSERT_TRUE(cpp_->execute("int editor_over(int count) { return count; }"));
+  ASSERT_TRUE(cpp_->execute("double editor_over(double value) { return value; }"));
+  const auto result = cpp_->complete("editor_ov");
+  EXPECT_TRUE(has(result.names, "editor_over"));
+  std::vector<CompletionItem> overloads;
+  for (const auto& item : result.items) {
+    if (item.text == "editor_over") {
+      overloads.push_back(item);
+    }
+  }
+  ASSERT_EQ(overloads.size(), 2u);
+  EXPECT_NE(overloads[0].label, overloads[1].label);
+  for (const auto& item : overloads) {
+    EXPECT_EQ(item.kind, SemanticKind::Function);
+    EXPECT_NE(item.label.find('('), std::string::npos);
+    EXPECT_FALSE(item.detail.empty());
+    EXPECT_EQ(item.text, "editor_over");
+  }
+}
+
+TEST_F(CppInterpreterTest, RichMemberCompletionRespectsAccessAndConstness) {
+  ASSERT_TRUE(
+      cpp_->execute("struct EditorBase { int inherited; }; "
+                    "class EditorRecord : public EditorBase { int secret; public: int field; "
+                    "int read() const { return field; } void write() {} }; "
+                    "const EditorRecord editor_record{};"));
+  const auto result = cpp_->complete("editor_record.");
+  EXPECT_TRUE(has(result.names, "field"));
+  EXPECT_TRUE(has(result.names, "inherited"));
+  EXPECT_TRUE(has(result.names, "read"));
+  EXPECT_FALSE(has(result.names, "secret"));
+  EXPECT_FALSE(has(result.names, "write"));
+  const auto field = std::find_if(result.items.begin(), result.items.end(),
+                                  [](const auto& item) { return item.text == "field"; });
+  ASSERT_NE(field, result.items.end());
+  EXPECT_EQ(field->kind, SemanticKind::Field);
+  EXPECT_EQ(field->detail, "int");
+}
+
+TEST_F(CppInterpreterTest, SemanticColorsResolveEditedLocalsWithoutExecuting) {
+  ASSERT_TRUE(cpp_->execute("int editor_side_effect = 0;"));
+  const std::string input = "struct EditorColor { int field; int method() { return field; } };\n"
+                            "EditorColor local; local.method(); ++editor_side_effect;";
+  const auto tokens = cpp_->semantic_tokens(input);
+  auto colored = [&](const std::string& text, SemanticKind kind) {
+    return std::any_of(tokens.begin(), tokens.end(), [&](const auto& token) {
+      return input.substr(token.begin, token.end - token.begin) == text && token.kind == kind;
+    });
+  };
+  EXPECT_TRUE(colored("EditorColor", SemanticKind::Type));
+  EXPECT_TRUE(colored("local", SemanticKind::Variable));
+  EXPECT_TRUE(colored("field", SemanticKind::Field));
+  EXPECT_TRUE(colored("method", SemanticKind::Method));
+  EXPECT_TRUE(colored("editor_side_effect", SemanticKind::Variable));
+  EXPECT_EQ(cpp_->evaluate("editor_side_effect"), "(int) 0\n");
+  EXPECT_FALSE(has(cpp_->symbol_names(), "local"));
+}
+} // namespace
+} // namespace example
+
+namespace example {
+namespace {
+TEST_F(CppInterpreterTest, EditorCompletionWorksInsideEditedCodeAndAfterCalls) {
+  ASSERT_TRUE(cpp_->execute("struct EditorChain { int member; EditorChain next() { return {}; } }; "
+                            "EditorChain editor_chain;"));
+  EXPECT_TRUE(has(cpp_->complete("editor_chain.next().me").names, "member"));
+  EXPECT_TRUE(
+      has(cpp_->complete("void editor_local_fn() {\n int editor_local_value = 0;\n editor_local_v")
+              .names,
+          "editor_local_value"));
+  EXPECT_FALSE(has(cpp_->symbol_names(), "editor_local_value"));
+}
+
+TEST_F(CppInterpreterTest, EditorSignatureHelpTracksArgumentsAndOverloads) {
+  ASSERT_TRUE(cpp_->execute("void editor_hint(int first, double second) {}"));
+  const auto hint = cpp_->complete("editor_hint(1, ");
+  ASSERT_FALSE(hint.signatures.empty());
+  EXPECT_EQ(hint.active_parameter, 1u);
+  EXPECT_NE(hint.signatures.front().find("double second"), std::string::npos);
+}
+
+TEST_F(CppInterpreterTest, EditorCachesFollowRedefinitionAndRejectedInput) {
+  ASSERT_TRUE(
+      cpp_->execute("struct EditorVersion { int old_field; }; EditorVersion editor_version;"));
+  EXPECT_TRUE(has(cpp_->complete("editor_version.").names, "old_field"));
+  ASSERT_TRUE(
+      cpp_->execute("struct EditorVersion { double new_field; }; EditorVersion editor_version;"));
+  const auto current = cpp_->complete("editor_version.");
+  EXPECT_TRUE(has(current.names, "new_field"));
+  EXPECT_FALSE(has(current.names, "old_field"));
+  EXPECT_FALSE(cpp_->execute("int editor_bad = ;"));
+  cpp_->complete("editor_bad");
+  cpp_->semantic_tokens("editor_version.new_field");
+  EXPECT_EQ(cpp_->evaluate("21 * 2"), "(int) 42\n");
+}
+
+TEST_F(CppInterpreterTest, EditorSupportsStandardLibraryAndNamespaceMembers) {
+  ASSERT_TRUE(cpp_->execute("#include <vector>\n"));
+  ASSERT_TRUE(cpp_->execute("std::vector<int> editor_vector; namespace editor_ns { int number; }"));
+  EXPECT_TRUE(has(cpp_->complete("editor_vector.si").names, "size"));
+  EXPECT_TRUE(has(cpp_->complete("editor_ns::num").names, "number"));
+}
+} // namespace
+} // namespace example
+
+namespace example {
+namespace {
+TEST_F(CppInterpreterTest, SemanticOverlayPreservesLiteralsCommentsAndCommandColors) {
+  ASSERT_TRUE(cpp_->execute("int editor_paint = 0;"));
+  const std::string code = "// café\neditor_paint += 1; \"editor_paint\"; // editor_paint";
+  replxx::Replxx::colors_t actual(utf8_length(code), replxx::Replxx::Color::DEFAULT);
+  auto lexical = actual;
+  highlight_input(code, lexical);
+  highlight_editor_input(*cpp_, code, actual);
+  const auto begin = utf8_length(std::string_view(code).substr(0, code.find("editor_paint")));
+  for (std::size_t i = 0; i < actual.size(); ++i) {
+    if (i >= begin && i < begin + std::string("editor_paint").size()) {
+      EXPECT_EQ(actual[i], semantic_color(SemanticKind::Variable));
+    } else {
+      EXPECT_EQ(actual[i], lexical[i]) << i;
+    }
+  }
+  const std::string shell = "%lib ``echo editor_paint``";
+  actual.assign(utf8_length(shell), replxx::Replxx::Color::DEFAULT);
+  lexical = actual;
+  highlight_input(shell, lexical);
+  highlight_editor_input(*cpp_, shell, actual);
+  EXPECT_EQ(actual, lexical);
+  const std::string embedded = "%define editor_paint cpp`editor_paint + 1`";
+  actual.assign(utf8_length(embedded), replxx::Replxx::Color::DEFAULT);
+  highlight_editor_input(*cpp_, embedded, actual);
+  EXPECT_EQ(actual[embedded.rfind("editor_paint")], semantic_color(SemanticKind::Variable));
+  EXPECT_EQ(cpp_->evaluate("editor_paint"), "(int) 0\n");
+}
+
+TEST_F(CppInterpreterTest, SemanticColorsRespectShadowingAndIncompleteInput) {
+  const std::string code = "struct EditorShadow {}; void editor_shadow_fn(int param) { int "
+                           "EditorShadow = param; EditorShadow += 1; }";
+  const auto tokens = cpp_->semantic_tokens(code);
+  const auto last = code.rfind("EditorShadow");
+  EXPECT_TRUE(std::any_of(tokens.begin(), tokens.end(), [&](const auto& token) {
+    return token.begin == last && token.kind == SemanticKind::Variable;
+  }));
+  EXPECT_TRUE(std::any_of(tokens.begin(), tokens.end(), [&](const auto& token) {
+    return token.begin == code.find("param") && token.kind == SemanticKind::Parameter;
+  }));
+  cpp_->semantic_tokens("void editor_partial() { int value = ");
+  EXPECT_EQ(cpp_->evaluate("6 * 7"), "(int) 42\n");
+  EXPECT_TRUE(cpp_->semantic_tokens(std::string(70000, 'x')).empty());
+}
+
+TEST_F(CppInterpreterTest, EditorSeesSessionMacrosAndDoesNotCommitEditedDefines) {
+  ASSERT_TRUE(cpp_->execute("#define EDITOR_MACRO(value) ((value) + 1)\n"));
+  EXPECT_TRUE(has(cpp_->complete("EDITOR_MAC").names, "EDITOR_MACRO"));
+  const std::string code = "int editor_macro_local = EDITOR_MACRO(2);";
+  const auto tokens = cpp_->semantic_tokens(code);
+  EXPECT_TRUE(std::any_of(tokens.begin(), tokens.end(), [&](const auto& token) {
+    return code.substr(token.begin, token.end - token.begin) == "EDITOR_MACRO" &&
+           token.kind == SemanticKind::Macro;
+  }));
+  cpp_->semantic_tokens("#define EDITOR_UNCOMMITTED 42\n");
+  EXPECT_FALSE(has(cpp_->complete("EDITOR_UNCOMMIT").names, "EDITOR_UNCOMMITTED"));
+  ASSERT_TRUE(cpp_->execute("#undef EDITOR_MACRO\n"));
+  EXPECT_FALSE(has(cpp_->complete("EDITOR_MAC").names, "EDITOR_MACRO"));
+  EXPECT_EQ(cpp_->evaluate("21 * 2"), "(int) 42\n");
+}
+
+TEST(EditorOptionsTest, PreservesUndefAndRedefinitionOfCommandLineMacros) {
+  std::string error;
+  auto cpp = CppInterpreter::create({"-DEDITOR_OPTION_MACRO=1"}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("#undef EDITOR_OPTION_MACRO\n"));
+  EXPECT_FALSE(has(cpp->complete("EDITOR_OPTION_MAC").names, "EDITOR_OPTION_MACRO"));
+  ASSERT_TRUE(cpp->execute("#define EDITOR_OPTION_MACRO 9\n"));
+  const auto colors = cpp->semantic_tokens("int editor_option = EDITOR_OPTION_MACRO;");
+  EXPECT_FALSE(colors.empty());
+  EXPECT_EQ(cpp->evaluate("EDITOR_OPTION_MACRO"), "(int) 9\n");
+}
+} // namespace
+} // namespace example
+
+namespace example {
+TEST(EditorRuntimeTest, IostreamEditingDoesNotDamageTheSession) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  cpp->semantic_tokens("#include <iostream>");
+  ASSERT_TRUE(cpp->execute("#include <iostream>\n"));
+  cpp->semantic_tokens("std::cout << \"editor\" << std::endl;");
+  EXPECT_EQ(cpp->evaluate("21 * 2"), "(int) 42\n");
+}
+} // namespace example
+
+namespace example {
+TEST(EditorRuntimeTest, RetainsVariadicAndPastingMacrosDuringAnalysis) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("#define EDITOR_VARIADIC(...) __VA_ARGS__\n"));
+  ASSERT_TRUE(cpp->execute("#define EDITOR_JOIN(a, b) a ## b\n"));
+  const std::string code = "EDITOR_VARIADIC(int editor_variadic = 1;) int EDITOR_JOIN(editor_, "
+                           "pasted) = 2; editor_variadic; editor_pasted;";
+  const auto tokens = cpp->semantic_tokens(code);
+  for (const auto& name : {std::string("editor_variadic"), std::string("editor_pasted")}) {
+    EXPECT_TRUE(std::any_of(tokens.begin(), tokens.end(), [&](const auto& token) {
+      return token.begin == code.rfind(name) && token.kind == SemanticKind::Variable;
+    })) << name;
+  }
+}
+
+TEST(EditorRuntimeTest, QualifiedRedefinitionsAndLocalShadowingUseCurrentDeclarations) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute(
+      "namespace editor_current { int value = 1; int function(int x) { return x; } }"));
+  ASSERT_TRUE(cpp->execute("namespace editor_current { double value = 2; }"));
+  const auto result = cpp->complete("editor_current::val");
+  ASSERT_FALSE(result.items.empty());
+  EXPECT_EQ(result.items.front().detail, "double");
+  ASSERT_TRUE(cpp->execute("int editor_shadow_global = 0;"));
+  const auto local =
+      cpp->complete("void local() { double editor_shadow_global = 2; editor_shadow_g");
+  ASSERT_FALSE(local.items.empty());
+  EXPECT_EQ(local.items.front().detail, "double");
+}
+
+TEST(EditorRuntimeTest, ReopenedAnonymousNamespacesKeepAllMembersVisible) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("namespace { int editor_anon_first = 1; }"));
+  ASSERT_TRUE(cpp->execute("namespace { int editor_anon_second = 2; }"));
+  const std::string code = "editor_anon_first + editor_anon_second;";
+  const auto tokens = cpp->semantic_tokens(code);
+  for (const auto& name : {std::string("editor_anon_first"), std::string("editor_anon_second")}) {
+    EXPECT_TRUE(std::any_of(tokens.begin(), tokens.end(), [&](const auto& token) {
+      return token.begin == code.find(name) && token.kind == SemanticKind::Variable;
+    })) << name;
+    EXPECT_TRUE(has(cpp->complete(name).names, name));
+  }
+  EXPECT_EQ(cpp->evaluate("editor_anon_first + editor_anon_second"), "(int) 3\n");
+}
+
+TEST(EditorRuntimeTest, NamespaceSuggestionsFollowUsingDirectives) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("namespace editor_visible { int editor_using_visible; } "
+                           "namespace editor_hidden { int editor_using_hidden; } "
+                           "using namespace editor_visible;"));
+  const auto result = cpp->complete("editor_using_");
+  EXPECT_TRUE(has(result.names, "editor_using_visible"));
+  EXPECT_FALSE(has(result.names, "editor_using_hidden"));
+}
+} // namespace example
