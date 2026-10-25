@@ -1,0 +1,14 @@
+#include <person.hpp>
+#include <string>
+
+%define std::string Person::getName() const cpp` return "Sample"; `
+
+Person p;
+p.getName();
+p.getName()
+bool matches = p.getName() == "Sample";
+matches
+
+std::string captured = p.getName();
+const char* text = captured.c_str();
+text
