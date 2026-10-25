@@ -1,5 +1,3 @@
-#include <unistd.h>
-
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
@@ -11,14 +9,15 @@
 #include <vector>
 
 #include <dlfcn.h>
-
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include "commands.hpp"
 #include "cpp_interpreter.hpp"
 #include "cpp_symbols.hpp"
 #include "library_manager.hpp"
 #include "loaded_symbols.hpp"
+#include "native_symbol_exports.hpp"
 #include "runtime_inspection.hpp"
 
 namespace example {
@@ -120,11 +119,97 @@ TEST_F(CppInterpreterTest, DefinesCallablesBeforeLoadingOneUnchangedNativeLibrar
   // Handles stay loaded while native exports refer to session code.
 }
 
+TEST_F(CppInterpreterTest, DefinesVirtualMethodsAndOverridesBeforeNativeLoading) {
+  ASSERT_EQ(dlopen(UNRESOLVED_VIRTUALS_LIBRARY, RTLD_NOW | RTLD_GLOBAL), nullptr);
+  ASSERT_TRUE(cpp_->add_source(UNRESOLVED_VIRTUALS_HEADER).ok);
+  std::string error;
+  ASSERT_TRUE(cpp_->define_callable("virtual_fixture::Service::compute(int x) const",
+                                    "return seed_ + x;", error))
+      << error;
+  ASSERT_TRUE(cpp_->define_callable("virtual_fixture::Implementation::compute(int x) const",
+                                    "return this->bias_ + x * 2;", error))
+      << error;
+  ASSERT_TRUE(cpp_->define_callable("virtual_fixture::NativeTable::compute(int x) const",
+                                    "return bias_ + x * 3;", error))
+      << error;
+  ASSERT_TRUE(cpp_->define_callable("virtual_fixture::VirtualBase::compute(int x) const",
+                                    "return bias_ + x * 4;", error))
+      << error;
+  ASSERT_TRUE(cpp_->define_callable("virtual_fixture::Covariant::self()", "return this;", error))
+      << error;
+  void* handle = dlopen(UNRESOLVED_VIRTUALS_LIBRARY, RTLD_NOW | RTLD_GLOBAL);
+  ASSERT_NE(handle, nullptr) << dlerror();
+  const auto non_pure = reinterpret_cast<int (*)(int)>(dlsym(handle, "virtual_non_pure_probe"));
+  const auto override = reinterpret_cast<int (*)(int)>(dlsym(handle, "virtual_override_probe"));
+  const auto rtti = reinterpret_cast<int (*)()>(dlsym(handle, "virtual_rtti_probe"));
+  ASSERT_NE(non_pure, nullptr);
+  ASSERT_NE(override, nullptr);
+  ASSERT_NE(rtti, nullptr);
+  EXPECT_EQ(non_pure(2), 42);
+  EXPECT_EQ(override(3), 106);
+  EXPECT_EQ(rtti(), 1);
+  auto native_table = reinterpret_cast<int (*)(int)>(dlsym(handle, "virtual_native_table_probe"));
+  auto virtual_base = reinterpret_cast<int (*)(int)>(dlsym(handle, "virtual_base_probe"));
+  auto covariant = reinterpret_cast<int (*)()>(dlsym(handle, "virtual_covariant_probe"));
+  ASSERT_NE(native_table, nullptr);
+  ASSERT_NE(virtual_base, nullptr);
+  ASSERT_NE(covariant, nullptr);
+  EXPECT_EQ(native_table(2), 206);
+  EXPECT_EQ(virtual_base(2), 308);
+  EXPECT_EQ(covariant(), 1);
+  ASSERT_EQ(cpp_->load_library(UNRESOLVED_VIRTUALS_LIBRARY), "");
+  EXPECT_EQ(cpp_->evaluate("virtual_fixture::virtual_non_pure_probe(2)"), "(int) 42\n");
+  EXPECT_EQ(cpp_->evaluate("virtual_fixture::virtual_override_probe(3)"), "(int) 106\n");
+  EXPECT_EQ(cpp_->evaluate("virtual_fixture::virtual_rtti_probe()"), "(int) 1\n");
+  ASSERT_TRUE(cpp_->set_hook(HookKind::Mock, "virtual_fixture::Service::compute(int x) const",
+                             "return x + 1000;", error))
+      << error;
+  EXPECT_EQ(non_pure(2), 1002);
+  ASSERT_TRUE(cpp_->restore("virtual_fixture::Service::compute(int x) const", error)) << error;
+  EXPECT_EQ(non_pure(2), 42);
+  EXPECT_FALSE(cpp_->define_callable("virtual_fixture::NativeTable::anchor()", "", error));
+  EXPECT_NE(error.find("existing implementation"), std::string::npos);
+}
+
+TEST(NativeSymbolExports, ConflictingBatchPublishesNoneOfItsNewSymbols) {
+  NativeSymbolExports exports;
+  std::string error;
+  const auto address = reinterpret_cast<std::uintptr_t>(dlsym(RTLD_DEFAULT, "malloc"));
+  ASSERT_NE(address, 0u);
+  const std::string name = "cpp_repl_atomic_virtual_export_probe";
+  ASSERT_EQ(dlsym(RTLD_DEFAULT, name.c_str()), nullptr);
+  EXPECT_FALSE(exports.publish({{name, address}, {"malloc", 1}}, error));
+  EXPECT_NE(error.find("different address"), std::string::npos);
+  EXPECT_EQ(dlsym(RTLD_DEFAULT, name.c_str()), nullptr);
+  ASSERT_TRUE(exports.publish({{name, address}}, error)) << error;
+  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(dlsym(RTLD_DEFAULT, name.c_str())), address);
+}
+
+TEST_F(CppInterpreterTest, VirtualDefinitionErrorsAllowRetryAndRejectPureDeclarations) {
+  ASSERT_TRUE(cpp_->execute("namespace virtual_recovery { int absent(int); "
+                            "struct Service { virtual int compute(int) const; }; "
+                            "struct Abstract { virtual int compute(int) const = 0; }; }"));
+  std::string error;
+  EXPECT_FALSE(cpp_->define_callable("virtual_recovery::Abstract::compute(int x) const",
+                                     "return x;", error));
+  EXPECT_NE(error.find("pure virtual"), std::string::npos);
+  EXPECT_FALSE(cpp_->define_callable("virtual_recovery::Service::compute(int x) const",
+                                     "return nonexistent;", error));
+  EXPECT_FALSE(cpp_->define_callable("virtual_recovery::Service::compute(int x) const",
+                                     "return absent(x);", error));
+  ASSERT_TRUE(cpp_->define_callable("virtual_recovery::Service::compute(int x) const",
+                                    "return x * 3;", error))
+      << error;
+  ASSERT_TRUE(cpp_->execute("virtual_recovery::Service virtual_recovered; "
+                            "virtual_recovery::Service* virtual_pointer = &virtual_recovered;"));
+  EXPECT_EQ(cpp_->evaluate("virtual_pointer->compute(14)"), "(int) 42\n");
+}
+
 TEST_F(CppInterpreterTest, CallableDefinitionsRecoverAndRejectUnsupportedTargets) {
   ASSERT_TRUE(cpp_->execute(
       "namespace callable_recovery { int pending(int); int dependency(int); int absent(int); "
       "int existing(int x) { return x; } static int local(int); "
-      "int variadic(int, ...); struct A { virtual int virtual_method(int); }; }"));
+      "int variadic(int, ...); struct A { virtual int virtual_method(int) = 0; }; }"));
   std::string error;
   EXPECT_FALSE(
       cpp_->define_callable("callable_recovery::pending(int x)", "return no_such_name;", error));

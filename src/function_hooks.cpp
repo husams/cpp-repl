@@ -472,12 +472,16 @@ std::optional<CallableDefinition> FunctionHooks::definition(const std::string& s
   }
   const auto* type = function->getType()->getAs<clang::FunctionProtoType>();
   const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(function);
+  if (method && method->isPureVirtual()) {
+    error = "pure virtual definitions are unsupported; define a concrete override instead";
+    return std::nullopt;
+  }
   if (!type || function->isTemplated() || function->isDependentContext() ||
       function->isConstexpr() || function->isVariadic() || function->isDeleted() ||
       function->getFormalLinkage() != clang::Linkage::External ||
-      type->getCallConv() != clang::CC_C || (method && method->isVirtual())) {
+      type->getCallConv() != clang::CC_C) {
     error = "callable definitions require external, non-template, non-constexpr, "
-            "non-variadic, non-virtual functions with the default calling convention";
+            "non-variadic functions with the default calling convention";
     return std::nullopt;
   }
   auto& context = impl_->interp.getASTContext();

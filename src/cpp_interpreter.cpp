@@ -328,7 +328,8 @@ bool CppInterpreter::run(const std::string& code, clang::Value& value) {
   return result;
 }
 
-bool CppInterpreter::run_raw(const std::string& code, clang::Value& value) {
+bool CppInterpreter::run_raw(const std::string& code, clang::Value& value,
+                             std::vector<std::string>* abi_exports) {
   if (has_top_level_return(code)) {  // would crash the parser
     llvm::errs() << "error: 'return' is only allowed inside a function\n";
     return false;
@@ -337,6 +338,23 @@ bool CppInterpreter::run_raw(const std::string& code, clang::Value& value) {
   if (!ptu) return report(ptu.takeError());
   if (ptu->TheModule) {
     const auto instrumented = hooks_.instrument(*ptu);
+    std::vector<std::string> emitted_abi;
+    if (abi_exports) {
+      // Itanium ABI support emitted by Clang for a virtual definition: tables,
+      // RTTI and adjusting/covariant thunks must be visible to native imports
+      // alongside the method itself. Preserve hidden/private RTTI visibility;
+      // export only definitions which Clang made visible to native consumers.
+      for (const auto& global : ptu->TheModule->global_values()) {
+        const auto name = global.getName();
+        if (!global.isDeclarationForLinker() && !global.hasLocalLinkage() &&
+            global.getVisibility() == llvm::GlobalValue::DefaultVisibility &&
+            (name.starts_with("_ZTV") || name.starts_with("_ZTT") || name.starts_with("_ZTI") ||
+             name.starts_with("_ZTS") || name.starts_with("_ZTC") || name.starts_with("_ZTh") ||
+             name.starts_with("_ZTv") || name.starts_with("_ZTc"))) {
+          emitted_abi.push_back(name.str());
+        }
+      }
+    }
     // An unresolved symbol would fail in the JIT, and ORC keeps retrying the
     // failed module's initializer on every later input (its platform does not
     // forget initializers of removed modules), so check before executing.
@@ -359,6 +377,9 @@ bool CppInterpreter::run_raw(const std::string& code, clang::Value& value) {
       // left in place, every later input retries its initializer and fails.
       if (llvm::Error u = undo_input(*interp_, ptu->TUPart)) report(std::move(u));
       return false;
+    }
+    if (abi_exports) {
+      *abi_exports = std::move(emitted_abi);
     }
   }
   if (!value_pending(*ptu)) return true;
@@ -427,20 +448,28 @@ bool CppInterpreter::define_callable(const std::string& signature, const std::st
   if (!native_exports_->prepare(error)) {
     return false;
   }
-  if (!execute("__attribute__((used)) " + callable->declaration + " {\n" + body + "\n}\n")) {
+  clang::Value value;
+  std::vector<std::string> exports;
+  if (!run_raw("__attribute__((used)) " + callable->declaration + " {\n" + body + "\n}\n", value,
+               &exports)) {
     discard_failed_callable_definition(interp_->getASTContext(), callable->mangled);
     error = "could not define callable: " + signature;
     return false;
   }
-  auto implementation = interp_->getSymbolAddress(callable->mangled);
-  if (!implementation || !implementation->getValue()) {
-    if (!implementation) {
-      llvm::consumeError(implementation.takeError());
+  exports.insert(exports.begin(), callable->mangled);
+  std::vector<std::pair<std::string, std::uintptr_t>> addresses;
+  for (const auto& symbol : exports) {
+    auto implementation = interp_->getSymbolAddress(symbol);
+    if (!implementation || !implementation->getValue()) {
+      if (!implementation) {
+        llvm::consumeError(implementation.takeError());
+      }
+      error = "callable is defined, but an emitted symbol address is unavailable: " + symbol;
+      return false;
     }
-    error = "callable is defined, but its address is unavailable: " + signature;
-    return false;
+    addresses.emplace_back(symbol, implementation->getValue());
   }
-  if (!native_exports_->publish(callable->mangled, implementation->getValue(), error)) {
+  if (!native_exports_->publish(addresses, error)) {
     error = "callable is defined in the session, but native publication failed: " + error;
     return false;
   }

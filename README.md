@@ -398,7 +398,7 @@ keep their literal contents; substitutions belong outside those bodies.
   dependencies first; unresolved bodies fail without poisoning later inputs.
   Existing definitions and resolved native implementations are rejected.
   Constructors, destructors, operators, templates, constexpr functions,
-  variadic functions, virtual methods (including vtables/thunks), internal
+  variadic functions, pure virtual declarations, internal
   linkage, and non-default calling conventions are unsupported and report
   errors. Signature parsing supports simple qualified identifiers, ordinary
   parameter declarators and optional `const`, `volatile`, `&`, `&&`, `noexcept`;
@@ -410,6 +410,24 @@ keep their literal contents; substitutions belong outside those bodies.
   See [the configured callable example](examples/unresolved-callables/README.md)
   for one supplied library, numbered startup scripts, loader-failure checks,
   native-call verification and unchanged-file hashes on Mac and Linux.
+  Non-pure virtual methods and concrete overrides are supported using the
+  existing declaration's qualified name, without adding `virtual` or `override`
+  to the command signature. Clang emits the method and its required vtables,
+  RTTI, and adjustment/covariant thunks; `%define` publishes native-visible
+  definitions of those support symbols alongside the method's code address.
+  Each method and its support symbols are published together in one native
+  metadata image; failed publication does not leave a partial set of new native
+  exports. As with other callable definitions, a compilation that already
+  succeeded remains defined in the JIT after a publication error; start a fresh
+  session to retry after fixing that environment error.
+  This supports native-owned and JIT-owned vtables, multiple/virtual inheritance
+  and covariant returns. Hidden support symbols retain their original visibility.
+  Define dependent methods first, including other undefined virtual slots,
+  before the key method that emits a class's vtable. A pure virtual declaration
+  stays pure; supply an already-declared concrete override in the derived class.
+  [The virtual-method example](examples/unresolved-virtuals/README.md) provides
+  manual tests for a non-pure virtual method and a concrete override, both called
+  by one unchanged native library after startup definitions.
 - `%symbols [all] [undefined] [lib <regex>] [name <regex>]` - list loaded native exports
   and emitted session functions/globals as demangled, fully qualified C++ names
   only, one per line, with no columns or counts.
