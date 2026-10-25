@@ -105,6 +105,29 @@ then compiled and run by the interpreter.
   `#include "..."` lines resolve next to it. Each file can be added once. Its
   functions, variables and classes can be used, completed and shown with
   `%class` like typed input. With no argument it lists the added files.
+  At startup, the REPL searches the current directory and its ancestors for
+  `compile_commands.json`, also checking `build/` and `build-linux/` at each
+  level. The first database found is validated and loaded once using Clang
+  Tooling; malformed JSON reports its path and prevents startup. The startup
+  message names the selected database.
+  Each added file uses its exact compile command. If it has no entry, a C++
+  entry from the same directory supplies the options, preferring a matching
+  filename stem and then alphabetical order. This also covers headers and
+  `.cc`, `.cxx`, and other C++ extensions. Files without a matching entry or
+  same-directory fallback use the REPL's normal options; missing files still
+  report an error.
+  Include directories, definitions/undefinitions, language settings such as
+  `-std=c++20`, forced includes, and macro includes apply while adding that
+  file. Relative paths resolve against the compile command's directory;
+  command-line REPL flags override database flags. Both JSON `command` and
+  `arguments` forms and compiler response files are supported. Output and
+  dependency-file flags are removed, and the REPL's directory, live objects,
+  and hooks are preserved, including after a failed addition.
+  Files still share one persistent AST: already parsed headers and declarations
+  remain in the session. Compilation databases supply preprocessing and language
+  settings; warning policy, optimization, debug emission, linker options, and target code generation
+  remain controlled by the running JIT. Commands for incompatible targets,
+  per-file PCH, or VFS overlays report an error.
 - `%class [name]` - show a class defined in the session: its bases and
   members as declared, its size and alignment, and each field's offset and
   size, all read from the interpreter's AST. A name can be qualified
@@ -449,6 +472,10 @@ printf 'int n = 6;\nn * 7\n%%quit\n' | ./build/cpp-repl
   `%lib` hand-over to the JIT, code completion
 - `src/cpp_inspect.cpp` - AST queries: user classes, `%class` synopsis and
   layout, member names for completion
+- `src/project_compilation_database.cpp` - startup database discovery and
+  Clang Tooling compile-command selection and adjustment
+- `src/source_compile_options.cpp` - scoped per-file frontend options,
+  include search paths and macro restoration
 - `src/cpp_symbols.cpp` - `%info` symbol metadata, overload lookup and aligned output
 - `src/function_hooks.cpp` - overload lookup, per-function JIT routing,
   mock and hook compilation

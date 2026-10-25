@@ -290,7 +290,7 @@ const std::vector<CommandInfo>& command_table() {
       {"%add-path", CommandKind::AddPath, " <path[:path...]>",
        "add library search directories, separated by ':'"},
       {"%add", CommandKind::Add, " [path ...]",
-       "parse and run C++ source files (no argument: list added files)"},
+       "parse and run C++ files using compile_commands.json (no argument: list added files)"},
       {"%class", CommandKind::Class, " [name]",
        "show a class's members and layout (no argument: list classes)"},
       {"%info", CommandKind::Info, " <symbol>", "show symbol declarations, types, locations and JIT addresses"},

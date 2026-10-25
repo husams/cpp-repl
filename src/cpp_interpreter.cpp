@@ -44,6 +44,8 @@
 #include "library_manager.hpp"
 #include "loaded_symbols.hpp"
 #include "runtime_inspection.hpp"
+#include "project_compilation_database.hpp"
+#include "source_compile_options.hpp"
 
 // Set by CMake from the LLVM package that was linked.
 #ifndef CPP_REPL_LLVM_PREFIX
@@ -145,6 +147,23 @@ std::vector<std::string> platform_args() {
 // A compiler for the interpreter: platform_args() plus the user's flags.
 llvm::Expected<std::unique_ptr<clang::CompilerInstance>> make_compiler(
     const std::vector<std::string>& args) {
+  // Clang's real VFS applies -working-directory to the process as well. It
+  // describes the build command, not where the REPL should continue running.
+  struct DirectoryScope {
+    std::filesystem::path original;
+    DirectoryScope() {
+      std::error_code error;
+      original = std::filesystem::current_path(error);
+    }
+    ~DirectoryScope() {
+      if (original.empty()) return;
+      std::error_code error;
+      std::filesystem::current_path(original, error);
+      if (error)
+        llvm::errs() << "error: cannot restore REPL directory: "
+                     << error.message() << '\n';
+    }
+  } directory_scope;
   // The builder keeps the `const char*` pointers, so `all` must outlive
   // CreateCpp().
   std::vector<std::string> all = platform_args();
@@ -157,8 +176,10 @@ llvm::Expected<std::unique_ptr<clang::CompilerInstance>> make_compiler(
   // Use GOT references instead of x86_64 small-model direct data references.
   all.emplace_back("-fPIC");
 #endif
-#if defined(__linux__) && defined(__x86_64__) && defined(CPP_REPL_NATIVE_CALL_PATCHES)
-  // The branch islands transfer indirectly to JIT entries, including on CET systems.
+#if defined(__linux__) && defined(__x86_64__) && \
+    defined(CPP_REPL_NATIVE_CALL_PATCHES)
+  // The branch islands transfer indirectly to JIT entries, including on CET
+  // systems.
   all.emplace_back("-fcf-protection=branch");
 #endif
   std::vector<const char*> argv;
@@ -202,13 +223,17 @@ std::vector<std::string> missing_symbols(const clang::Interpreter& interp,
 }  // namespace
 
 CppInterpreter::CppInterpreter(std::unique_ptr<clang::Interpreter> interp,
-                               std::vector<std::string> args)
-    : interp_(std::move(interp)), hooks_(*interp_), args_(std::move(args)) {}
+                               std::vector<std::string> args,
+                               std::unique_ptr<ProjectCompilationDatabase> database)
+    : interp_(std::move(interp)), hooks_(*interp_), args_(std::move(args)),
+      database_(std::move(database)) {}
 
 CppInterpreter::~CppInterpreter() = default;
 
 std::unique_ptr<CppInterpreter> CppInterpreter::create(
     const std::vector<std::string>& args, std::string& error) {
+  auto database = ProjectCompilationDatabase::load(error);
+  if (!database) return nullptr;
   static std::once_flag init;
   std::call_once(init, [] {
     llvm::InitializeNativeTarget();
@@ -230,7 +255,8 @@ std::unique_ptr<CppInterpreter> CppInterpreter::create(
     error = llvm::toString(interp.takeError());
     return nullptr;
   }
-  return std::unique_ptr<CppInterpreter>(new CppInterpreter(std::move(*interp), args));
+  return std::unique_ptr<CppInterpreter>(
+      new CppInterpreter(std::move(*interp), args, std::move(database)));
 }
 
 // ParseAndExecute(), split up so a failed Execute can be undone.
@@ -246,13 +272,15 @@ bool CppInterpreter::run(const std::string& code, clang::Value& value) {
     // An unresolved symbol would fail in the JIT, and ORC keeps retrying the
     // failed module's initializer on every later input (its platform does not
     // forget initializers of removed modules), so check before executing.
-    const std::vector<std::string> missing = missing_symbols(*interp_, *ptu->TheModule);
+    const std::vector<std::string> missing =
+        missing_symbols(*interp_, *ptu->TheModule);
     if (!missing.empty()) {
       hooks_.discard(instrumented);
       std::string list;
-      for (const std::string& name : missing) list += (list.empty() ? "" : ", ") + name;
-      llvm::errs() << "error: undefined symbol" << (missing.size() > 1 ? "s" : "") << ": "
-                   << list << '\n';
+      for (const std::string& name : missing)
+        list += (list.empty() ? "" : ", ") + name;
+      llvm::errs() << "error: undefined symbol"
+                   << (missing.size() > 1 ? "s" : "") << ": " << list << '\n';
       if (llvm::Error u = interp_->Undo()) report(std::move(u));
       return false;
     }
@@ -427,18 +455,46 @@ CppInterpreter::AddResult CppInterpreter::add_source(const std::string& path) {
   if (std::find(sources_.begin(), sources_.end(), name) != sources_.end()) {
     return {false, "already added: " + name};
   }
-  if (!execute("#include \"" + name + "\"\n")) return {false, "could not add " + name};
+  const auto options = database_->options_for(name);
+  const auto include = "#include \"" + name + "\"\n";
+  if (options) {
+    auto arguments = options->arguments;
+    // Explicit REPL flags override compile-database flags.
+    arguments.insert(arguments.end(), args_.begin(), args_.end());
+    auto configured = make_compiler(arguments);
+    if (!configured)
+      return {false, "could not configure " + name + ": " +
+                         llvm::toString(configured.takeError())};
+    SourceCompileScope scope(*interp_->getCompilerInstance(), **configured,
+                             options->directory);
+    if (!scope.error().empty())
+      return {false, "could not configure " + name + ": " + scope.error()};
+    const bool prepared = scope.prelude().empty() || execute(scope.prelude());
+    const bool added = prepared && execute(scope.includes() + include);
+    // Parsing failures do not undo macro directives: always restore them in a
+    // separate input, while the temporary language settings are still active.
+    const bool restored = scope.epilogue().empty() || execute(scope.epilogue());
+    if (!added || !restored) return {false, "could not add " + name};
+  } else if (!execute(include))
+    return {false, "could not add " + name};
   sources_.push_back(name);
-  return {true, "added: " + name};
+  return {true,
+          "added: " + name +
+              (options ? " (compile options: " + options->source + ")" : "")};
+}
+
+const std::string& CppInterpreter::compilation_database_path() const {
+  return database_->path();
 }
 
 std::vector<std::string> CppInterpreter::class_names() {
   return user_class_names(interp_->getASTContext());
 }
 
-std::optional<std::string> CppInterpreter::describe_class(const std::string& name,
-                                                          std::string& error) {
-  const clang::CXXRecordDecl* record = find_class(interp_->getASTContext(), name);
+std::optional<std::string> CppInterpreter::describe_class(
+    const std::string& name, std::string& error) {
+  const clang::CXXRecordDecl* record =
+      find_class(interp_->getASTContext(), name);
   if (record == nullptr) {
     error = "no class named '" + name + "' (try %class)";
     return std::nullopt;
@@ -452,9 +508,11 @@ std::vector<std::string> CppInterpreter::symbol_names() {
   return user_symbol_names(interp_->getASTContext());
 }
 
-std::optional<std::string> CppInterpreter::symbol_info(const std::string& name, std::string& error) {
+std::optional<std::string> CppInterpreter::symbol_info(const std::string& name,
+                                                       std::string& error) {
   error.clear();
-  auto address_text = [&](const std::string& symbol, const std::string& unavailable) {
+  auto address_text = [&](const std::string& symbol,
+                          const std::string& unavailable) {
     auto address = interp_->getSymbolAddress(symbol);
     if (!address) {
       llvm::consumeError(address.takeError());

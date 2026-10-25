@@ -14,6 +14,8 @@ class Value;
 
 namespace example {
 
+class ProjectCompilationDatabase;
+
 // The clang-repl engine behind the REPL: clang::Interpreter parses each input
 // as a partial translation unit on top of the earlier ones, and runs it
 // in-process with the ORC JIT. Clang diagnostics go to stderr.
@@ -58,13 +60,16 @@ class CppInterpreter {
 
   // Parses and runs a C++ source file in the session as if it were
   // #included, so diagnostics point into the file and its own #include "..."
-  // lines resolve next to it. A file can be added once.
+  // lines resolve next to it. Compile options come from the startup database,
+  // using an exact entry or a C++ entry in the same directory. A file can be
+  // added once; existing session state and hooks are preserved.
   struct AddResult {
     bool ok;
     std::string message;
   };
   AddResult add_source(const std::string& path);
   const std::vector<std::string>& sources() const { return sources_; }
+  const std::string& compilation_database_path() const;
 
   // Classes defined by user code (inputs, added sources and their non-system
   // headers; qualified names), and a synopsis of one:
@@ -91,13 +96,15 @@ class CppInterpreter {
   static std::string version();
 
  private:
-  CppInterpreter(std::unique_ptr<clang::Interpreter> interp, std::vector<std::string> args);
+  CppInterpreter(std::unique_ptr<clang::Interpreter> interp, std::vector<std::string> args,
+                 std::unique_ptr<ProjectCompilationDatabase> database);
   bool run(const std::string& code, clang::Value& value);
 
   std::unique_ptr<clang::Interpreter> interp_;
   FunctionHooks hooks_;
   std::vector<std::string> args_;  // the user's compiler flags, for completion
   std::vector<std::string> sources_;  // canonical paths of the %add-ed files
+  std::unique_ptr<ProjectCompilationDatabase> database_;
 };
 
 }  // namespace example

@@ -38,6 +38,9 @@ int main(int argc, char** argv) {
 
   std::cout << "cpp-repl (" << example::CppInterpreter::version()
             << "). Type %help for commands.\n";
+  if (!cpp->compilation_database_path().empty()) {
+    std::cout << "Compile options: " << cpp->compilation_database_path() << '\n';
+  }
 
   std::string pending;
 
