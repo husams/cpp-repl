@@ -45,7 +45,7 @@ set(CMAKE_BUILD_RPATH "${LLVM_LIBRARY_DIR}")
 set(CMAKE_INSTALL_RPATH "${LLVM_LIBRARY_DIR}")
 
 add_library(example_core STATIC
-  src/commands.cpp src/cpp_lexer.cpp src/highlight_cpp.cpp
+  src/commands.cpp src/shell_substitution.cpp src/cpp_lexer.cpp src/highlight_cpp.cpp
   src/highlight_repl.cpp src/library_manager.cpp src/library_dependencies.cpp src/inspection_output.cpp)
 target_include_directories(example_core PUBLIC src)
 target_include_directories(example_core SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})

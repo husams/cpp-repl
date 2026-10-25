@@ -17,7 +17,7 @@ namespace example {
 // clang-format off
 //   command   := lib | libs | libinfo | paths | add-path | add | class | info
 //              | symbols | demangle | define | hook | hooks | restore | compile-opts
-//              | add-compile-opt | set-compile-opts | use-compile-opts | help | quit
+//              | add-compile-opt | set-compile-opts | use-compile-opts | clear | help | quit
 //   lib       := "%lib" { path }                 zero or more paths
 //   libs      := "%libs" [ "all" ] [ regex ]     loaded library names only
 //   paths     := "%paths"                       current library search paths
@@ -39,7 +39,10 @@ namespace example {
 //   restore   := "%restore" [ signature [ "in" signature ] ]
 //   hooks     := "%hooks"
 //   help      := "%help"
+//   clear     := "%clear"
 //   quit      := "%quit"
+//   Command arguments may contain ``shell script`` substitutions, including
+//   newlines. They are executed only when submitted, before argument parsing.
 //   path      := '"' { any char but '"' } '"'    quoted, may contain blanks
 //              | word                            no blanks (and no ':' in
 //                                                %add-path)
@@ -66,6 +69,7 @@ enum class CommandKind {
   Post,
   Restore,
   Hooks,
+  Clear,
   Help,
   Quit,
   Unknown
@@ -114,19 +118,25 @@ struct ParsedCommand {
   std::optional<Operand> signature;   // %mock / %pre / %post / %restore target
   std::optional<Operand> caller;      // optional direct caller after "in"
   std::optional<Operand> code;        // contents of cpp`...`
-  bool incomplete = false;            // an open cpp` block
+  std::vector<Operand> shell_commands;  // deferred ``...`` blocks; spans include delimiters
+  std::string original_text;           // retained only for shell substitution
+  bool incomplete = false;            // an open cpp` or `` block
   // First grammar violation; empty when the command is well formed.
   std::string error;
   Span error_span;  // the offending text (may be empty, e.g. a missing path)
 };
 
-ParsedCommand parse_command(std::string_view text);
+ParsedCommand parse_command(std::string_view text, bool allow_shell = true);
+
+// Run deferred shell blocks and parse their substituted stdout once. Parsing,
+// highlighting and completion never launch a process. Failure carries an error.
+ParsedCommand expand_shell_substitutions(const ParsedCommand& command);
 
 // True if the first non-blank character is '%'.
 bool is_command_line(std::string_view text);
 
 // True if Enter should continue the input instead of submitting it. Commands
-// with an open cpp` block continue; C++ continues while is_incomplete().
+// with an open cpp` or `` block continue; C++ continues while is_incomplete().
 bool wants_more_input(std::string_view text);
 
 // Runs a parsed command, writing all output (errors prefixed "error: ") to

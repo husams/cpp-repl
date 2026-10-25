@@ -89,6 +89,34 @@ Pass `-DREPLXX_EXAMPLE_BUILD_TESTS=OFF` to skip the tests (and googletest).
 REPL commands always start with `%`. Anything else is C++: it is highlighted,
 then compiled and run by the interpreter.
 
+Any `%` command can substitute shell output into its arguments using double
+backticks. Each block launches `/bin/sh -c` in the REPL's current directory,
+with its environment, and replaces the block with captured stdout. Trailing
+newlines are removed; other newlines remain and separate arguments where the
+command grammar permits. Stderr goes directly to the terminal. A failed shell
+process reports its exit status and prevents the REPL command from running.
+Child stdin is `/dev/null`, so scripts cannot consume subsequent REPL input.
+
+```text
+%lib ``./find_lib.sh``
+%lib ``
+  ./find_lib.sh
+``
+%add ``printf '%s\n' first.cpp second.cpp``
+%add-path "``printf '/path/with spaces'``"
+%add-compile-opt ``printf -- '-DVALUE=42'``
+%clear
+```
+
+Enter continues an open double-backtick block, including blank lines; Ctrl+C
+cancels it. The shell runs once on submission, including in startup scripts;
+editing, highlighting and completion do not execute it. Quote the whole block
+when its output is one argument containing spaces, using the destination
+command's quoting rules. Multiple blocks run left to right. Captured output is
+never expanded again. Ordinary C++ input and existing `cpp` backtick bodies
+keep their literal contents; substitutions belong outside those bodies.
+
+- `%clear` - clear the screen and return to the prompt, preserving the session.
 - `%lib [path ...]` - `dlopen` zero or more shared libraries, separated by
   blanks. A path containing `/` is opened directly; otherwise each
   `%add-path` dir is tried, then the system lookup, as `<name>`,
@@ -131,8 +159,8 @@ then compiled and run by the interpreter.
   A filename is the optional first word before the flags; there is no `--`
   separator. Quote filenames, include directories, or flag values that contain
   spaces. Single/double quotes and backslash escapes group compiler arguments;
-  the REPL performs no shell expansion or command execution. Relative manual
-  include paths resolve from the directory where the command is entered,
+  expansion and command execution require explicit double-backtick blocks.
+  Relative manual include paths resolve from the directory where the command is entered,
   even when the database command uses a different build directory. File
   settings can be recorded before the source file exists. For filenames
   beginning with `-`, use `./-filename.cpp`.
