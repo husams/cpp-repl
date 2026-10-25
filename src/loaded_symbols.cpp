@@ -1,5 +1,7 @@
 #include "loaded_symbols.hpp"
 
+#include <dlfcn.h>
+
 #include <algorithm>
 #include <cctype>
 #include <iomanip>
@@ -27,6 +29,27 @@ std::string one_line(const std::string& text) {
   return result;
 }
 
+// Directories of the running C runtime and dynamic loader. A custom toolchain
+// may ship them outside the standard host locations.
+const std::vector<std::string>& runtime_directories() {
+  static const std::vector<std::string> directories = [] {
+    std::vector<std::string> result;
+    for (const auto* symbol : {"malloc", "_r_debug"}) {
+      Dl_info info{};
+      void* address = dlsym(RTLD_DEFAULT, symbol);
+      if (!address || !dladdr(address, &info) || !info.dli_fname) continue;
+      const std::string path = info.dli_fname;
+      const auto slash = path.rfind('/');
+      if (slash == std::string::npos || slash == 0) continue;
+      const auto directory = path.substr(0, slash + 1);
+      if (std::find(result.begin(), result.end(), directory) == result.end())
+        result.push_back(directory);
+    }
+    return result;
+  }();
+  return directories;
+}
+
 }  // namespace
 
 std::string readable_symbol_name(const std::string& mangled) {
@@ -41,6 +64,9 @@ bool is_system_library(const std::string& path) {
        {"/System/", "/Library/Apple/", "/usr/lib/", "/usr/lib64/", "/lib/",
         "/lib64/", "/opt/homebrew/", "/usr/local/Cellar/", "/usr/local/opt/"}) {
     if (path.rfind(root, 0) == 0) return true;
+  }
+  for (const auto& directory : runtime_directories()) {
+    if (path.rfind(directory, 0) == 0) return true;
   }
   return path == "linux-vdso.so.1" || path == "linux-gate.so.1" ||
          path == "[vdso]";

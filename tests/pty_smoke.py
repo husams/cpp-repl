@@ -8,6 +8,7 @@ import os
 import pty
 import re
 import select
+import shlex
 import signal
 import subprocess
 import sys
@@ -80,7 +81,10 @@ def main():
     binary = os.path.abspath(sys.argv[1])
     with tempfile.TemporaryDirectory() as shell_cwd:
         with open(os.path.join(shell_cwd, "find_lib.sh"), "w", encoding="utf8") as f:
-            f.write("#!/bin/sh\nprintf 'z\\n'\n")
+            # Every toolchain can load the built test library; host libraries
+            # such as libz may be outside a custom loader's search path.
+            library = f'"{sys.argv[6]}"' if len(sys.argv) > 6 else "z"
+            f.write(f"#!/bin/sh\nprintf '%s\\n' {shlex.quote(library)}\n")
         os.chmod(os.path.join(shell_cwd, "find_lib.sh"), 0o755)
         out, status = session(binary, shell_cwd, [
             ("shell_lib", b"%lib ``./find_lib.sh``\r", True),

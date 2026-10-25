@@ -4,6 +4,7 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -1026,7 +1027,12 @@ TEST_F(CppInterpreterTest, SymbolListingHidesSystemExportsUnlessAllIsRequested) 
   ASSERT_TRUE(all) << error;
   EXPECT_EQ(*all, *normal + "malloc\n");
   // A library filter still obeys the default scope; all is an explicit opt-in.
-  const std::string system = R"(^(/System/|/usr/lib/|/usr/lib64/|/lib/|/lib64/))";
+  // Toolchains may ship the C runtime outside the host system directories.
+  Dl_info runtime{};
+  ASSERT_NE(dladdr(dlsym(RTLD_DEFAULT, "malloc"), &runtime), 0);
+  ASSERT_NE(runtime.dli_fname, nullptr);
+  const auto directory = std::filesystem::path(runtime.dli_fname).parent_path().string();
+  const std::string system = "^" + std::regex_replace(directory, std::regex(R"([.^$|()\[\]{}*+?\\])"), R"(\$&)") + "/";
   EXPECT_EQ(cpp_->symbol_list(system, "^malloc$", error), "");
   EXPECT_EQ(cpp_->symbol_list(system, "^malloc$", error, true), "malloc\n");
   const auto details = cpp_->symbol_info("malloc", error);

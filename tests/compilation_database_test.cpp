@@ -127,7 +127,7 @@ TEST(CompilationDatabase,
                 "#pragma once\n#define CONFIG_VALUE 73\n");
   const fs::path first_source = project.write(
       "src/first.cpp",
-      "#include <concepts>\n#include \"config.hpp\"\n"
+      "#include \"config.hpp\"\n"
       "#if __cplusplus < 202002L\n#error requires C++20\n#endif\n"
       "#if !defined(FIRST_ONLY) || defined(SECOND_ONLY)\n#error wrong per-file "
       "macro set\n#endif\n"

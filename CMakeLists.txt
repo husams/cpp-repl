@@ -222,7 +222,8 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
                      $<TARGET_FILE:unresolved_callables_test_library>
                      ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/unresolved_callables.hpp
                      $<TARGET_FILE:unresolved_virtuals_test_library>
-                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/unresolved_virtuals.hpp)
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/unresolved_virtuals.hpp
+                     $<TARGET_FILE:hook_test_library>)
   endif()
 endif()
 
