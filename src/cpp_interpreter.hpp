@@ -18,6 +18,7 @@ namespace example {
 
 class ProjectCompilationDatabase;
 class NativeSymbolExports;
+class SourceReload;
 struct SourceCompileOptions;
 
 // The clang-repl engine behind the REPL: clang::Interpreter parses each input
@@ -66,12 +67,14 @@ class CppInterpreter {
   // #included, so diagnostics point into the file and its own #include "..."
   // lines resolve next to it. Compile options come from the startup database,
   // using an exact entry or a C++ entry in the same directory. A file can be
-  // added once; existing session state and hooks are preserved.
+  // added once; edits are reloaded before the next C++ input. Existing objects
+  // and compiled callers retain their original definitions.
   struct AddResult {
     bool ok;
     std::string message;
   };
   AddResult add_source(const std::string& path);
+  AddResult reload_source(const std::string& path);
   const std::vector<std::string>& sources() const { return sources_; }
   const std::string& compilation_database_path() const;
   // Empty file selects global flags. File append inherits database/global
@@ -138,7 +141,11 @@ class CppInterpreter {
       const std::vector<std::string>* globals = nullptr) const;
 
   // Keep absolute exports alive while the JIT destroys its global objects.
+  AddResult load_source(const std::string& path, bool reload);
+  void reload_changed_sources();
   std::unique_ptr<NativeSymbolExports> native_exports_;
+  // The preprocessor callbacks refer to this state until interpreter shutdown.
+  std::unique_ptr<SourceReload> source_reload_;
   std::unique_ptr<clang::Interpreter> interp_;
   FunctionHooks hooks_;
   std::vector<std::string> args_;  // the user's compiler flags, for completion
@@ -150,6 +157,8 @@ class CppInterpreter {
   std::vector<std::string> reference_global_overrides_;
   bool global_options_changed_ = false;
   bool compile_scope_active_ = false;
+  std::string source_input_;
+  bool reloading_source_ = false;
 };
 
 }  // namespace example

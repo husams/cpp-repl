@@ -625,7 +625,7 @@ TEST(Dispatch, QuitStopsAndHelpListsCommands) {
   for (const std::string& name : command_names()) {
     EXPECT_NE(out.str().find(name), std::string::npos) << name;
   }
-  EXPECT_EQ(command_names().size(), 24u);
+  EXPECT_EQ(command_names().size(), 25u);
 }
 
 TEST(Dispatch, PathsShowsConfiguredDirectoriesAndLoaderSettings) {

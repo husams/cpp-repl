@@ -59,7 +59,7 @@ Replxx::completions_t complete(CppInterpreter& cpp, const std::string& input,
   }
 
   if (cmd.kind == CommandKind::Lib || cmd.kind == CommandKind::AddPath ||
-      cmd.kind == CommandKind::Add) {
+      cmd.kind == CommandKind::Add || cmd.kind == CommandKind::Reload) {
     const std::string typed = input.substr(current_path_begin(input, cmd));
     context_len = static_cast<int>(utf8_length(typed));
     for (const std::string& p :

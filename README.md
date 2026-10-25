@@ -280,6 +280,33 @@ keep their literal contents; substitutions belong outside those bodies.
   settings; warning policy, optimization, debug emission, linker options, and target code generation
   remain controlled by the running JIT. Commands for incompatible targets,
   per-file PCH, or VFS overlays report an error.
+- `%reload [path ...]` - reread previously added C++ files and their user
+  headers, using each file's current compile options. With no arguments it
+  reloads all added files. Edits are also detected automatically before the
+  next C++ input; there is no background execution while you are editing.
+  Syntax or unresolved-symbol errors preserve the last working definitions
+  and macros. Initializers run again on a successful reload; external effects
+  from executed C++ cannot be undone.
+- Ordinary C++ definitions can be entered again at the same prompt: classes,
+  functions, variables, aliases, enums and templates use the newest definition
+  in subsequent inputs. For example:
+
+  ```cpp
+  class A { public: int value() { return 1; } };
+  A old;
+  class A { public: int value() { return 2; } };
+  A current;
+  current.value()  // 2
+  old.value()      // 1
+  ```
+
+  Existing objects, pointers and compiled callers keep their original types
+  and definitions, including after file reload. Create new objects/callers to
+  use the new version; values of an old class type do not become instances of
+  its new definition. Retaining old versions uses memory until the session
+  ends. Standard C++ rules still apply within class bodies and to explicit
+  template specializations; C linkage and precompiled library ABI changes
+  cannot be versioned this way.
 - `%class [name]` - show a class defined in the session: its bases and
   members as declared, its size and alignment, and each field's offset and
   size, all read from the interpreter's AST. A name can be qualified
@@ -457,6 +484,7 @@ libs      := "%libs" [ "all" ] [ regex ]
 paths     := "%paths"
 libinfo   := "%libinfo" library
 add       := "%add" { path }
+reload    := "%reload" { path }
 compile-opts := "%compile-opts" [ file ]
 add-compile-opt := "%add-compile-opt" [ file ] flag { flag-or-value }
 set-compile-opts := "%set-compile-opts" [ file ] { flag-or-value }
@@ -721,7 +749,7 @@ session's global scope and accesses members using ordinary C++ access rules.
   offers only methods after `.` / `->`, so cpp-repl adds the data members
   (inherited ones included) of a variable or of a field chain such as
   `a.b->`. Tab also completes `%` commands, filesystem paths after `%lib `,
-  `%add-path ` and `%add `, and class names after `%class `.
+  `%add-path `, `%add ` and `%reload `, and class names after `%class `.
 - History persists in `./.replxx_history`; Ctrl+L clears the screen; Ctrl+D
   (or `%quit`) exits.
 

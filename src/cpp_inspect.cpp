@@ -1,4 +1,5 @@
 #include "cpp_inspect.hpp"
+#include "definition_shadowing.hpp"
 
 #include <algorithm>
 #include <set>
@@ -43,10 +44,10 @@ void collect_classes(const clang::ASTContext& ctx, const clang::DeclContext& dc,
     // __clang_Interpreter_NewTag.
     if (rd == nullptr || rd->isImplicit() || rd->getIdentifier() == nullptr ||
         rd->getName().starts_with("__") || !rd->isThisDeclarationADefinition() ||
-        !from_user_code(ctx, *rd)) {
+        !from_user_code(ctx, *rd) || !is_current_definition(*rd)) {
       continue;
     }
-    out.insert(rd->getQualifiedNameAsString());
+    out.insert(unversioned_name(rd->getQualifiedNameAsString()));
     collect_classes(ctx, *rd, out);  // nested classes
   }
 }
@@ -145,7 +146,7 @@ std::string describe_class(clang::ASTContext& ctx, const clang::CXXRecordDecl& r
 
   std::string out;
   llvm::raw_string_ostream os(out);
-  os << record.getKindName() << ' ' << record.getQualifiedNameAsString();
+  os << record.getKindName() << ' ' << unversioned_name(record.getQualifiedNameAsString());
   bool first = true;
   for (const clang::CXXBaseSpecifier& b : record.bases()) {
     os << (first ? " : " : ", ");
