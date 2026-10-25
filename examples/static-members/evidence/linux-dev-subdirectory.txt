@@ -1,0 +1,72 @@
+cpp-repl (LLVM 21.1.8). Type %help for commands.
+Compile options: /home/husam/cpp-repl-examples/static-members/build/compile_commands.json
+Session compile options updated:
+  Reference file : src/session.cpp
+  Applies to     : future compilation
+Compile options updated:
+  Scope      : global
+  Action     : appended
+  Applies to : future compilation
+preloaded: /home/husam/cpp-repl-examples/static-members/.cpp-repl/0-options.repl
+added: /home/husam/cpp-repl-examples/static-members/build
+loaded: /home/husam/cpp-repl-examples/static-members/build/libstatic_members_native.so
+added: /home/husam/cpp-repl-examples/static-members/include/state.hpp
+preloaded: /home/husam/cpp-repl-examples/static-members/.cpp-repl/10-declarations.repl
+storage_demo::State::counter_
+storage_demo::State::samples
+storage_demo::State::title[abi:cxx11]
+storage_demo::State::weights
+preloaded: /home/husam/cpp-repl-examples/static-members/.cpp-repl/20-find-missing.repl
+defined: storage_demo::State::counter_
+defined: storage_demo::State::title
+defined: storage_demo::State::samples
+defined: storage_demo::State::weights
+preloaded: /home/husam/cpp-repl-examples/static-members/.cpp-repl/30-definitions.repl
+added: /home/husam/cpp-repl-examples/static-members/src/session.cpp (compile options: /home/husam/cpp-repl-examples/static-members/src/session.cpp)
+preloaded: /home/husam/cpp-repl-examples/static-members/.cpp-repl/40-use.repl
+Private scalar: 42
+String: startup storage
+Vector: 3, 5, 8
+Array: 2, 4, 6
+Native member: 91
+Compile flags: 73, 29
+STATIC_MEMBERS_PASS
+Symbol: storage_demo::State::counter_
+  Kind        : variable
+  Declaration : long long storage_demo::State::counter_
+  Type        : long long
+  Mangled     : _ZN12storage_demo5State8counter_E
+  Linkage     : external
+  Definition  : yes
+  Location    : input_line_12:1:32
+  Size        : 8 bytes
+  Alignment   : 8 bytes
+  Address     : 0x7fa45302b000
+  Resolved    : yes
+  Defined     : yes (session definition)
+  Undefined   : no
+  Source refs : 1
+  Ref source  : /home/husam/cpp-repl-examples/static-members/include/state.hpp:14:39 in storage_demo::State::current
+Symbol: storage_demo::Native::baseline
+  Kind        : variable
+  Declaration : int storage_demo::Native::baseline
+  Type        : int
+  Mangled     : _ZN12storage_demo6Native8baselineE
+  Linkage     : external
+  Definition  : no
+  Location    : /home/husam/cpp-repl-examples/static-members/include/state.hpp:22:14
+  Size        : 4 bytes
+  Alignment   : 4 bytes
+  Defined     : yes (native export)
+  Undefined   : no (in exporting library)
+  Library     : libstatic_members_native.so
+  Path        : /home/husam/cpp-repl-examples/static-members/build/libstatic_members_native.so
+  Native refs : 0 known sites
+  Ref scope   : import slots and supported calls in defining image; indirect and other native calls may be absent
+  Address     : 0x7fa45ac45008
+  Resolved    : yes
+  Source refs : 2
+  Ref source  : /home/husam/cpp-repl-examples/static-members/src/session.cpp:17:23 in storage_demo::check
+  Ref source  : /home/husam/cpp-repl-examples/static-members/src/session.cpp:25:37 in storage_demo::check
+UNDEFINED_BEGIN
+UNDEFINED_END

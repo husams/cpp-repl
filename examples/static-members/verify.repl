@@ -1,0 +1,7 @@
+storage_demo::check();
+%syminfo storage_demo::State::counter_
+%syminfo storage_demo::Native::baseline
+std::cout << "UNDEFINED_BEGIN\n";
+%symbols undefined name '^storage_demo::'
+std::cout << "UNDEFINED_END\n";
+%quit

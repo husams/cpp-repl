@@ -1,0 +1,2 @@
+// No source file defines State's static members. Their storage is in the JIT.
+%add src/session.cpp

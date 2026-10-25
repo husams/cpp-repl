@@ -1,0 +1,2 @@
+// Four declarations have no storage; Native::baseline is already resolved.
+%symbols undefined name '^storage_demo::'

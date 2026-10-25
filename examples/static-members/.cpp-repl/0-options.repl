@@ -1,0 +1,3 @@
+// Reference options come from build/compile_commands.json.
+%use-compile-opts src/session.cpp
+%add-compile-opt -UEXAMPLE_STARTUP_FLAG -DEXAMPLE_STARTUP_FLAG=29

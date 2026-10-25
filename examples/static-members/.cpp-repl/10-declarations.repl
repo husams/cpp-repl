@@ -1,0 +1,3 @@
+%add-path build
+%lib static_members_native
+%add include/state.hpp

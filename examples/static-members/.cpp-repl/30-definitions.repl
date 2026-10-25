@@ -1,0 +1,12 @@
+// The REPL obtains every type and declarator from the loaded header.
+%define storage_demo::State::counter_ cpp`storage_demo::initial_counter()`
+%define storage_demo::State::title cpp`std::string("startup") + " storage"`
+%define storage_demo::State::samples cpp`
+{
+  3,
+
+  5,
+  8
+}
+`
+%define storage_demo::State::weights cpp`{2, 4, 6}`
