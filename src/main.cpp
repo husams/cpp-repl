@@ -63,7 +63,7 @@ int main(int argc, char** argv) {
     }
 
     std::string line(raw);
-    // replxx reads pipes one physical line at a time. Accumulate open hook
+    // replxx reads pipes one physical line at a time. Accumulate open command
     // blocks there too, using the same delimiter rules as interactive Enter.
     if (!pending.empty()) line = pending + '\n' + line;
     if (!isatty(STDIN_FILENO) && example::wants_more_input(line) &&

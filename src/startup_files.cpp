@@ -106,7 +106,7 @@ void load_script(LibraryManager& libs, CppInterpreter& cpp,
     }
   }
   if (!pending.empty())
-    fail(entry_number, is_command_line(pending) ? "unterminated cpp` block"
+    fail(entry_number, is_command_line(pending) ? parse_command(pending).error
                                                 : "incomplete C++ input");
   if (input.bad()) fail(number, "could not finish reading startup script");
   output << color_inspection("preloaded: " + path.string() + '\n', colors);

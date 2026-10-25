@@ -78,6 +78,78 @@ def check(label, ok):
 
 def main():
     binary = os.path.abspath(sys.argv[1])
+    with tempfile.TemporaryDirectory() as shell_cwd:
+        with open(os.path.join(shell_cwd, "find_lib.sh"), "w", encoding="utf8") as f:
+            f.write("#!/bin/sh\nprintf 'z\\n'\n")
+        os.chmod(os.path.join(shell_cwd, "find_lib.sh"), 0o755)
+        out, status = session(binary, shell_cwd, [
+            ("shell_lib", b"%lib ``./find_lib.sh``\r", True),
+            ("shell_open", b"%demangle ``\r"),
+            ("shell_blank", b"\r"),
+            ("shell_body", b"printf _Z3addii; printf x >> executed-once\r"),
+            ("shell_close", b"``\r", True),
+            ("shell_cancel", b"%help ``printf x > cancelled-shell\r"),
+            ("shell_cancel_key", b"\x03", True),
+            ("shell_flags", b"%add-compile-opt ``printf -- '-DSHELL_TEST_VALUE=73'``\r", True),
+            ("shell_value", b"SHELL_TEST_VALUE\r", True),
+            ("shell_fail", b"%quit ``exit 7``\r", True),
+            ("clear_decl", b"int clear_preserved = 42;\r", True),
+            ("clear", b"%clear\r", True),
+            ("clear_value", b"clear_preserved\r", True),
+            ("quit", b"%quit\r"),
+        ])
+        check("shell script output loads a library", "loaded:" in plain(out["shell_lib"]))
+        check("open shell blocks accept blank lines before submission", all(
+            "error:" not in plain(out[key]) for key in ("shell_open", "shell_blank", "shell_body")))
+        check("multiline shell stdout is substituted", "add(int, int)" in plain(out["shell_close"]))
+        with open(os.path.join(shell_cwd, "executed-once"), encoding="utf8") as f:
+            check("editing and highlighting do not execute shell blocks", f.read() == "x")
+        check("Ctrl+C cancels a shell block without running it",
+              b"^C" in out["shell_cancel_key"] and
+              not os.path.exists(os.path.join(shell_cwd, "cancelled-shell")))
+        check("interpreter commands accept shell output", "(int) 73" in plain(out["shell_value"]))
+        check("a failed shell prevents quit and leaves the session usable",
+              "exit status 7" in plain(out["shell_fail"]) and status == 0)
+        check("%clear clears the terminal and preserves C++ state",
+              b"\x1b[2J\x1b[H" in out["clear"] and "(int) 42" in plain(out["clear_value"]))
+
+        os.mkdir(os.path.join(shell_cwd, "sources dir"))
+        with open(os.path.join(shell_cwd, "sources dir", "value.cpp"), "w", encoding="utf8") as f:
+            f.write("int shell_file_value() { return 42; }\n")
+        shell_env = dict(os.environ, HOME=shell_cwd, TERM="dumb")
+        pipe = subprocess.run([binary], cwd=shell_cwd, env=shell_env, text=True,
+            capture_output=True, input=
+                '%add "``printf \'sources dir/value.cpp\'``"\n'
+                'shell_file_value()\n'
+                '%demangle ``\nprintf _Z3addii\n\n``\n'
+                '%help ``cat``\n'
+                '%demangle ``printf SHELL_STDERR >&2; printf _Z3addii``\n'
+                '%quit ``exit 7``\n'
+                '6 * 7\n%quit\n', timeout=30)
+        check("piped commands preserve multiline shell output and quoted paths",
+              pipe.returncode == 0 and "(int) 42" in pipe.stdout and
+              pipe.stdout.count("add(int, int)") == 2)
+        check("shell stdin cannot consume later REPL commands and stderr stays separate",
+              "Commands:" in pipe.stdout and "SHELL_STDERR" in pipe.stderr and
+              "SHELL_STDERR" not in pipe.stdout and "exit status 7" in pipe.stdout)
+
+        os.mkdir(os.path.join(shell_cwd, ".cpp-repl"))
+        startup = os.path.join(shell_cwd, ".cpp-repl", "0-shell.repl")
+        with open(startup, "w", encoding="utf8") as f:
+            f.write("%add-compile-opt ``\nprintf -- '-DSHELL_STARTUP_VALUE=91'\n``\n"
+                    "%demangle ``printf '_Z3addii\\n'``\n")
+        pipe = subprocess.run([binary], cwd=shell_cwd, env=shell_env, text=True,
+            capture_output=True, input="SHELL_STARTUP_VALUE\n%quit\n", timeout=30)
+        check("startup scripts support multiline shell substitution",
+              pipe.returncode == 0 and "(int) 91" in pipe.stdout and
+              "add(int, int)" in pipe.stdout and "error:" not in pipe.stdout + pipe.stderr)
+        with open(startup, "w", encoding="utf8") as f:
+            f.write("%lib ``printf z\n")
+        pipe = subprocess.run([binary], cwd=shell_cwd, env=shell_env, text=True,
+            capture_output=True, input="%quit\n", timeout=30)
+        check("startup reports an unterminated shell block without executing it",
+              "unterminated shell `` block" in pipe.stdout + pipe.stderr)
+
     with tempfile.TemporaryDirectory() as cwd:
         out, status = session(
             binary,
@@ -174,7 +246,7 @@ def main():
             ],
         )
         help_text = plain(out["help"])
-        check("%help lists the twenty-three commands", all(c in help_text for c in ("%lib", "%libs", "%libinfo", "%syminfo", "%demangle", "%define", "%paths", "%add-path", "%add", "%compile-opts", "%add-compile-opt", "%set-compile-opts", "%use-compile-opts", "%class", "%info", "%symbols", "%mock", "%pre", "%post", "%restore", "%hooks", "%help", "%quit")))
+        check("%help lists all commands", all(c in help_text for c in ("%lib", "%libs", "%libinfo", "%syminfo", "%demangle", "%define", "%paths", "%add-path", "%add", "%compile-opts", "%add-compile-opt", "%set-compile-opts", "%use-compile-opts", "%class", "%info", "%symbols", "%mock", "%pre", "%post", "%restore", "%hooks", "%clear", "%help", "%quit")))
         check("demangle completes and prints readable Linux and Mac C++ names",
               "%demangle" in plain(out["demangle_tab"])
               and "add(int, int)" in plain(out["demangle_linux"])

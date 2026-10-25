@@ -52,6 +52,8 @@ bool show_class(CppInterpreter& cpp, const ParsedCommand& cmd,
 
 CommandResult execute_command(LibraryManager& libs, CppInterpreter& cpp,
                               const ParsedCommand& cmd, std::ostream& out) {
+  if (!cmd.shell_commands.empty() && cmd.error.empty())
+    return execute_command(libs, cpp, expand_shell_substitutions(cmd), out);
   if (cmd.kind == CommandKind::Cpp) {
     return {true, false};  // C++ input is handled by the interactive REPL.
   }

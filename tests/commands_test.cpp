@@ -231,6 +231,118 @@ TEST(WantsMoreInput, CommandsNeverContinue) {
   EXPECT_FALSE(wants_more_input("int main() { return 0; }"));
 }
 
+TEST(Grammar, ShellSubstitutionsAreDeferredAndContinueAcrossLines) {
+  const std::string text = "%lib ``printf 'z\\n'\n``";
+  const auto cmd = parse_command(text);
+  EXPECT_EQ(cmd.kind, CommandKind::Lib);
+  EXPECT_TRUE(cmd.error.empty()) << cmd.error;
+  ASSERT_EQ(cmd.shell_commands.size(), 1u);
+  EXPECT_EQ(cmd.shell_commands.front().value, "printf 'z\\n'\n");
+  EXPECT_EQ(cmd.original_text, text);
+  EXPECT_TRUE(wants_more_input("%lib ``printf 'z\\n'"));
+  EXPECT_TRUE(wants_more_input("%lib ``\n\n"));
+  EXPECT_FALSE(wants_more_input(text));
+  EXPECT_FALSE(wants_more_input("%lib ``printf z``"));
+  EXPECT_FALSE(parse_command("%lib ``printf z").error.empty());
+  EXPECT_TRUE(parse_command("%unknown ``printf z``").shell_commands.empty());
+}
+
+TEST(Grammar, ShellSubstitutionIsAvailableForEveryCommandAndNeverForCpp) {
+  for (const char* input : {"%add ``printf a.cpp``", "%info ``printf symbol``",
+                           "%add-compile-opt ``printf -- -DVALUE=1``",
+                           "%symbols name ``printf foo``"}) {
+    const auto cmd = parse_command(input);
+    EXPECT_TRUE(cmd.error.empty()) << input << ": " << cmd.error;
+    EXPECT_EQ(cmd.shell_commands.size(), 1u) << input;
+  }
+  EXPECT_TRUE(parse_command("const char* text = \"``printf z``\";")
+                  .shell_commands.empty());
+  EXPECT_TRUE(parse_command("%mock int f() cpp`return 1;`").shell_commands.empty());
+  const auto hook = parse_command("%mock const char* f() cpp`return \"``uname``\";`");
+  ASSERT_TRUE(hook.error.empty()) << hook.error;
+  EXPECT_TRUE(hook.shell_commands.empty());
+  ASSERT_TRUE(hook.code);
+  EXPECT_EQ(hook.code->value, "return \"``uname``\";");
+  EXPECT_TRUE(wants_more_input("%mock ``printf 'int f()'`` cpp`\nreturn 42;"));
+  EXPECT_FALSE(wants_more_input("%mock ``printf 'int f()'`` cpp`\nreturn 42;\n`"));
+}
+
+TEST(Dispatch, ShellOutputExpandsOnceAndFailedProcessesDoNotRunTheCommand) {
+  LibraryManager libs;
+  std::ostringstream out;
+  bool ok = false;
+  EXPECT_TRUE(dispatch(parse_command("%demangle ``printf '_Z3addii\\n\\n'``"),
+                       libs, out, &ok));
+  EXPECT_TRUE(ok) << out.str();
+  EXPECT_EQ(out.str(), "add(int, int)\n");
+
+  out.str("");
+  EXPECT_TRUE(dispatch(parse_command("%demangle \"``printf '\\140\\140printf nope\\140\\140'``\""),
+                       libs, out, &ok));
+  EXPECT_TRUE(ok) << out.str();
+  EXPECT_EQ(out.str(), "``printf nope``\n");
+
+  out.str("");
+  EXPECT_TRUE(dispatch(parse_command("%quit ``printf ignored; exit 7``"),
+                       libs, out, &ok));
+  EXPECT_FALSE(ok);
+  EXPECT_NE(out.str().find("exit status 7"), std::string::npos) << out.str();
+}
+
+TEST(Dispatch, ShellCapturesLargeMultilineOutputAndDoesNotConsumeReplInput) {
+  LibraryManager libs;
+  std::ostringstream out;
+  bool ok = false;
+  dispatch(parse_command("%demangle ``printf _Z3add; printf 'ii\\n'\n``"), libs, out, &ok);
+  EXPECT_TRUE(ok) << out.str();
+  EXPECT_EQ(out.str(), "add(int, int)\n");
+  out.str("");
+  dispatch(parse_command("%demangle \"``i=0; while [ $i -lt 10000 ]; do printf abcdefgh; i=$((i+1)); done``\""),
+           libs, out, &ok);
+  EXPECT_TRUE(ok) << out.str().substr(0, 100);
+  EXPECT_EQ(out.str().size(), 80001u);
+  out.str("");
+  dispatch(parse_command("%help ``cat``"), libs, out, &ok);
+  EXPECT_TRUE(ok) << out.str();
+  EXPECT_NE(out.str().find("Commands:"), std::string::npos);
+}
+
+TEST(Grammar, ShellOutputSupportsMultipleBlocksEmptyOutputAndArgumentSplitting) {
+  auto cmd = expand_shell_substitutions(parse_command(
+      "%add ``printf 'first.cpp\\nsecond.cpp\\n'``"));
+  ASSERT_TRUE(cmd.error.empty()) << cmd.error;
+  EXPECT_EQ(values(cmd), (std::vector<std::string>{"first.cpp", "second.cpp"}));
+  cmd = expand_shell_substitutions(parse_command("%add \"``printf 'my file.cpp'``\""));
+  ASSERT_TRUE(cmd.error.empty()) << cmd.error;
+  EXPECT_EQ(values(cmd), (std::vector<std::string>{"my file.cpp"}));
+  cmd = expand_shell_substitutions(parse_command(
+      "%demangle ``printf _Z3``" "``printf addii``"));
+  ASSERT_TRUE(cmd.error.empty()) << cmd.error;
+  ASSERT_TRUE(cmd.symbol);
+  EXPECT_EQ(cmd.symbol->value, "_Z3addii");
+  cmd = expand_shell_substitutions(parse_command("%help ``:``"));
+  EXPECT_TRUE(cmd.error.empty()) << cmd.error;
+  EXPECT_EQ(cmd.kind, CommandKind::Help);
+  cmd = expand_shell_substitutions(parse_command("%add ``printf '\\000'``"));
+  EXPECT_EQ(cmd.error, "shell output contains a NUL byte");
+  cmd = expand_shell_substitutions(parse_command("%help ``kill -TERM $$``"));
+  EXPECT_NE(cmd.error.find("terminated by signal"), std::string::npos) << cmd.error;
+}
+
+TEST(Dispatch, ClearClearsTheScreenAndRejectsArguments) {
+  EXPECT_NE(find_command("%clear"), nullptr);
+  LibraryManager libs;
+  std::ostringstream out;
+  bool ok = false;
+  EXPECT_TRUE(dispatch(parse_command("%clear"), libs, out, &ok));
+  EXPECT_TRUE(ok);
+  EXPECT_EQ(out.str(), "\x1b[2J\x1b[H");
+  out.str("");
+  dispatch(parse_command("%clear extra"), libs, out, &ok);
+  EXPECT_FALSE(ok);
+  EXPECT_EQ(out.str(), "error: %clear takes no arguments\nusage: %clear\n");
+}
+
 TEST(Grammar, HookCommandsKeepSignatureAndMultilineBody) {
   for (const char* name : {"%mock", "%pre", "%post"}) {
     const auto cmd = parse_command(std::string(name) +
@@ -513,7 +625,7 @@ TEST(Dispatch, QuitStopsAndHelpListsCommands) {
   for (const std::string& name : command_names()) {
     EXPECT_NE(out.str().find(name), std::string::npos) << name;
   }
-  EXPECT_EQ(command_names().size(), 23u);
+  EXPECT_EQ(command_names().size(), 24u);
 }
 
 TEST(Dispatch, PathsShowsConfiguredDirectoriesAndLoaderSettings) {

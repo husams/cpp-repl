@@ -319,6 +319,18 @@ void parse_signature(std::string_view text, std::size_t begin, std::size_t end,
   cmd.signature = Operand{std::string(value), {begin, end}};
 }
 
+// Backticks inside C++ strings, raw strings, chars and comments are data.
+std::size_t cpp_block_close(std::string_view text, std::size_t begin) {
+  for (const Token& token : lex_cpp(text.substr(begin)).tokens) {
+    if (token.kind == TokenKind::String || token.kind == TokenKind::Char ||
+        token.kind == TokenKind::Escape || token.kind == TokenKind::Comment ||
+        token.kind == TokenKind::Preprocessor) continue;
+    for (std::size_t i = token.begin; i < token.end; ++i)
+      if (text[begin + i] == '`') return begin + i;
+  }
+  return std::string_view::npos;
+}
+
 void parse_hook(std::string_view text, ParsedCommand& cmd) {
   std::size_t marker = text.find("cpp`", cmd.arg_begin);
   while (marker != std::string_view::npos && marker > cmd.arg_begin &&
@@ -347,18 +359,7 @@ void parse_hook(std::string_view text, ParsedCommand& cmd) {
   }
   if (!cmd.error.empty()) return;
   const std::size_t begin = marker + 4;
-  // Backticks inside C++ strings, raw strings, chars and comments are data.
-  const auto tokens = lex_cpp(text.substr(begin)).tokens;
-  std::size_t close = std::string_view::npos;
-  for (const Token& token : tokens) {
-    if (token.kind == TokenKind::String || token.kind == TokenKind::Char ||
-        token.kind == TokenKind::Escape || token.kind == TokenKind::Comment ||
-        token.kind == TokenKind::Preprocessor) continue;
-    for (std::size_t i = token.begin; i < token.end; ++i) {
-      if (text[begin + i] == '`') { close = begin + i; break; }
-    }
-    if (close != std::string_view::npos) break;
-  }
+  const auto close = cpp_block_close(text, begin);
   if (close == std::string_view::npos) {
     cmd.incomplete = true;
     cmd.code = Operand{std::string(text.substr(begin)), {begin, text.size()}};
@@ -421,6 +422,7 @@ const std::vector<CommandInfo>& command_table() {
        "remove mocks and hooks (no argument: restore the whole session)"},
       {"%hooks", CommandKind::Hooks, "",
        "list active mocks and hooks with signatures and C++ bodies"},
+      {"%clear", CommandKind::Clear, "", "clear the screen"},
       {"%help", CommandKind::Help, "", "show this help"},
       {"%quit", CommandKind::Quit, "", "exit the REPL"},
   };
@@ -440,7 +442,7 @@ std::vector<std::string> command_names() {
   return names;
 }
 
-ParsedCommand parse_command(std::string_view text) {
+ParsedCommand parse_command(std::string_view text, bool allow_shell) {
   ParsedCommand cmd;
   const std::size_t start = text.find_first_not_of(kBlank);
   if (start == std::string_view::npos || text[start] != '%') return cmd;
@@ -455,6 +457,43 @@ ParsedCommand parse_command(std::string_view text) {
 
   const CommandInfo* info = find_command(cmd.name);
   cmd.kind = info != nullptr ? info->kind : CommandKind::Unknown;
+  if (info && allow_shell) {
+    auto pos = cmd.arg_begin;
+    while (true) {
+      const auto begin = text.find("``", pos);
+      // A cpp` body belongs to the C++ lexer, including empty cpp`` bodies
+      // and strings/comments containing pairs of backticks.
+      if (cmd.kind == CommandKind::Mock || cmd.kind == CommandKind::Pre ||
+          cmd.kind == CommandKind::Post || cmd.kind == CommandKind::DefineVariable) {
+        auto marker = text.find("cpp`", pos);
+        while (marker != std::string_view::npos && marker > cmd.arg_begin &&
+               !is_blank(text[marker - 1]))
+          marker = text.find("cpp`", marker + 4);
+        if (marker != std::string_view::npos &&
+            (begin == std::string_view::npos || marker < begin)) {
+          if (!cmd.shell_commands.empty() &&
+              cpp_block_close(text, marker + 4) == std::string_view::npos) {
+            cmd.incomplete = true;
+            set_error(cmd, "unterminated cpp` block", {marker, text.size()});
+          }
+          break;
+        }
+      }
+      if (begin == std::string_view::npos) break;
+      cmd.original_text = std::string(text);
+      const auto close = text.find("``", begin + 2);
+      if (close == std::string_view::npos) {
+        cmd.incomplete = true;
+        set_error(cmd, "unterminated shell `` block", {begin, text.size()});
+        return cmd;
+      }
+      cmd.shell_commands.push_back(
+          {std::string(text.substr(begin + 2, close - begin - 2)),
+           {begin, close + 2}});
+      pos = close + 2;
+    }
+    if (!cmd.shell_commands.empty()) return cmd;
+  }
   switch (cmd.kind) {
     case CommandKind::Cpp:
       break;
@@ -514,6 +553,7 @@ ParsedCommand parse_command(std::string_view text) {
     }
     case CommandKind::Hooks:
     case CommandKind::Paths:
+    case CommandKind::Clear:
     case CommandKind::Help:
     case CommandKind::Quit:
       if (cmd.arg_begin < text.size()) {
@@ -545,11 +585,16 @@ bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out,
     }
     return true;
   }
+  if (!cmd.shell_commands.empty())
+    return dispatch(expand_shell_substitutions(cmd), libs, out, ok);
   switch (cmd.kind) {
     case CommandKind::Cpp:
       break;
     case CommandKind::Quit:
       return false;
+    case CommandKind::Clear:
+      out << "\x1b[2J\x1b[H" << std::flush;
+      break;
     case CommandKind::Demangle: {
       const auto& original = cmd.symbol->value;
       // Mach-O symbol tables can retain the extra platform underscore.
@@ -575,6 +620,8 @@ bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out,
              "Incomplete C++ continues on the next line, including blank lines; "
              "Ctrl+C cancels it.\n"
              "Hooks accept multiline cpp`...` blocks; an empty body clears a hook.\n"
+             "Command arguments accept multiline ``shell script`` blocks; "
+             "stdout replaces each block before the command runs.\n"
              "Order: pre, mock/original, post; arguments are named in the signature, "
              "methods use self/this, post uses result.\n"
              "Keys: Tab complete, Ctrl+J newline, Ctrl+L clear screen, "
