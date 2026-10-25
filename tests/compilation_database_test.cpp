@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -160,6 +161,297 @@ TEST(CompilationDatabase,
   EXPECT_EQ(cpp->evaluate("from_first()"), "(int) 42\n");
   EXPECT_EQ(cpp->evaluate("from_second()"), "(int) 74\n");
   EXPECT_EQ(cpp->evaluate("prior_session_state"), "(int) 9\n");
+}
+
+TEST(CompileOptions,
+     GlobalAppendReplaceClearAffectFutureInputsAndPreserveStateAndHooks) {
+  TemporaryProject project;
+  CurrentDirectory cwd(project.root());
+  std::string error;
+  auto cpp = CppInterpreter::create({"-DSTARTUP_VALUE=7"}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute(
+      "int existing_state = 12; int opt_target(int x) { return x; }"));
+  ASSERT_TRUE(
+      cpp->add_compile_options({"-O2", "-std=c++20", "-DOPT_VALUE=42"}, error))
+      << error;
+  EXPECT_EQ(cpp->evaluate("STARTUP_VALUE + OPT_VALUE"), "(int) 49\n");
+  ASSERT_TRUE(cpp->execute(
+      "template<class T> concept OptConcept = requires(T t) { t + 1; };"));
+  ASSERT_TRUE(cpp->set_hook(HookKind::Mock, "opt_target(int x)",
+                            "return x + OPT_VALUE;", error))
+      << error;
+  EXPECT_EQ(cpp->evaluate("opt_target(1)"), "(int) 43\n");
+  ASSERT_TRUE(cpp->set_compile_options({"-std=c++17", "-DOPT_VALUE=9"}, error))
+      << error;
+  EXPECT_EQ(cpp->evaluate("OPT_VALUE"), "(int) 9\n");
+  EXPECT_TRUE(
+      cpp->execute("#ifdef STARTUP_VALUE\n#error startup flags were not "
+                   "replaced\n#endif\n"));
+  EXPECT_TRUE(
+      cpp->execute("#if __cplusplus >= 202002L\n#error standard was not "
+                   "replaced\n#endif\n"));
+  EXPECT_EQ(cpp->evaluate("existing_state"), "(int) 12\n");
+  EXPECT_EQ(cpp->evaluate("opt_target(1)"), "(int) 43\n");
+  ASSERT_TRUE(cpp->set_compile_options({}, error)) << error;
+  EXPECT_TRUE(
+      cpp->execute("#if defined(OPT_VALUE) || defined(STARTUP_VALUE)\n#error "
+                   "flags were not cleared\n#endif\n"));
+  EXPECT_EQ(cpp->evaluate("existing_state"), "(int) 12\n");
+}
+
+TEST(CompileOptions,
+     UseFileOptionsAsSessionReferencePreservesPathsStateAndHooks) {
+  TemporaryProject project;
+  const auto build = project.root() / "build";
+  fs::create_directories(build);
+  project.write(
+      "include dir/reference.hpp",
+      "#pragma once\ninline int reference_header_value() { return 30; }\n");
+  const auto reference = project.write(
+      "src/reference.cpp", "#error reference source must not be compiled\n");
+  const auto other =
+      project.write("other/another.cc",
+                    "#include <reference.hpp>\nint adopted_options_value() { "
+                    "return reference_header_value() + REFERENCE_VALUE; }\n");
+  write_database(
+      project,
+      arguments_entry(build, "../src/reference.cpp",
+                      {"clang++", "-std=c++20", "-DREFERENCE_VALUE=1",
+                       "-I../include dir", "-c", "../src/reference.cpp"}),
+      "build/compile_commands.json");
+  CurrentDirectory cwd(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute(
+      "int reference_state = 5; int reference_target(int x) { return x; }"));
+  ASSERT_TRUE(cpp->set_hook(HookKind::Mock, "reference_target(int x)",
+                            "return x + 10;", error))
+      << error;
+  ASSERT_TRUE(cpp->add_compile_options({"-DGLOBAL_VALUE=7"}, error)) << error;
+  ASSERT_TRUE(cpp->add_compile_options({"-DREFERENCE_VALUE=12"}, error,
+                                       reference.string()))
+      << error;
+  ASSERT_TRUE(cpp->use_compile_options("src/reference.cpp", error)) << error;
+  EXPECT_TRUE(cpp->sources().empty());
+  EXPECT_EQ(cpp->evaluate("REFERENCE_VALUE + GLOBAL_VALUE + reference_state"),
+            "(int) 24\n");
+  ASSERT_TRUE(
+      cpp->execute("#include <reference.hpp>\n#if __cplusplus < "
+                   "202002L\n#error missing reference standard\n#endif\n"));
+  EXPECT_EQ(cpp->evaluate("reference_header_value()"), "(int) 30\n");
+  EXPECT_EQ(cpp->evaluate("reference_target(2)"), "(int) 12\n");
+  const auto added = cpp->add_source(other.string());
+  ASSERT_TRUE(added.ok) << added.message;
+  EXPECT_EQ(cpp->evaluate("adopted_options_value()"), "(int) 42\n");
+  const auto info = cpp->describe_compile_options(error);
+  ASSERT_TRUE(info) << error;
+  EXPECT_NE(info->find("Reference file"), std::string::npos);
+  EXPECT_NE(info->find(fs::canonical(reference).string()), std::string::npos);
+  EXPECT_EQ(fs::current_path(), fs::canonical(project.root()));
+
+  // Adoption is a snapshot; later file changes require selecting it again.
+  ASSERT_TRUE(cpp->set_compile_options({"-DREFERENCE_VALUE=20"}, error,
+                                       reference.string()))
+      << error;
+  EXPECT_EQ(cpp->evaluate("REFERENCE_VALUE"), "(int) 12\n");
+  ASSERT_TRUE(cpp->use_compile_options(reference.string(), error)) << error;
+  EXPECT_EQ(cpp->evaluate("REFERENCE_VALUE"), "(int) 20\n");
+  ASSERT_TRUE(cpp->set_compile_options({}, error)) << error;
+  EXPECT_TRUE(
+      cpp->execute("#ifdef REFERENCE_VALUE\n#error reference options were not "
+                   "cleared\n#endif\n"));
+  const auto cleared = cpp->describe_compile_options(error);
+  ASSERT_TRUE(cleared) << error;
+  EXPECT_EQ(cleared->find("Reference file"), std::string::npos);
+}
+
+TEST(CompileOptions, FailedReferenceSelectionKeepsExistingSessionOptions) {
+  TemporaryProject project;
+  const auto good = project.write("src/good.cpp", "// reference only\n");
+  project.write("bad.cpp", "// invalid command\n");
+  write_database(project,
+                 arguments_entry(
+                     project.root(), "bad.cpp",
+                     {"clang++", "-fnot-a-reference-option", "-c", "bad.cpp"}));
+  CurrentDirectory cwd(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(
+      cpp->set_compile_options({"-DREFERENCE_OK=42"}, error, good.string()))
+      << error;
+  ASSERT_TRUE(cpp->use_compile_options(good.string(), error)) << error;
+  const auto before = cpp->describe_compile_options(error);
+  ASSERT_TRUE(before) << error;
+  for (const auto& file : {"", "missing/file.cpp", "bad.cpp"}) {
+    EXPECT_FALSE(cpp->use_compile_options(file, error)) << file;
+    EXPECT_FALSE(error.empty()) << file;
+    EXPECT_EQ(cpp->describe_compile_options(error), before);
+    EXPECT_EQ(cpp->evaluate("REFERENCE_OK"), "(int) 42\n");
+  }
+}
+
+TEST(CompileOptions,
+     SwitchingReferenceRebasesFlagsAndKeepsManualGlobalOverrides) {
+  TemporaryProject project;
+  project.write("a.cpp", "// reference A\n");
+  project.write("b.cpp", "// reference B\n");
+  write_database(
+      project, arguments_entry(
+                   project.root(), "a.cpp",
+                   {"clang++", "-std=c++20", "-DREF_VALUE=1", "-c", "a.cpp"}) +
+                   "," +
+                   arguments_entry(project.root(), "b.cpp",
+                                   {"clang++", "-std=c++17", "-DREF_VALUE=2",
+                                    "-c", "b.cpp"}));
+  CurrentDirectory cwd(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->add_compile_options({"-DKEEP_VALUE=5"}, error)) << error;
+  ASSERT_TRUE(cpp->use_compile_options("a.cpp", error)) << error;
+  EXPECT_EQ(cpp->evaluate("REF_VALUE"), "(int) 1\n");
+  ASSERT_TRUE(cpp->add_compile_options({"-DNEW_VALUE=6"}, error)) << error;
+  ASSERT_TRUE(cpp->use_compile_options("b.cpp", error)) << error;
+  EXPECT_EQ(cpp->evaluate("REF_VALUE + KEEP_VALUE + NEW_VALUE"), "(int) 13\n");
+  EXPECT_TRUE(
+      cpp->execute("#if __cplusplus >= 202002L\n#error old reference standard "
+                   "leaked\n#endif\n"));
+}
+
+TEST(CompileOptions,
+     FileAppendOverridesDatabaseAndGlobalAndSetReplacesDatabaseOptions) {
+  TemporaryProject project;
+  const auto first = project.write(
+      "src/first.cpp",
+      "#if __cplusplus < 202002L\n#error missing file standard\n#endif\nint "
+      "file_first() { return VALUE + DATABASE_FLAG + GLOBAL_FLAG; }\n");
+  const auto second =
+      project.write("src/second.cpp",
+                    "#if __cplusplus >= 202002L\n#error file standard "
+                    "leaked\n#endif\nint file_second() { return VALUE; }\n");
+  const auto third = project.write(
+      "src/third.cpp",
+      "#ifdef DATABASE_FLAG\n#error database options were not "
+      "replaced\n#endif\nint file_third() { return VALUE + GLOBAL_FLAG; }\n");
+  write_database(project,
+                 arguments_entry(project.root(), "src/first.cpp",
+                                 {"clang++", "-DVALUE=1", "-DDATABASE_FLAG=10",
+                                  "-c", "src/first.cpp"}));
+  CurrentDirectory cwd(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(
+      cpp->set_compile_options({"-DVALUE=2", "-DGLOBAL_FLAG=100"}, error))
+      << error;
+  ASSERT_TRUE(cpp->add_compile_options({"-std=c++20", "-DVALUE=3"}, error,
+                                       "src/./first.cpp"))
+      << error;
+  auto added = cpp->add_source(first.string());
+  ASSERT_TRUE(added.ok) << added.message;
+  added = cpp->add_source(second.string());
+  ASSERT_TRUE(added.ok) << added.message;
+  ASSERT_TRUE(cpp->set_compile_options({"-DVALUE=4"}, error, "src/third.cpp"))
+      << error;
+  ASSERT_TRUE(cpp->add_compile_options({"-DVALUE=5"}, error, "src/third.cpp"))
+      << error;
+  added = cpp->add_source(third.string());
+  ASSERT_TRUE(added.ok) << added.message;
+  EXPECT_EQ(cpp->evaluate("file_first()"), "(int) 113\n");
+  EXPECT_EQ(cpp->evaluate("file_second()"), "(int) 2\n");
+  EXPECT_EQ(cpp->evaluate("file_third()"), "(int) 105\n");
+  EXPECT_EQ(cpp->evaluate("VALUE"), "(int) 2\n");
+  const auto description =
+      cpp->describe_compile_options(error, "src/third.cpp");
+  ASSERT_TRUE(description) << error;
+  EXPECT_NE(description->find("replaced"), std::string::npos);
+  EXPECT_NE(description->find("VALUE=5"), std::string::npos);
+  EXPECT_NE(description->find(fs::canonical(third).string()),
+            std::string::npos);
+  const auto fourth =
+      project.write("src/fourth.hpp",
+                    "#ifdef DATABASE_FLAG\n#error clearing file flags did not "
+                    "replace database defaults\n#endif\ninline int "
+                    "file_fourth() { return VALUE; }\n");
+  ASSERT_TRUE(cpp->set_compile_options({"-DVALUE=6"}, error, fourth.string()))
+      << error;
+  ASSERT_TRUE(cpp->set_compile_options({}, error, fourth.string())) << error;
+  added = cpp->add_source(fourth.string());
+  ASSERT_TRUE(added.ok) << added.message;
+  EXPECT_EQ(cpp->evaluate("file_fourth()"), "(int) 2\n");
+}
+
+TEST(CompileOptions, ConfigurationAndInspectionDoNotExecuteForcedIncludes) {
+  TemporaryProject project;
+  const auto marker = project.root() / "initialized.txt";
+  const auto forced = project.write(
+      "forced.hpp",
+      "#pragma once\n#include <cstdio>\n"
+      "inline int flags_initialized = [] { auto* f = std::fopen(\"" +
+          marker.string() +
+          "\", \"w\"); if (f) std::fclose(f); return 31; }();\n");
+  CurrentDirectory cwd(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("int forced_flag_target(int x) { return x; }"));
+  ASSERT_TRUE(cpp->set_compile_options({"-include", forced.string()}, error))
+      << error;
+  EXPECT_FALSE(fs::exists(marker));
+  ASSERT_TRUE(cpp->describe_compile_options(error)) << error;
+  EXPECT_FALSE(fs::exists(marker));
+  ASSERT_TRUE(cpp->set_hook(HookKind::Mock, "forced_flag_target(int x)",
+                            "return x + flags_initialized;", error))
+      << error;
+  EXPECT_TRUE(fs::exists(marker));
+  EXPECT_EQ(cpp->evaluate("forced_flag_target(2)"), "(int) 33\n");
+  ASSERT_TRUE(cpp->set_compile_options({}, error)) << error;
+  ASSERT_TRUE(cpp->restore("", error)) << error;
+  EXPECT_EQ(cpp->evaluate("forced_flag_target(2)"), "(int) 2\n");
+}
+
+TEST(
+    CompileOptions,
+    RelativeManualIncludesResolveFromCommandDirectoryAndInvalidUpdatesAreAtomic) {
+  TemporaryProject project;
+  fs::create_directories(project.root() / "build");
+  project.write("manual include/value.hpp",
+                "#pragma once\n#define MANUAL_HEADER_VALUE 42\n");
+  const auto source =
+      project.write("src/relative.cc",
+                    "#include <value.hpp>\nint relative_options_value() { "
+                    "return MANUAL_HEADER_VALUE; }\n");
+  write_database(
+      project,
+      arguments_entry(project.root() / "build", "../src/relative.cc",
+                      {"clang++", "-std=c++20", "-c", "../src/relative.cc"}),
+      "build/compile_commands.json");
+  CurrentDirectory cwd(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->add_compile_options(
+      {"-I", "manual include", "-DKEPT_FLAG=7"}, error))
+      << error;
+  const auto before = cpp->describe_compile_options(error);
+  ASSERT_TRUE(before) << error;
+  EXPECT_FALSE(cpp->set_compile_options({"-this-is-not-a-clang-flag"}, error));
+  EXPECT_FALSE(error.empty());
+  EXPECT_EQ(cpp->describe_compile_options(error), before);
+  EXPECT_FALSE(cpp->add_compile_options({"-I"}, error));
+  EXPECT_FALSE(error.empty());
+  EXPECT_FALSE(cpp->set_compile_options({"-fnot-a-valid-file-option"}, error,
+                                        source.string()));
+  EXPECT_FALSE(cpp->set_compile_options({"-D1INVALID_NAME=2"}, error));
+  EXPECT_EQ(cpp->describe_compile_options(error), before);
+  const auto added = cpp->add_source(source.string());
+  ASSERT_TRUE(added.ok) << added.message;
+  EXPECT_EQ(cpp->evaluate("relative_options_value() + KEPT_FLAG"),
+            "(int) 49\n");
+  EXPECT_EQ(fs::current_path(), fs::canonical(project.root()));
 }
 
 TEST(CompilationDatabase, AppliesCommandMacrosAndRelativeForcedIncludeFiles) {
@@ -381,9 +673,10 @@ TEST(CompilationDatabase,
       project.write("src/response.cxx",
                     "#if __cplusplus < 202002L\n#error requires C++20\n#endif\n"
                     "int response_value() { return RESPONSE_VALUE; }\n");
-  project.write("build/options.rsp",
-                "-std=c++20 -DRESPONSE_VALUE=17 -c ../src/response.cxx -o "
-                "emitted.o -MMD -MF emitted.d");
+  project.write(
+      "build/options.rsp",
+      "-O2 -g -std=c++20 -DRESPONSE_VALUE=17 -c ../src/response.cxx -o "
+      "emitted.o -MMD -MF emitted.d");
   write_database(project,
                  arguments_entry(build, "../src/response.cxx",
                                  {"clang++", "@options.rsp"}),

@@ -135,10 +135,12 @@ std::optional<SourceCompileOptions> ProjectCompilationDatabase::options_for(
   namespace options = clang::driver::options;
   const auto& table = clang::driver::getDriverOptTable();
 #endif
-  auto parsed = table.ParseArgs(argv, missing_index, missing_count);
+  auto parsed = table.ParseArgs(argv, missing_index, missing_count,
+                                llvm::opt::Visibility(options::ClangOption));
   llvm::opt::ArgStringList flags;
   for (const auto* argument : parsed) {
     if (argument->getOption().matches(options::OPT_INPUT) ||
+        argument->getOption().matches(options::OPT__DASH_DASH) ||
         argument->getOption().matches(options::OPT_c) ||
         argument->getOption().matches(options::OPT_S) ||
         argument->getOption().matches(options::OPT_E) ||
@@ -161,6 +163,60 @@ std::optional<SourceCompileOptions> ProjectCompilationDatabase::options_for(
 
 const std::string& ProjectCompilationDatabase::path() const {
   return impl_->path;
+}
+
+std::optional<std::vector<std::string>> normalize_compile_flags(
+    const std::vector<std::string>& flags, const std::string& directory,
+    std::string& error) {
+  error.clear();
+  std::vector<const char*> argv;
+  for (const auto& flag : flags) argv.push_back(flag.c_str());
+  unsigned missing_index = 0, missing_count = 0;
+#if LLVM_VERSION_MAJOR >= 22
+  namespace options = clang::options;
+  const auto& table = clang::getDriverOptTable();
+#else
+  namespace options = clang::driver::options;
+  const auto& table = clang::driver::getDriverOptTable();
+#endif
+  auto parsed = table.ParseArgs(argv, missing_index, missing_count,
+                                llvm::opt::Visibility(options::ClangOption));
+  if (missing_count) {
+    error = "missing value for compiler option: " + flags[missing_index];
+    return std::nullopt;
+  }
+  for (auto* argument : parsed) {
+    if (argument->getOption().matches(options::OPT_UNKNOWN)) {
+      error = "unknown compiler option: " + argument->getSpelling().str();
+      return std::nullopt;
+    }
+    if (argument->getOption().matches(options::OPT_INPUT)) {
+      error = "expected compiler flags, found: " +
+              std::string(argument->getValue());
+      return std::nullopt;
+    }
+    const auto name = argument->getOption().getName();
+    const bool header =
+        name == "include" || name == "imacros" || name == "include-pch";
+    const bool path = header || name == "I" || name == "F" || name == "B" ||
+                      name == "isystem" || name == "iquote" ||
+                      name == "idirafter" || name == "iframework" ||
+                      name == "iframeworkwithsysroot" || name == "isysroot" ||
+                      name == "-sysroot=" || name == "resource-dir" ||
+                      name == "resource-dir=" || name == "working-directory";
+    if (!path || argument->getNumValues() != 1) continue;
+    const auto value = fs::path(argument->getValue());
+    if (value.is_absolute()) continue;
+    const auto absolute = (fs::path(directory) / value).lexically_normal();
+    std::error_code ec;
+    if (!header || fs::is_regular_file(absolute, ec))
+      argument->getValues()[0] = parsed.MakeArgString(absolute.string());
+  }
+  llvm::opt::ArgStringList rendered;
+  for (auto* argument : parsed) argument->render(parsed, rendered);
+  std::vector<std::string> result;
+  for (auto* flag : rendered) result.emplace_back(flag);
+  return result;
 }
 
 }  // namespace example

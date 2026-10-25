@@ -1,26 +1,27 @@
 #include "cpp_interpreter.hpp"
 
+#include <dlfcn.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <iomanip>
+#include <limits>
+#include <map>
 #include <mutex>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <utility>
-#include <limits>
-#include <map>
-#include <regex>
-#include <dlfcn.h>
 
 #ifdef __linux__
 #include <sys/uio.h>
 #endif
 
-#include "clang/AST/Decl.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/Decl.h"
 #include "clang/AST/DeclBase.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Frontend/CompilerInstance.h"
@@ -28,23 +29,23 @@
 #include "clang/Interpreter/Interpreter.h"
 #include "clang/Interpreter/PartialTranslationUnit.h"
 #include "clang/Interpreter/Value.h"
+#include "cpp_inspect.hpp"
+#include "cpp_lexer.hpp"
+#include "cpp_symbols.hpp"
+#include "library_manager.hpp"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Demangle/Demangle.h"
+#include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
-#include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
-
-#include "cpp_inspect.hpp"
-#include "cpp_symbols.hpp"
-#include "cpp_lexer.hpp"
-#include "library_manager.hpp"
 #include "loaded_symbols.hpp"
-#include "runtime_inspection.hpp"
 #include "project_compilation_database.hpp"
+#include "runtime_inspection.hpp"
 #include "source_compile_options.hpp"
 
 // Set by CMake from the LLVM package that was linked.
@@ -144,6 +145,23 @@ std::vector<std::string> platform_args() {
   return args;
 }
 
+std::vector<std::string> compiler_arguments(
+    const std::vector<std::string>& args) {
+  auto all = platform_args();
+  all.insert(all.end(), args.begin(), args.end());
+  // Preserve call boundaries for hooks, including optimized sessions.
+  all.insert(all.end(), {"-fno-inline", "-fno-inline-functions"});
+#ifdef __linux__
+  // JIT data can be more than 2 GiB away on x86_64; use GOT references.
+  all.emplace_back("-fPIC");
+#endif
+#if defined(__linux__) && defined(__x86_64__) && \
+    defined(CPP_REPL_NATIVE_CALL_PATCHES)
+  all.emplace_back("-fcf-protection=branch");
+#endif
+  return all;
+}
+
 // A compiler for the interpreter: platform_args() plus the user's flags.
 llvm::Expected<std::unique_ptr<clang::CompilerInstance>> make_compiler(
     const std::vector<std::string>& args) {
@@ -166,28 +184,47 @@ llvm::Expected<std::unique_ptr<clang::CompilerInstance>> make_compiler(
   } directory_scope;
   // The builder keeps the `const char*` pointers, so `all` must outlive
   // CreateCpp().
-  std::vector<std::string> all = platform_args();
-  all.insert(all.end(), args.begin(), args.end());
-  // Hook routing is installed after Clang emits IR. Preserve call boundaries
-  // even when the session requests optimization.
-  all.insert(all.end(), {"-fno-inline", "-fno-inline-functions"});
-#ifdef __linux__
-  // JIT pages can be more than 2 GiB from data exported by the executable.
-  // Use GOT references instead of x86_64 small-model direct data references.
-  all.emplace_back("-fPIC");
-#endif
-#if defined(__linux__) && defined(__x86_64__) && \
-    defined(CPP_REPL_NATIVE_CALL_PATCHES)
-  // The branch islands transfer indirectly to JIT entries, including on CET
-  // systems.
-  all.emplace_back("-fcf-protection=branch");
-#endif
+  const auto all = compiler_arguments(args);
   std::vector<const char*> argv;
   for (const std::string& a : all) argv.push_back(a.c_str());
 
   clang::IncrementalCompilerBuilder builder;
   builder.SetCompilerArgs(argv);
   return builder.CreateCpp();
+}
+
+std::string compile_file_path(const std::string& path, std::string& error) {
+  std::error_code ec;
+  const auto absolute = std::filesystem::absolute(expand_home(path), ec);
+  const auto file = ec ? std::filesystem::path()
+                       : std::filesystem::weakly_canonical(absolute, ec);
+  if (ec) {
+    error = "cannot resolve filename: " + path + ": " + ec.message();
+    return "";
+  }
+  if (std::filesystem::is_directory(file, ec)) {
+    error = "not a source file: " + path;
+    return "";
+  }
+  if (file.string().find_first_of("\"\n\r") != std::string::npos) {
+    error = "unsupported quote or newline in filename: " + path;
+    return "";
+  }
+  return file.string();
+}
+
+std::string format_compile_flags(const std::vector<std::string>& flags) {
+  if (flags.empty()) return "(none)";
+  std::ostringstream result;
+  for (std::size_t i = 0; i < flags.size(); ++i) {
+    if (i) result << ' ';
+    if (flags[i].empty() ||
+        flags[i].find_first_of(" \t\n\r\"'\\") != std::string::npos)
+      result << std::quoted(flags[i]);
+    else
+      result << flags[i];
+  }
+  return result.str();
 }
 
 // True if the input ends in an expression without ';', whose value the
@@ -234,6 +271,14 @@ std::unique_ptr<CppInterpreter> CppInterpreter::create(
     const std::vector<std::string>& args, std::string& error) {
   auto database = ProjectCompilationDatabase::load(error);
   if (!database) return nullptr;
+  std::error_code cwd_error;
+  const auto directory = std::filesystem::current_path(cwd_error);
+  if (cwd_error) {
+    error = cwd_error.message();
+    return nullptr;
+  }
+  const auto flags = normalize_compile_flags(args, directory.string(), error);
+  if (!flags) return nullptr;
   static std::once_flag init;
   std::call_once(init, [] {
     llvm::InitializeNativeTarget();
@@ -245,7 +290,7 @@ std::unique_ptr<CppInterpreter> CppInterpreter::create(
     llvm::outs().SetUnbuffered();
   });
 
-  auto ci = make_compiler(args);
+  auto ci = make_compiler(*flags);
   if (!ci) {
     error = llvm::toString(ci.takeError());
     return nullptr;
@@ -256,11 +301,30 @@ std::unique_ptr<CppInterpreter> CppInterpreter::create(
     return nullptr;
   }
   return std::unique_ptr<CppInterpreter>(
-      new CppInterpreter(std::move(*interp), args, std::move(database)));
+      new CppInterpreter(std::move(*interp), *flags, std::move(database)));
 }
 
 // ParseAndExecute(), split up so a failed Execute can be undone.
 bool CppInterpreter::run(const std::string& code, clang::Value& value) {
+  if (!global_options_changed_ || compile_scope_active_)
+    return run_raw(code, value);
+  SourceCompileOptions options;
+  options.arguments = args_;
+  std::error_code ec;
+  options.directory = std::filesystem::current_path(ec).string();
+  if (ec) {
+    llvm::errs() << "error: " << ec.message() << '\n';
+    return false;
+  }
+  std::string error;
+  if (!reference_directory_.empty()) options.directory = reference_directory_;
+  const bool result = with_compile_options(
+      options, [&] { return run_raw(code, value); }, error);
+  if (!error.empty()) llvm::errs() << "error: " << error << '\n';
+  return result;
+}
+
+bool CppInterpreter::run_raw(const std::string& code, clang::Value& value) {
   if (has_top_level_return(code)) {  // would crash the parser
     llvm::errs() << "error: 'return' is only allowed inside a function\n";
     return false;
@@ -314,11 +378,22 @@ bool CppInterpreter::execute(const std::string& code) {
 bool CppInterpreter::set_hook(HookKind kind, const std::string& signature,
                                const std::string& body, std::string& error, const std::string& caller) {
   error.clear();
+  if (global_options_changed_ && !compile_scope_active_) {
+    return with_compile_options(
+        source_compile_options(""),
+        [&] { return hooks_.set(kind, signature, body, error, caller); },
+        error);
+  }
   return hooks_.set(kind, signature, body, error, caller);
 }
 
 bool CppInterpreter::restore(const std::string& signature, std::string& error, const std::string& caller) {
   error.clear();
+  if (global_options_changed_ && !compile_scope_active_) {
+    return with_compile_options(
+        source_compile_options(""),
+        [&] { return hooks_.restore(signature, error, caller); }, error);
+  }
   return hooks_.restore(signature, error, caller);
 }
 
@@ -455,36 +530,236 @@ CppInterpreter::AddResult CppInterpreter::add_source(const std::string& path) {
   if (std::find(sources_.begin(), sources_.end(), name) != sources_.end()) {
     return {false, "already added: " + name};
   }
-  const auto options = database_->options_for(name);
+  const auto options = source_compile_options(name);
   const auto include = "#include \"" + name + "\"\n";
-  if (options) {
-    auto arguments = options->arguments;
-    // Explicit REPL flags override compile-database flags.
-    arguments.insert(arguments.end(), args_.begin(), args_.end());
-    auto configured = make_compiler(arguments);
-    if (!configured)
-      return {false, "could not configure " + name + ": " +
-                         llvm::toString(configured.takeError())};
-    SourceCompileScope scope(*interp_->getCompilerInstance(), **configured,
-                             options->directory);
-    if (!scope.error().empty())
-      return {false, "could not configure " + name + ": " + scope.error()};
-    const bool prepared = scope.prelude().empty() || execute(scope.prelude());
-    const bool added = prepared && execute(scope.includes() + include);
-    // Parsing failures do not undo macro directives: always restore them in a
-    // separate input, while the temporary language settings are still active.
-    const bool restored = scope.epilogue().empty() || execute(scope.epilogue());
-    if (!added || !restored) return {false, "could not add " + name};
+  if (!options.source.empty() || file_options_.count(name) ||
+      global_options_changed_) {
+    std::string error;
+    if (!with_compile_options(options, [&] { return execute(include); }, error))
+      return {false,
+              "could not add " + name + (error.empty() ? "" : ": " + error)};
   } else if (!execute(include))
     return {false, "could not add " + name};
   sources_.push_back(name);
-  return {true,
-          "added: " + name +
-              (options ? " (compile options: " + options->source + ")" : "")};
+  return {true, "added: " + name +
+                    (options.source.empty()
+                         ? ""
+                         : " (compile options: " + options.source + ")")};
 }
 
 const std::string& CppInterpreter::compilation_database_path() const {
   return database_->path();
+}
+
+SourceCompileOptions CppInterpreter::source_compile_options(
+    const std::string& file, const FileCompileOptions* candidate,
+    const std::vector<std::string>* globals) const {
+  std::error_code ec;
+  SourceCompileOptions options;
+  options.directory = std::filesystem::current_path(ec).string();
+  if (!globals && !reference_directory_.empty())
+    options.directory = reference_directory_;
+  if (!file.empty()) {
+    if (!candidate) {
+      if (const auto found = file_options_.find(file);
+          found != file_options_.end())
+        candidate = &found->second;
+    }
+    if (!candidate || !candidate->replace_database) {
+      if (const auto database = database_->options_for(file))
+        options = *database;
+    }
+  }
+  const auto& global_flags = globals ? *globals : args_;
+  options.arguments.insert(options.arguments.end(), global_flags.begin(),
+                           global_flags.end());
+  if (candidate)
+    options.arguments.insert(options.arguments.end(), candidate->flags.begin(),
+                             candidate->flags.end());
+  return options;
+}
+
+bool CppInterpreter::with_compile_options(const SourceCompileOptions& options,
+                                          const std::function<bool()>& action,
+                                          std::string& error) {
+  auto configured = make_compiler(options.arguments);
+  if (!configured) {
+    error = llvm::toString(configured.takeError());
+    return false;
+  }
+  SourceCompileScope scope(*interp_->getCompilerInstance(), **configured,
+                           options.directory);
+  if (!scope.error().empty()) {
+    error = scope.error();
+    return false;
+  }
+  llvm::SaveAndRestore<bool> active(compile_scope_active_, true);
+  clang::Value ignored;
+  const bool prepared =
+      scope.prelude().empty() || run_raw(scope.prelude(), ignored);
+  const bool included = prepared && (scope.includes().empty() ||
+                                     run_raw(scope.includes(), ignored));
+  const bool result = included && action();
+  // Failed parsing does not undo macro directives, so restore them separately.
+  const bool restored =
+      scope.epilogue().empty() || run_raw(scope.epilogue(), ignored);
+  ignored.clear();
+  if (!prepared || !included)
+    error = "could not apply compiler flags or forced includes";
+  if (!restored) error = "could not restore compiler macros";
+  return result && restored;
+}
+
+bool CppInterpreter::add_compile_options(const std::vector<std::string>& flags,
+                                         std::string& error,
+                                         const std::string& file) {
+  return update_compile_options(flags, false, file, error);
+}
+
+bool CppInterpreter::set_compile_options(const std::vector<std::string>& flags,
+                                         std::string& error,
+                                         const std::string& file) {
+  return update_compile_options(flags, true, file, error);
+}
+
+bool CppInterpreter::use_compile_options(const std::string& file,
+                                         std::string& error) {
+  error.clear();
+  if (file.empty()) {
+    error = "missing reference filename";
+    return false;
+  }
+  const auto target = compile_file_path(file, error);
+  if (target.empty()) return false;
+  std::error_code ec;
+  if (!file_options_.count(target) && !database_->options_for(target) &&
+      !std::filesystem::is_regular_file(target, ec)) {
+    error = "no source file or compile options for: " + file;
+    return false;
+  }
+  // Re-selecting a reference rebases its database flags instead of carrying
+  // flags from the previous reference into the new one. Manual globals remain.
+  auto globals = reference_file_.empty() ? args_ : reference_global_overrides_;
+  const auto options = source_compile_options(target, nullptr, &globals);
+  // Capture relative database paths before promoting the options to globals.
+  const auto flags =
+      normalize_compile_flags(options.arguments, options.directory, error);
+  if (!flags || !set_compile_options(*flags, error)) return false;
+  reference_file_ = target;
+  reference_directory_ = options.directory;
+  reference_global_overrides_ = std::move(globals);
+  return true;
+}
+
+bool CppInterpreter::update_compile_options(
+    const std::vector<std::string>& flags, bool replace,
+    const std::string& file, std::string& error) {
+  error.clear();
+  std::error_code ec;
+  const auto directory = std::filesystem::current_path(ec).string();
+  if (ec) {
+    error = ec.message();
+    return false;
+  }
+  const auto normalized = normalize_compile_flags(flags, directory, error);
+  if (!normalized) return false;
+  std::string target;
+  FileCompileOptions candidate;
+  SourceCompileOptions options;
+  if (file.empty()) {
+    options.directory = directory;
+    if (!replace) options.arguments = args_;
+    options.arguments.insert(options.arguments.end(), normalized->begin(),
+                             normalized->end());
+  } else {
+    target = compile_file_path(file, error);
+    if (target.empty()) return false;
+    if (!replace) {
+      if (const auto found = file_options_.find(target);
+          found != file_options_.end())
+        candidate = found->second;
+    } else
+      candidate.replace_database = true;
+    candidate.flags.insert(candidate.flags.end(), normalized->begin(),
+                           normalized->end());
+    options = source_compile_options(target, &candidate);
+  }
+  // Construct and validate a disposable frontend; do not replay session code or
+  // run forced-include initializers while merely changing configuration.
+  auto configured = make_compiler(options.arguments);
+  if (!configured) {
+    error = llvm::toString(configured.takeError());
+    return false;
+  }
+  SourceCompileScope validation(*interp_->getCompilerInstance(), **configured,
+                                options.directory);
+  if (!validation.error().empty()) {
+    error = validation.error();
+    return false;
+  }
+  if (file.empty()) {
+    args_ = std::move(options.arguments);
+    global_options_changed_ = true;
+    if (replace) {
+      reference_file_.clear();
+      reference_directory_.clear();
+      reference_global_overrides_.clear();
+    } else if (!reference_file_.empty())
+      reference_global_overrides_.insert(reference_global_overrides_.end(),
+                                         normalized->begin(),
+                                         normalized->end());
+  } else
+    file_options_[target] = std::move(candidate);
+  return true;
+}
+
+std::optional<std::string> CppInterpreter::describe_compile_options(
+    std::string& error, const std::string& file) const {
+  error.clear();
+  const auto target = file.empty() ? "" : compile_file_path(file, error);
+  if (!file.empty() && target.empty()) return std::nullopt;
+  const auto options = source_compile_options(target);
+  std::ostringstream out;
+  out << "Compile options:\n";
+  auto row = [&](const char* label, const std::string& value) {
+    out << "  " << std::left << std::setw(18) << label << " : " << value
+        << '\n';
+  };
+  row("Scope", target.empty() ? "global" : target);
+  row("Database", database_->path().empty() ? "(none)" : database_->path());
+  if (!reference_file_.empty()) row("Reference file", reference_file_);
+  row("Working directory", options.directory);
+  row("Global flags", format_compile_flags(args_));
+  if (!target.empty()) {
+    const auto override = file_options_.find(target);
+    const bool replaced =
+        override != file_options_.end() && override->second.replace_database;
+    const auto database = replaced ? std::optional<SourceCompileOptions>()
+                                   : database_->options_for(target);
+    row("Database command", replaced   ? "replaced by file options"
+                            : database ? database->source
+                                       : "(none)");
+    row("Database flags",
+        database ? format_compile_flags(database->arguments) : "(none)");
+    row("File flags", override == file_options_.end()
+                          ? "(none)"
+                          : format_compile_flags(override->second.flags));
+  }
+  row("Effective flags",
+      format_compile_flags(compiler_arguments(options.arguments)));
+  if (target.empty()) {
+    if (file_options_.empty()) row("File overrides", "(none)");
+    for (const auto& [path, flags] : file_options_)
+      row("File override",
+          path + (flags.replace_database ? " [replaced] " : " [appended] ") +
+              format_compile_flags(flags.flags));
+  }
+  row("Applies to",
+      "future compilation; existing declarations and objects remain");
+  row("Runtime updates",
+      "preprocessing and language options; JIT target/code generation stay "
+      "fixed");
+  return out.str();
 }
 
 std::vector<std::string> CppInterpreter::class_names() {

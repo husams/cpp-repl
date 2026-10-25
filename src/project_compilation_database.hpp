@@ -13,6 +13,12 @@ struct SourceCompileOptions {
   std::string source;
 };
 
+// Validate flag/value grouping with Clang's option table, and anchor manual
+// include paths to the directory where the user supplied them.
+std::optional<std::vector<std::string>> normalize_compile_flags(
+    const std::vector<std::string>& flags, const std::string& directory,
+    std::string& error);
+
 class ProjectCompilationDatabase {
  public:
   ProjectCompilationDatabase();

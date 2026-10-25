@@ -1,5 +1,6 @@
 #include "source_compile_options.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <map>
 #include <set>
@@ -145,6 +146,17 @@ SourceCompileScope::SourceCompileScope(clang::CompilerInstance& session,
     return;
   }
   auto& pp_options = configured.getPreprocessorOpts();
+  // Later -D/-U flags override earlier layers. Keep only the final directive
+  // for each macro when validating the disposable frontend.
+  std::set<std::string> seen_macros;
+  decltype(pp_options.Macros) macros;
+  for (auto it = pp_options.Macros.rbegin(); it != pp_options.Macros.rend();
+       ++it) {
+    const auto name = it->first.substr(0, it->first.find_first_of("(="));
+    if (seen_macros.insert(name).second) macros.push_back(*it);
+  }
+  std::reverse(macros.begin(), macros.end());
+  pp_options.Macros = std::move(macros);
   if (!pp_options.ImplicitPCHInclude.empty() ||
       !pp_options.ChainedIncludes.empty()) {
     state.error = "per-file PCH requires a separate compiler session";
@@ -208,7 +220,7 @@ SourceCompileScope::SourceCompileScope(clang::CompilerInstance& session,
   const auto& predefines = configured.getPreprocessor().getPredefines();
   const auto baseline = definitions(session.getPreprocessor().getPredefines());
   auto desired = definitions(predefines);
-  if (!pp_options.MacroIncludes.empty()) {
+  {
     auto& manager = configured.getSourceManager();
     manager.setMainFileID(manager.createFileID(
         llvm::MemoryBuffer::getMemBuffer("", "<compile-options>")));
@@ -226,9 +238,12 @@ SourceCompileScope::SourceCompileScope(clang::CompilerInstance& session,
     configured.getDiagnosticClient().EndSourceFile();
     configured.getLangOpts().IncrementalExtensions = incremental;
     if (configured.getDiagnostics().hasErrorOccurred()) {
-      state.error = "could not preprocess -imacros from compile command";
+      state.error = "invalid compiler definitions or -imacros input";
       return;
     }
+  }
+  if (!pp_options.MacroIncludes.empty()) {
+    auto& pp = configured.getPreprocessor();
     for (auto& [name, directive] : desired) {
       if (!pp.getMacroInfo(&pp.getIdentifierTable().get(name)))
         directive = "#undef " + name;

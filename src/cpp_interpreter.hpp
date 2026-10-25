@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -15,6 +17,7 @@ class Value;
 namespace example {
 
 class ProjectCompilationDatabase;
+struct SourceCompileOptions;
 
 // The clang-repl engine behind the REPL: clang::Interpreter parses each input
 // as a partial translation unit on top of the earlier ones, and runs it
@@ -70,6 +73,17 @@ class CppInterpreter {
   AddResult add_source(const std::string& path);
   const std::vector<std::string>& sources() const { return sources_; }
   const std::string& compilation_database_path() const;
+  // Empty file selects global flags. File append inherits database/global
+  // flags; file replacement discards its database flags and retains globals.
+  // Updates affect future compilation, preserve live state, and are atomic on
+  // validation errors. Manual include paths are anchored to the current cwd.
+  bool add_compile_options(const std::vector<std::string>& flags,
+                           std::string& error, const std::string& file = "");
+  bool set_compile_options(const std::vector<std::string>& flags,
+                           std::string& error, const std::string& file = "");
+  bool use_compile_options(const std::string& file, std::string& error);
+  std::optional<std::string> describe_compile_options(
+      std::string& error, const std::string& file = "") const;
 
   // Classes defined by user code (inputs, added sources and their non-system
   // headers; qualified names), and a synopsis of one:
@@ -99,12 +113,33 @@ class CppInterpreter {
   CppInterpreter(std::unique_ptr<clang::Interpreter> interp, std::vector<std::string> args,
                  std::unique_ptr<ProjectCompilationDatabase> database);
   bool run(const std::string& code, clang::Value& value);
+  bool run_raw(const std::string& code, clang::Value& value);
+  bool with_compile_options(const SourceCompileOptions& options,
+                            const std::function<bool()>& action,
+                            std::string& error);
+  bool update_compile_options(const std::vector<std::string>& flags,
+                              bool replace, const std::string& file,
+                              std::string& error);
+
+  struct FileCompileOptions {
+    bool replace_database = false;
+    std::vector<std::string> flags;
+  };
+  SourceCompileOptions source_compile_options(
+      const std::string& file, const FileCompileOptions* candidate = nullptr,
+      const std::vector<std::string>* globals = nullptr) const;
 
   std::unique_ptr<clang::Interpreter> interp_;
   FunctionHooks hooks_;
   std::vector<std::string> args_;  // the user's compiler flags, for completion
   std::vector<std::string> sources_;  // canonical paths of the %add-ed files
   std::unique_ptr<ProjectCompilationDatabase> database_;
+  std::map<std::string, FileCompileOptions> file_options_;
+  std::string reference_file_;
+  std::string reference_directory_;
+  std::vector<std::string> reference_global_overrides_;
+  bool global_options_changed_ = false;
+  bool compile_scope_active_ = false;
 };
 
 }  // namespace example
