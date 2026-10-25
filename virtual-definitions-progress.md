@@ -65,5 +65,6 @@ Expected values: 42, 106, 1. See the example README for startup definitions and
 how to edit their bodies for another test without rebuilding the library.
 Saved native proof: `examples/unresolved-virtuals/evidence/{macos,linux-dev}.txt`.
 
-Work remains isolated on the local branch; no push, merge or installation was
-requested or performed, and the primary checkout's unrelated edits are intact.
+Delivery: [PR #4](https://github.com/husams/cpp-repl/pull/4), created for the
+requested merge. The manual-test worktree is retained; no installation was
+performed, and the primary checkout's unrelated edits are intact.
