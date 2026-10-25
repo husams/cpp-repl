@@ -1,0 +1,16 @@
+#include <api.hpp>
+
+template<class T> std::string specialized_method_demo::Person<T>::getName() const { return "generic"; }
+template<> std::string specialized_method_demo::Person<int>::getName() const { return "specialized int " + std::to_string(value); }
+
+specialized_method_demo::Person<int> person{7};
+specialized_method_demo::Person<double> other{9.0};
+person.getName()
+std::string name = person.getName();
+const char* text = name.c_str();
+text
+std::string other_name = other.getName();
+const char* other_text = other_name.c_str();
+other_text
+bool matches = name == "specialized int 7" && other_name == "generic";
+matches

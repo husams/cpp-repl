@@ -1,0 +1,14 @@
+#include <api.hpp>
+
+template<class T> std::string function_instance_demo::describe(T value) { return "value " + std::to_string(value); }
+template std::string function_instance_demo::describe<int>(int);
+
+function_instance_demo::describe<int>(7)
+std::string name = function_instance_demo::describe<int>(7);
+const char* text = name.c_str();
+text
+std::string other_name = function_instance_demo::describe<long>(9);
+const char* other_text = other_name.c_str();
+other_text
+bool matches = name == "value 7" && other_name == "value 9";
+matches

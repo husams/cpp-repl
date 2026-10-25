@@ -1,0 +1,4 @@
+#include <api.hpp>
+class_instance_demo::Person<int> person{7};
+%define std::string class_instance_demo::Person<int>::getName() const cpp` return "Sample"; `
+%quit
