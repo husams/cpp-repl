@@ -105,9 +105,18 @@ void dispatch_through_slot(llvm::Function& function, llvm::Constant* original,
   for (auto& arg : function.args()) args.push_back(&arg);
   auto* call = builder.CreateCall(function.getFunctionType(), destination, args);
   call->setCallingConv(function.getCallingConv());
-  // Preserve ABI attributes and tail-transfer so hooks may throw normally.
+  // Preserve the declaration's ABI attributes on the forwarding call.
   call->setAttributes(function.getAttributes().removeFnAttributes(module.getContext()));
-  call->setTailCallKind(llvm::CallInst::TCK_MustTail);
+  // A byval argument lives in the incoming stack frame. A musttail transfer
+  // can copy it across the return address on x86_64 (LLVM 21), corrupting the
+  // caller's stack. Let normal call lowering allocate a fresh outgoing copy.
+  bool has_byval = false;
+  for (const auto& arg : function.args()) {
+    has_byval |= arg.hasByValAttr();
+  }
+  if (!has_byval) {
+    call->setTailCallKind(llvm::CallInst::TCK_MustTail);
+  }
   if (function.getReturnType()->isVoidTy()) builder.CreateRetVoid();
   else builder.CreateRet(call);
 }
@@ -218,7 +227,7 @@ struct FunctionHooks::Impl {
   unsigned next_id = 0;
 
   clang::FunctionDecl* resolve(const std::string& text, std::vector<std::string>* names,
-                               std::string& error) {
+                               std::string& error, bool defining = false) {
     auto& context = interp.getASTContext();
     const std::string helper = "__cpp_repl_signature_" + std::to_string(++next_id);
     Signature signature;
@@ -267,8 +276,10 @@ struct FunctionHooks::Impl {
       for (unsigned i = 0; i < probe->getNumParams(); ++i) {
         auto name = probe->getParamDecl(i)->getNameAsString();
         if (name.empty()) name = "arg" + std::to_string(i);
-        if (name == "self" || name == "result" || name.rfind("__cpp_repl_", 0) == 0)
+        if (!defining &&
+            (name == "self" || name == "result" || name.rfind("__cpp_repl_", 0) == 0)) {
           error = "parameter names self, result and __cpp_repl_* are reserved in hooks";
+        }
         names->push_back(std::move(name));
       }
     if (auto undo = undo_input(interp, parsed->TUPart)) error = llvm::toString(std::move(undo));
@@ -447,6 +458,64 @@ struct FunctionHooks::Impl {
 FunctionHooks::FunctionHooks(clang::Interpreter& interpreter)
     : impl_(std::make_unique<Impl>(interpreter)) {}
 FunctionHooks::~FunctionHooks() = default;
+
+std::optional<CallableDefinition> FunctionHooks::definition(const std::string& signature,
+                                                            std::string& error) {
+  std::vector<std::string> names;
+  auto* function = impl_->resolve(signature, &names, error, true);
+  if (!function) {
+    return std::nullopt;
+  }
+  if (function->getDefinition()) {
+    error = "function already has a C++ definition: " + signature;
+    return std::nullopt;
+  }
+  const auto* type = function->getType()->getAs<clang::FunctionProtoType>();
+  const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(function);
+  if (!type || function->isTemplated() || function->isDependentContext() ||
+      function->isConstexpr() || function->isVariadic() || function->isDeleted() ||
+      function->getFormalLinkage() != clang::Linkage::External ||
+      type->getCallConv() != clang::CC_C || (method && method->isVirtual())) {
+    error = "callable definitions require external, non-template, non-constexpr, "
+            "non-variadic, non-virtual functions with the default calling convention";
+    return std::nullopt;
+  }
+  auto& context = impl_->interp.getASTContext();
+  auto policy = context.getPrintingPolicy();
+  policy.FullyQualifiedName = true;
+  auto qualified = [&](clang::QualType type) {
+    return clang::TypeName::getFullyQualifiedType(type, context, true);
+  };
+  std::string declaration = function->getQualifiedNameAsString() + "(";
+  for (unsigned i = 0; i < function->getNumParams(); ++i) {
+    if (i) {
+      declaration += ", ";
+    }
+    auto parameter = names[i];
+    qualified(function->getParamDecl(i)->getType()).getAsStringInternal(parameter, policy);
+    declaration += parameter;
+  }
+  declaration += ")";
+  if (method && !method->isStatic()) {
+    if (method->isConst()) {
+      declaration += " const";
+    }
+    if (method->isVolatile()) {
+      declaration += " volatile";
+    }
+    if (method->getRefQualifier() == clang::RQ_LValue) {
+      declaration += " &";
+    }
+    if (method->getRefQualifier() == clang::RQ_RValue) {
+      declaration += " &&";
+    }
+  }
+  if (type->isNothrow()) {
+    declaration += " noexcept";
+  }
+  qualified(function->getReturnType()).getAsStringInternal(declaration, policy);
+  return CallableDefinition{std::move(declaration), symbol_name(context, *function)};
+}
 
 std::vector<ActiveHook> FunctionHooks::active() const {
   std::vector<ActiveHook> result;

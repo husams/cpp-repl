@@ -110,21 +110,19 @@ bool NativeSymbolExports::publish(const std::string& mangled,
   if (status != 0) {
     std::ifstream input(diagnostics);
     const std::string details((std::istreambuf_iterator<char>(input)), {});
-    error =
-        "Clang could not publish native storage: " + invocation_error + details;
+    error = "Clang could not publish native symbol: " + invocation_error + details;
     return false;
   }
   void* handle = dlopen(image.c_str(), RTLD_NOW | RTLD_GLOBAL);
   if (!handle) {
     const char* message = dlerror();
-    error = "cannot publish native storage: " +
-            std::string(message ? message : "dlopen failed");
+    error = "cannot publish native symbol: " + std::string(message ? message : "dlopen failed");
     return false;
   }
   if (reinterpret_cast<std::uintptr_t>(dlsym(RTLD_DEFAULT, mangled.c_str())) !=
       address) {
     dlclose(handle);
-    error = "native loader did not publish the JIT storage address";
+    error = "native loader did not publish the JIT symbol address";
     return false;
   }
   handles_.push_back(handle);

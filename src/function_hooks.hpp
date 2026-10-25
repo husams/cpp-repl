@@ -33,6 +33,11 @@ struct HookSymbolDetails {
   std::vector<ActiveHook> hooks;
 };
 
+struct CallableDefinition {
+  std::string declaration;
+  std::string mangled;
+};
+
 // Instruments user definitions and references to library functions before JIT
 // compilation, so earlier JIT callers and pointers observe later hook changes.
 class FunctionHooks {
@@ -47,8 +52,10 @@ class FunctionHooks {
   bool restore(const std::string& signature, std::string& error, const std::string& caller = "");
   std::vector<ActiveHook> active() const;
   HookSymbolDetails symbol_details(const std::string& symbol) const;
+  // Resolve a declaration and build an actual out-of-line C++ definition.
+  std::optional<CallableDefinition> definition(const std::string& signature, std::string& error);
 
- private:
+private:
   bool update(std::optional<HookKind> kind, const std::string& signature, const std::string& body,
               std::string& error, const std::string& caller);
   struct Impl;

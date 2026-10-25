@@ -406,6 +406,47 @@ def main():
               and "terminal_storage::State::label" not in plain(out["remaining"])
               and status == 0)
 
+        out, status = session(binary, cwd, [
+            ("declare", b"namespace terminal_callable { class Worker { int value_ = 40; int hidden(int) const; public: int run(int x) const { return hidden(x); } }; }\r", True),
+            ("bad", b"%define terminal_callable::Worker::hidden(int x) const cpp`return missing_name;`\r", True),
+            ("define", b"%define terminal_callable::Worker::hidden(int x) const cpp`\n\nreturn this->value_ + x;\n`\r", True),
+            ("call", b"terminal_callable::Worker{}.run(2)\r", True),
+            ("quit", b"%quit\r"),
+        ])
+        check("callable define accepts multiline private method bodies after errors",
+              status == 0 and "error:" in plain(out["bad"])
+              and "error:" not in plain(out["define"]) and "(int) 42" in plain(out["call"]))
+
+        if len(sys.argv) > 3:
+            with tempfile.TemporaryDirectory(dir=cwd) as callable_home:
+                project = os.path.join(callable_home, "project")
+                user_scripts = os.path.join(callable_home, ".cpp-repl")
+                scripts = os.path.join(project, ".cpp-repl")
+                nested = os.path.join(project, "nested")
+                os.makedirs(user_scripts)
+                os.makedirs(scripts)
+                os.makedirs(nested)
+                with open(os.path.join(user_scripts, "99-user.repl"), "w", encoding="utf8") as f:
+                    f.write("int callable_startup_offset = 7;\n")
+                with open(os.path.join(scripts, "1-header.repl"), "w", encoding="utf8") as f:
+                    f.write(f'%add "{sys.argv[3]}"\n')
+                with open(os.path.join(scripts, "2-definitions.repl"), "w", encoding="utf8") as f:
+                    f.write('%define unresolved_callables::adjust(int x) cpp`return x + callable_startup_offset;`\n'
+                            '%define unresolved_callables::adjust(double x) cpp`return x * 2.5;`\n'
+                            '%define unresolved_callables::transform(unresolved_callables::Value v, double f) cpp`\nreturn {v.a*f, v.b*f, v.c*f, v.d*f};\n`\n'
+                            '%define unresolved_callables::decorate(const std::string& s) cpp`return "[" + s + "]";`\n'
+                            '%define unresolved_callables::Worker::hidden(int x) const & noexcept cpp`return value_ + x;`\n'
+                            '%define unresolved_callables::Worker::scale(int x) cpp`return x*3;`\n')
+                with open(os.path.join(scripts, "10-library.repl"), "w", encoding="utf8") as f:
+                    f.write(f'%lib "{sys.argv[2]}"\n')
+                out, status = session(binary, nested, [
+                    ("probe", b"unresolved_callables::callable_native_probe()\r", True),
+                    ("quit", b"%quit\r"),
+                ], home=callable_home)
+                check("ordered user/project startup supplies native callable imports before loading",
+                      status == 0 and "error:" not in plain(out["start"])
+                      and "(int) 1" in plain(out["probe"]))
+
         with tempfile.TemporaryDirectory(dir=cwd) as preload_home:
             with open(os.path.join(preload_home, "first header.hpp"), "w", encoding="utf8") as f:
                 f.write("int startup_input_value = STARTUP_VALUE;\n")

@@ -1,0 +1,3 @@
+%add-path build
+%add include/api.hpp
+%symbols undefined name '^callable_demo::'
