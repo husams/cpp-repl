@@ -302,9 +302,49 @@ then compiled and run by the interpreter.
   undefined imports, parsed source references, import slots and supported direct
   calls in the defining image are shown. Quote names with spaces, for example
   `%syminfo 'Point::inc(int)'` or `%syminfo 'add(int, int)'`.
-- `%symbols [all] [lib <regex>] [name <regex>]` - list loaded native exports
+- ``%define <symbol> cpp`initializer` `` - provide a missing definition for a
+  declared global variable or static data member. Clang supplies the actual
+  type and declarator; you supply any valid C++ initializer, including function
+  calls, constructed objects, arrays, pointers, references, and multiline
+  expressions. Names and values are not built into the implementation. Private
+  static members are defined through ordinary C++ member-definition rules.
+  Existing C++ definitions and loaded-library storage are preserved: the
+  command rejects a duplicate without executing its initializer. Missing
+  declarations and invalid initializers report errors, and a rejected
+  initializer can be corrected and retried.
+  For example, after loading a header declaring `app::State::value`:
+
+  ```text
+  %symbols undefined
+  %define app::State::value cpp`make_value()`
+  %syminfo app::State::value
+  ```
+
+  Put header declarations in an earlier numbered `.repl` script, definitions
+  in the next, and `%add` inputs which use them afterward. `%lib` supplies
+  existing exported data from native libraries; `%define` creates storage
+  in the REPL's JIT and publishes its address to the native loader. Load a
+  library's header, `%define` its missing data, then `%lib` the original library.
+  No user-written shim or rebuild of the supplied library is required. Clang
+  generates temporary native export metadata pointing at the same JIT storage;
+  it does not create a second object or run its initializer again. The library
+  file retains its undefined imports. The configured Clang executable must be
+  installed. Thread-local storage cannot be published this way and is rejected
+  before initialization. If native publication fails after initialization, the
+  error explicitly reports that the variable remains defined in the session.
+  The [unresolved-library example](examples/unresolved-library/README.md)
+  demonstrates a final shared library retaining undefined static members,
+  resolved by `%define` before loading that single supplied library.
+  See [the configured static-member example](examples/static-members/README.md)
+  for numbered startup scripts, a native library, and recorded Mac/Linux runs.
+- `%symbols [all] [undefined] [lib <regex>] [name <regex>]` - list loaded native exports
   and emitted session functions/globals as demangled, fully qualified C++ names
   only, one per line, with no columns or counts.
+  Add `undefined` to list unresolved user declarations and unresolved imports
+  from loaded libraries instead. This finds missing static data members even
+  before an expression references them. Names already resolved from a library
+  or defined in the session are omitted; regex filters still apply, including
+  `lib '<session>'` for parsed declarations. `all` includes system libraries.
   System libraries are hidden by default; `%symbols all` includes them.
   System locations are `/System/`, `/Library/Apple/`, `/usr/lib/`, `/usr/lib64/`,
   `/lib/`, `/lib64/` and Homebrew's `/opt/homebrew/`, `/usr/local/Cellar/` and
@@ -334,7 +374,8 @@ hooks     := "%hooks"
 info      := "%info" symbol
 syminfo   := "%syminfo" symbol
 demangle  := "%demangle" symbol
-symbols   := "%symbols" [ "all" ] [ "lib" regex ] [ "name" regex ]
+define    := "%define" symbol "cpp`" initializer "`"
+symbols   := "%symbols" [ "all" ] [ "undefined" ] [ "lib" regex ] [ "name" regex ]
 add-path  := "%add-path" path { ":" path }     blanks around ':' are allowed
 help      := "%help"
 quit      := "%quit"

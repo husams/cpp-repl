@@ -15,7 +15,7 @@ import tempfile
 import time
 
 
-def session(binary, cwd, steps):
+def session(binary, cwd, steps, home=None):
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(cwd)
@@ -23,7 +23,7 @@ def session(binary, cwd, steps):
         # shell uses TERM=dumb (as many automation runners do).
         os.environ["TERM"] = "xterm-256color"
         # Keep the user's actual ~/.cpp-repl out of test sessions.
-        os.environ["HOME"] = cwd
+        os.environ["HOME"] = home if home is not None else cwd
         os.execv(binary, [binary])
 
     # Reads until the output goes quiet; with `wait`, first until the next
@@ -174,7 +174,7 @@ def main():
             ],
         )
         help_text = plain(out["help"])
-        check("%help lists the twenty-two commands", all(c in help_text for c in ("%lib", "%libs", "%libinfo", "%syminfo", "%demangle", "%paths", "%add-path", "%add", "%compile-opts", "%add-compile-opt", "%set-compile-opts", "%use-compile-opts", "%class", "%info", "%symbols", "%mock", "%pre", "%post", "%restore", "%hooks", "%help", "%quit")))
+        check("%help lists the twenty-three commands", all(c in help_text for c in ("%lib", "%libs", "%libinfo", "%syminfo", "%demangle", "%define", "%paths", "%add-path", "%add", "%compile-opts", "%add-compile-opt", "%set-compile-opts", "%use-compile-opts", "%class", "%info", "%symbols", "%mock", "%pre", "%post", "%restore", "%hooks", "%help", "%quit")))
         check("demangle completes and prints readable Linux and Mac C++ names",
               "%demangle" in plain(out["demangle_tab"])
               and "add(int, int)" in plain(out["demangle_linux"])
@@ -307,6 +307,33 @@ def main():
         check("set compile options without flags clears globals", "error:" not in plain(out["cleared"]))
         check("compile option commands exit normally", status == 0)
 
+        out, status = session(binary, cwd, [
+            ("declare", b"namespace terminal_storage { int seed() { return 21; } class State { static long long value; public: static long long read() { return value; } static const char* label; }; }\r", True),
+            ("undefined_tab", b"%symbols u\t"),
+            ("undefined", b" name ^terminal_storage::State::\r", True),
+            ("define_tab", b"%def\t"),
+            ("bad", b" terminal_storage::State::value cpp`unknown_initializer`\r", True),
+            ("define", b"%define terminal_storage::State::value cpp`\n\nseed() * 2LL\n`\r", True),
+            ("label", b'%define terminal_storage::State::label cpp`"arbitrary text"`\r', True),
+            ("value", b"int(terminal_storage::State::read())\r", True),
+            ("text", b"terminal_storage::State::label\r", True),
+            ("remaining", b"%symbols undefined name ^terminal_storage::State::\r", True),
+            ("quit", b"%quit\r"),
+        ])
+        check("undefined symbol names complete and include missing private static members",
+              "%symbols undefined" in plain(out["undefined_tab"])
+              and "terminal_storage::State::value" in plain(out["undefined"])
+              and "terminal_storage::State::label" in plain(out["undefined"]))
+        check("define completes and accepts arbitrary typed multiline initializers after errors",
+              "%define" in plain(out["define_tab"])
+              and "error:" in plain(out["bad"])
+              and "(int) 42" in plain(out["value"])
+              and '(const char *) "arbitrary text"' in plain(out["text"]))
+        check("defined statics disappear from the undefined list",
+              "terminal_storage::State::value" not in plain(out["remaining"])
+              and "terminal_storage::State::label" not in plain(out["remaining"])
+              and status == 0)
+
         with tempfile.TemporaryDirectory(dir=cwd) as preload_home:
             with open(os.path.join(preload_home, "first header.hpp"), "w", encoding="utf8") as f:
                 f.write("int startup_input_value = STARTUP_VALUE;\n")
@@ -367,6 +394,30 @@ def main():
             check("startup quit exits before the prompt or later entries",
                   quit_run.returncode == 0 and "missing-after-quit" not in quit_run.stdout
                   and "cpp-repl>" not in plain(quit_run.stdout.encode()))
+
+        with tempfile.TemporaryDirectory(dir=cwd) as scope_home:
+            user_scripts = os.path.join(scope_home, ".cpp-repl")
+            project_root = os.path.join(scope_home, "project")
+            project_scripts = os.path.join(project_root, ".cpp-repl")
+            nested = os.path.join(project_root, "src", "nested")
+            os.makedirs(user_scripts)
+            os.makedirs(project_scripts)
+            os.makedirs(nested)
+            with open(os.path.join(user_scripts, "99-user.repl"), "w", encoding="utf8") as f:
+                f.write("%set-compile-opts -DSCOPE_VALUE=1\nint user_scope_value = SCOPE_VALUE;\n")
+            with open(os.path.join(project_scripts, "0-project.repl"), "w", encoding="utf8") as f:
+                f.write("%add-compile-opt -DSCOPE_VALUE=2\n%add src/project.cpp\n")
+            with open(os.path.join(project_root, "src", "project.cpp"), "w", encoding="utf8") as f:
+                f.write("int project_scope_value() { return user_scope_value + SCOPE_VALUE; }\n")
+            out, status = session(binary, nested, [
+                ("user", b"user_scope_value\r", True),
+                ("project", b"project_scope_value()\r", True),
+                ("quit", b"%quit\r"),
+            ], home=scope_home)
+            check("user startup runs before nearest project startup even from a subdirectory",
+                  status == 0 and "error:" not in plain(out["start"])
+                  and "(int) 1" in plain(out["user"])
+                  and "(int) 3" in plain(out["project"]))
 
         out, status = session(
             binary,

@@ -671,6 +671,36 @@ TEST(StartupFiles, MissingDirectoriesAreSilentAndDiscoveryStopsAtHome) {
   EXPECT_TRUE(output.str().empty());
 }
 
+TEST(StartupFiles, TypedStaticDefinitionsLoadBeforeDependentSourceFiles) {
+  TemporaryProject project;
+  project.write("state.hpp",
+                "#pragma once\n#include <vector>\n"
+                "namespace startup_storage { int seed() { return 21; } "
+                "struct State { static std::vector<int> values; }; }\n");
+  project.write("use.cpp",
+                "int startup_storage_answer() { return "
+                "startup_storage::State::values[1]; }\n");
+  project.write(".cpp-repl/0-declarations.repl", "%add state.hpp\n");
+  project.write(".cpp-repl/1-definitions.repl",
+                "%symbols undefined name ^startup_storage::\n"
+                "%define startup_storage::State::values cpp`\n"
+                "std::vector<int>{seed(), seed() * 2}\n`\n");
+  project.write(".cpp-repl/2-use.repl", "%add use.cpp\n");
+  CurrentDirectory cwd(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  LibraryManager libs;
+  std::ostringstream output;
+  const auto result = load_startup_files(
+      libs, *cpp, output, (project.root() / ".cpp-repl").string());
+  EXPECT_EQ(result.failed, 0u) << output.str();
+  EXPECT_EQ(cpp->evaluate("startup_storage_answer()"), "(int) 42\n");
+  EXPECT_EQ(
+      cpp->symbol_list("<session>", "^startup_storage::", error, false, true),
+      "");
+}
+
 TEST(CompileOptions,
      FileAppendOverridesDatabaseAndGlobalAndSetReplacesDatabaseOptions) {
   TemporaryProject project;

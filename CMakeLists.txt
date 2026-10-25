@@ -52,7 +52,9 @@ target_include_directories(example_core SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
 target_link_libraries(example_core PUBLIC replxx ${CMAKE_DL_LIBS} PRIVATE LLVM)
 target_compile_options(example_core PRIVATE -Wall -Wextra -Wpedantic)
 
-add_library(cpp_interp STATIC src/cpp_interpreter.cpp src/cpp_inspect.cpp src/cpp_symbols.cpp src/function_hooks.cpp src/loaded_symbols.cpp src/runtime_inspection.cpp src/project_compilation_database.cpp src/source_compile_options.cpp src/startup_files.cpp src/session_commands.cpp)
+add_library(cpp_interp STATIC src/cpp_interpreter.cpp src/cpp_inspect.cpp src/cpp_symbols.cpp src/function_hooks.cpp src/loaded_symbols.cpp src/runtime_inspection.cpp src/project_compilation_database.cpp src/source_compile_options.cpp src/startup_files.cpp src/session_commands.cpp src/native_symbol_exports.cpp)
+find_program(CPP_REPL_CLANG_EXECUTABLE NAMES clang
+  HINTS "${LLVM_TOOLS_BINARY_DIR}" "${LLVM_INSTALL_PREFIX}/bin" REQUIRED)
 set(REPLXX_NATIVE_SOURCE src/native_call_patch.cpp)
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
   set(REPLXX_NATIVE_PLATFORM_SUPPORTED TRUE)
@@ -89,6 +91,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   endif()
 endif()
 target_compile_definitions(cpp_interp PRIVATE ${CPP_REPL_LLVM_DEFINITIONS}
+  CPP_REPL_CLANG_EXECUTABLE="${CPP_REPL_CLANG_EXECUTABLE}"
   CPP_REPL_LLVM_PREFIX="${LLVM_INSTALL_PREFIX}"
   CPP_REPL_RESOURCE_DIR="${CPP_REPL_CLANG_RESOURCE_DIR}")
 # libclang-cpp and libLLVM contain clangInterpreter and the ORC JIT.
@@ -160,6 +163,14 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
   gtest_discover_tests(library_dependency_test)
 
   add_executable(cpp_interpreter_test tests/cpp_interpreter_test.cpp)
+  add_library(unresolved_storage_test_library SHARED tests/fixtures/unresolved_storage.cpp)
+  if(APPLE)
+    target_link_options(unresolved_storage_test_library PRIVATE "LINKER:-undefined,dynamic_lookup")
+  endif()
+  target_compile_definitions(cpp_interpreter_test PRIVATE
+    UNRESOLVED_STORAGE_LIBRARY="$<TARGET_FILE:unresolved_storage_test_library>"
+    UNRESOLVED_STORAGE_HEADER="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/unresolved_storage.hpp")
+  add_dependencies(cpp_interpreter_test unresolved_storage_test_library)
   add_library(hook_test_library SHARED tests/fixtures/hook_library.cpp)
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(hook_test_library PRIVATE tests/fixtures/hook_library_got.cpp)

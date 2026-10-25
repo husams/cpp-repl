@@ -55,6 +55,15 @@ CommandResult execute_command(LibraryManager& libs, CppInterpreter& cpp,
   if (cmd.kind == CommandKind::Cpp) {
     return {true, false};  // C++ input is handled by the interactive REPL.
   }
+  if (cmd.kind == CommandKind::DefineVariable && cmd.error.empty()) {
+    std::string error;
+    const bool ok =
+        cpp.define_variable(cmd.symbol->value, cmd.code->value, error);
+    out << color_inspection(
+        ok ? "defined: " + cmd.symbol->value + '\n' : "error: " + error + '\n',
+        inspection_colors_enabled());
+    return {true, ok};
+  }
   if ((cmd.kind == CommandKind::CompileOpts ||
        cmd.kind == CommandKind::AddCompileOpt ||
        cmd.kind == CommandKind::SetCompileOpts ||
@@ -123,10 +132,10 @@ CommandResult execute_command(LibraryManager& libs, CppInterpreter& cpp,
   }
   if (cmd.kind == CommandKind::Symbols && cmd.error.empty()) {
     std::string error;
-    const auto result =
-        cpp.symbol_list(cmd.library_regex ? cmd.library_regex->value : "",
-                        cmd.name_regex ? cmd.name_regex->value : "", error,
-                        cmd.all_symbols.has_value());
+    const auto result = cpp.symbol_list(
+        cmd.library_regex ? cmd.library_regex->value : "",
+        cmd.name_regex ? cmd.name_regex->value : "", error,
+        cmd.all_symbols.has_value(), cmd.undefined_symbols.has_value());
     if (result)
       out << color_inspection(*result, inspection_colors_enabled(), true);
     else

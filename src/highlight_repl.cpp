@@ -39,6 +39,7 @@ void highlight_input(const std::string& input, Replxx::colors_t& colors) {
   for (const Span& s : cmd.separators) paint(input, s, kSeparatorColor, colors);
   if (cmd.class_name) paint(input, cmd.class_name->span, kClassNameColor, colors);
   if (cmd.symbol) paint(input, cmd.symbol->span, kClassNameColor, colors);
+  if (cmd.undefined_symbols) paint(input, *cmd.undefined_symbols, kCommandColor, colors);
   if (cmd.library_regex) paint(input, cmd.library_regex->span, kPathColor, colors);
   if (cmd.name_regex) paint(input, cmd.name_regex->span, kClassNameColor, colors);
   for (const auto* operand : {&cmd.signature, &cmd.caller, &cmd.code}) {

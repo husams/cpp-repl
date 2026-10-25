@@ -27,7 +27,7 @@ std::string one_line(const std::string& text) {
   return result;
 }
 
-} // namespace
+}  // namespace
 
 std::string readable_symbol_name(const std::string& mangled) {
   // Some Mach-O symbol sources retain the extra platform underscore.
@@ -37,20 +37,23 @@ std::string readable_symbol_name(const std::string& mangled) {
 
 bool is_system_library(const std::string& path) {
   // Include platform runtimes and system-wide Homebrew toolchain libraries.
-  for (const auto* root : {"/System/", "/Library/Apple/", "/usr/lib/", "/usr/lib64/",
-                           "/lib/", "/lib64/", "/opt/homebrew/", "/usr/local/Cellar/",
-                           "/usr/local/opt/"}) {
+  for (const auto* root :
+       {"/System/", "/Library/Apple/", "/usr/lib/", "/usr/lib64/", "/lib/",
+        "/lib64/", "/opt/homebrew/", "/usr/local/Cellar/", "/usr/local/opt/"}) {
     if (path.rfind(root, 0) == 0) return true;
   }
-  return path == "linux-vdso.so.1" || path == "linux-gate.so.1" || path == "[vdso]";
+  return path == "linux-vdso.so.1" || path == "linux-gate.so.1" ||
+         path == "[vdso]";
 }
 
 void native_loaded_symbols(const std::regex& library, const std::regex& name,
-                           std::vector<LoadedSymbol>& result, bool include_system) {
+                           std::vector<LoadedSymbol>& result,
+                           bool include_system) {
 #ifdef CPP_REPL_RUNTIME_SYMBOLS
   for (const auto& module : native_modules()) {
     if ((!include_system && is_system_library(module.path)) ||
-        !std::regex_search(module.path, library)) continue;
+        !std::regex_search(module.path, library))
+      continue;
     for (const auto& symbol : native_exports(module)) {
       const auto readable = readable_symbol_name(symbol.name);
       if (!std::regex_search(readable, name)) continue;
@@ -58,11 +61,38 @@ void native_loaded_symbols(const std::regex& library, const std::regex& name,
       for (const auto* prefix : {"vtable for ", "VTT for ", "typeinfo for ",
                                  "typeinfo name for ", "guard variable for "}) {
         if (readable.rfind(prefix, 0) == 0) {
-          kind = std::string(prefix).substr(0, std::string(prefix).find(" for "));
+          kind =
+              std::string(prefix).substr(0, std::string(prefix).find(" for "));
           break;
         }
       }
-      result.push_back({module.path, kind, readable, symbol.name, symbol.address});
+      result.push_back(
+          {module.path, kind, readable, symbol.name, symbol.address});
+    }
+  }
+#else
+  (void)library;
+  (void)name;
+  (void)result;
+  (void)include_system;
+#endif
+}
+
+void native_undefined_symbols(const std::regex& library, const std::regex& name,
+                              std::vector<LoadedSymbol>& result,
+                              bool include_system) {
+#ifdef CPP_REPL_RUNTIME_SYMBOLS
+  for (const auto& module : native_modules()) {
+    if ((!include_system && is_system_library(module.path)) ||
+        !std::regex_search(module.path, library))
+      continue;
+    for (const auto& symbol :
+         native_imports(module, [&](const std::string& mangled) {
+           return std::regex_search(readable_symbol_name(mangled), name);
+         })) {
+      if (!symbol.address)
+        result.push_back({module.path, symbol.kind,
+                          readable_symbol_name(symbol.name), symbol.name});
     }
   }
 #else
@@ -83,4 +113,4 @@ std::string format_loaded_symbols(std::vector<LoadedSymbol> symbols) {
   return result;
 }
 
-} // namespace example
+}  // namespace example

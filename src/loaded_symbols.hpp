@@ -1,7 +1,7 @@
 #pragma once
 
-#include <regex>
 #include <cstdint>
+#include <regex>
 #include <string>
 #include <vector>
 
@@ -21,7 +21,12 @@ bool is_system_library(const std::string& path);
 // Enumerate defined exports of images currently loaded in the process. Filters
 // use regex_search; library filtering happens before symbol enumeration.
 void native_loaded_symbols(const std::regex& library, const std::regex& name,
-                           std::vector<LoadedSymbol>& result, bool include_system = true);
+                           std::vector<LoadedSymbol>& result,
+                           bool include_system = true);
+// Unresolved imports only; imports bound to existing storage are omitted.
+void native_undefined_symbols(const std::regex& library, const std::regex& name,
+                              std::vector<LoadedSymbol>& result,
+                              bool include_system = false);
 std::string format_loaded_symbols(std::vector<LoadedSymbol> symbols);
 
-} // namespace example
+}  // namespace example

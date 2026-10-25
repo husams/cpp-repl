@@ -211,13 +211,79 @@ SymbolDescription describe(clang::ASTContext& context, const clang::NamedDecl* d
 
 }  // namespace
 
+std::optional<VariableDefinition> variable_definition(
+    clang::ASTContext& context, std::string_view query, std::string& error) {
+  error.clear();
+  if (query.substr(0, 2) == "::") query.remove_prefix(2);
+  if (query.substr(0, 3) == "__Z") query.remove_prefix(1);
+  for (const auto* decl : declarations(context)) {
+    if (decl->isInvalidDecl()) continue;
+    if (decl->getQualifiedNameAsString() != query &&
+        mangled_name(context, decl) != query)
+      continue;
+    const auto* variable = llvm::dyn_cast<clang::VarDecl>(decl);
+    if (!variable || !variable->hasGlobalStorage() ||
+        variable->isLocalVarDecl()) {
+      error = "symbol is not a global variable or static data member";
+      return std::nullopt;
+    }
+    if (variable->getDeclContext()->isDependentContext() ||
+        variable->getType()->isDependentType()) {
+      error = "variable requires a concrete template specialization";
+      return std::nullopt;
+    }
+    VariableDefinition result;
+    result.mangled = mangled_name(context, variable);
+    const auto* definition = variable->getDefinition();
+    result.defined = definition && !definition->isInvalidDecl();
+    result.declaration = variable->getQualifiedNameAsString();
+    auto policy = context.getPrintingPolicy();
+    policy.FullyQualifiedName = true;
+    variable->getType().getAsStringInternal(result.declaration, policy);
+    result.thread_local_storage = variable->getTLSKind() != clang::VarDecl::TLS_None;
+    if (result.thread_local_storage)
+      result.declaration = "thread_local " + result.declaration;
+    return result;
+  }
+  error = "no variable declaration named '" + std::string(query) + "'";
+  return std::nullopt;
+}
+
+void discard_failed_variable_definition(clang::ASTContext& context,
+                                        std::string_view query) {
+  if (query.substr(0, 2) == "::") query.remove_prefix(2);
+  if (query.substr(0, 3) == "__Z") query.remove_prefix(1);
+  for (const auto* decl : declarations(context)) {
+    const auto* variable = llvm::dyn_cast<clang::VarDecl>(decl);
+    if (!variable || (variable->getQualifiedNameAsString() != query &&
+                      mangled_name(context, variable) != query))
+      continue;
+    if (auto* definition =
+            const_cast<clang::VarDecl*>(variable->getDefinition())) {
+      // Failed Parse inputs are not registered PTUs, so Undo would remove an
+      // earlier successful input. Clang cleans lookup but retains
+      // redeclarations; demote this failed definition to an invalid declaration
+      // instead.
+      definition->setInit(nullptr);
+      if (definition->isStaticDataMember()) {
+        definition->setStorageClass(clang::SC_Static);
+        definition->setLexicalDeclContext(definition->getDeclContext());
+      } else {
+        definition->setStorageClass(clang::SC_Extern);
+      }
+      definition->setInvalidDecl();
+    }
+  }
+}
+
 std::vector<SymbolDescription> describe_symbols(clang::ASTContext& context,
                                                 std::string_view query) {
   if (query.substr(0, 2) == "::") query.remove_prefix(2);
   const auto all = declarations(context);
   std::vector<SymbolDescription> result;
   std::set<const clang::Decl*> seen;
-  const bool mangled_query = query.substr(0, 2) == "_Z" || query.substr(0, 3) == "__Z";
+  const bool mangled_query =
+      query.substr(0, 2) == "_Z" || query.substr(0, 3) == "__Z";
   for (const auto* decl : all) {
     bool match = decl->getQualifiedNameAsString() == query;
     if (!match && mangled_query) {

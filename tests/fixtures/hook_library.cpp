@@ -7,6 +7,8 @@ extern "C" int hook_native_weak_missing() __attribute__((weak));
 namespace hook_library {
 
 int symbol_counter = 7;
+long long StaticStorage::total = 37;
+const char* StaticStorage::label = "native static storage";
 
 int add(int a, int b) { return a + b; }
 double add(double a, double b) { return a + b; }

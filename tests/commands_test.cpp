@@ -382,6 +382,33 @@ TEST(Grammar, SymbolsAllIncludesSystemLibrariesWithFiltersInEitherOrder) {
   EXPECT_FALSE(parse_command("%symbols all lib libc all").error.empty());
 }
 
+TEST(Grammar, UndefinedSymbolsAcceptFiltersAndRejectDuplicateOptions) {
+  for (const char* input : {"%symbols undefined", "%symbols all undefined",
+                             "%symbols undefined name value lib example all",
+                             "%symbols name value undefined lib example"}) {
+    const auto cmd = parse_command(input);
+    EXPECT_TRUE(cmd.error.empty()) << cmd.error;
+    EXPECT_TRUE(cmd.undefined_symbols);
+  }
+  EXPECT_FALSE(parse_command("%symbols undefined undefined").error.empty());
+  EXPECT_FALSE(parse_command("%symbols name undefined").undefined_symbols);
+}
+
+TEST(Grammar, DefineVariableUsesAnInitializerBlockAndSupportsMultilineInput) {
+  const auto cmd = parse_command("%define demo::State::value cpp`\nmake_value(7)\n`");
+  EXPECT_EQ(cmd.kind, CommandKind::DefineVariable);
+  ASSERT_TRUE(cmd.symbol);
+  EXPECT_EQ(cmd.symbol->value, "demo::State::value");
+  ASSERT_TRUE(cmd.code);
+  EXPECT_EQ(cmd.code->value, "\nmake_value(7)\n");
+  EXPECT_TRUE(cmd.error.empty()) << cmd.error;
+  EXPECT_TRUE(wants_more_input("%define demo::State::value cpp`\n"));
+  for (const char* input : {"%define", "%define cpp`42`", "%define value cpp``",
+                             "%define value cpp` `", "%define value cpp`42` extra",
+                             "%define value other cpp`42`"})
+    EXPECT_FALSE(parse_command(input).error.empty()) << input;
+}
+
 TEST(Grammar, LibraryAndSymbolInspectionAcceptsQuotedNames) {
   EXPECT_EQ(parse_command("%libs").kind, CommandKind::Libs);
   EXPECT_TRUE(parse_command("%libs").error.empty());
@@ -474,7 +501,7 @@ TEST(Dispatch, QuitStopsAndHelpListsCommands) {
   for (const std::string& name : command_names()) {
     EXPECT_NE(out.str().find(name), std::string::npos) << name;
   }
-  EXPECT_EQ(command_names().size(), 22u);
+  EXPECT_EQ(command_names().size(), 23u);
 }
 
 TEST(Dispatch, PathsShowsConfiguredDirectoriesAndLoaderSettings) {

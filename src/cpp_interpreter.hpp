@@ -17,6 +17,7 @@ class Value;
 namespace example {
 
 class ProjectCompilationDatabase;
+class NativeSymbolExports;
 struct SourceCompileOptions;
 
 // The clang-repl engine behind the REPL: clang::Interpreter parses each input
@@ -95,12 +96,17 @@ class CppInterpreter {
   // Does not parse/evaluate user expressions or call the inspected symbol.
   std::optional<std::string> symbol_info(const std::string& name, std::string& error);
   std::vector<std::string> symbol_names();
+  // Define missing storage and publish it to the native loader before %lib.
+  // Existing session/library definitions are never replaced.
+  bool define_variable(const std::string& name, const std::string& initializer,
+                        std::string& error);
   // Defined native exports and emitted session functions/globals. Regex filters
   // search full library paths (or <session>) and demangled qualified names.
   // System libraries are hidden unless include_system is true.
   std::optional<std::string> symbol_list(const std::string& library_regex,
                                        const std::string& name_regex, std::string& error,
-                                       bool include_system = false);
+                                       bool include_system = false,
+                                       bool undefined_only = false);
 
   // Makes the symbols of a shared library (already dlopen-ed or not) visible
   // to JIT-ed code. Returns an error message, or "" on success.
@@ -129,6 +135,8 @@ class CppInterpreter {
       const std::string& file, const FileCompileOptions* candidate = nullptr,
       const std::vector<std::string>* globals = nullptr) const;
 
+  // Keep absolute exports alive while the JIT destroys its global objects.
+  std::unique_ptr<NativeSymbolExports> native_exports_;
   std::unique_ptr<clang::Interpreter> interp_;
   FunctionHooks hooks_;
   std::vector<std::string> args_;  // the user's compiler flags, for completion

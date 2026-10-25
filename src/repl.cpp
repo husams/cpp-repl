@@ -99,7 +99,8 @@ Replxx::completions_t complete(CppInterpreter& cpp, const std::string& input,
     context_len = static_cast<int>(utf8_length(typed));
     for (const auto& library : loaded_libraries())
       if (starts_with(library.name, typed)) out.emplace_back(library.name);
-  } else if (cmd.kind == CommandKind::Class || cmd.kind == CommandKind::Info) {
+  } else if (cmd.kind == CommandKind::Class || cmd.kind == CommandKind::Info ||
+             cmd.kind == CommandKind::DefineVariable) {
     const std::string typed = input.substr(cmd.arg_begin);
     context_len = static_cast<int>(utf8_length(typed));
     for (const std::string& name : cmd.kind == CommandKind::Class ? cpp.class_names() : cpp.symbol_names()) {
@@ -115,6 +116,7 @@ Replxx::completions_t complete(CppInterpreter& cpp, const std::string& input,
         cmd.library_regex ? cmd.library_regex->span.end :
         cmd.name_regex ? cmd.name_regex->span.end : cmd.name_end;
     if (cmd.all_symbols) last_filter = std::max(last_filter, cmd.all_symbols->end);
+    if (cmd.undefined_symbols) last_filter = std::max(last_filter, cmd.undefined_symbols->end);
     const auto remaining = input.find_first_not_of(" \t", last_filter);
     if (remaining != std::string::npos) {
       const auto word_end = input.find_first_of(" \t", remaining);
@@ -127,6 +129,7 @@ Replxx::completions_t complete(CppInterpreter& cpp, const std::string& input,
     if (!cmd.library_regex && starts_with("lib", typed)) out.emplace_back("lib");
     if (!cmd.name_regex && starts_with("name", typed)) out.emplace_back("name");
     if (!cmd.all_symbols && starts_with("all", typed)) out.emplace_back("all");
+    if (!cmd.undefined_symbols && starts_with("undefined", typed)) out.emplace_back("undefined");
   }
   return out;
 }

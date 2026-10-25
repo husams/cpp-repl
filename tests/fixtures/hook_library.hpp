@@ -8,6 +8,10 @@ int native_inc(int n);
 int native_no_add(int n);
 int native_optional();
 extern int symbol_counter;
+struct StaticStorage {
+  static long long total;
+  static const char* label;
+};
 #ifdef __linux__
 int got_add(int a, int b);
 int got_inc(int n);

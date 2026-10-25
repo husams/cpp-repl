@@ -16,7 +16,7 @@ namespace example {
 //
 // clang-format off
 //   command   := lib | libs | libinfo | paths | add-path | add | class | info
-//              | symbols | demangle | hook | hooks | restore | compile-opts
+//              | symbols | demangle | define | hook | hooks | restore | compile-opts
 //              | add-compile-opt | set-compile-opts | use-compile-opts | help | quit
 //   lib       := "%lib" { path }                 zero or more paths
 //   libs      := "%libs" [ "all" ] [ regex ]     loaded library names only
@@ -33,7 +33,8 @@ namespace example {
 //   class     := "%class" [ name ]               name := ident { "::" ident }
 //   info      := "%info" symbol                  qualified or mangled name
 //   demangle  := "%demangle" symbol              mangled or plain name
-//   symbols   := "%symbols" [ "all" ] [ "lib" regex ] [ "name" regex ]
+//   define    := "%define" symbol "cpp`" initializer "`"
+//   symbols   := "%symbols" [ "all" ] [ "undefined" ] [ "lib" regex ] [ "name" regex ]
 //   hook      := ("%mock" | "%pre" | "%post") signature [ "in" signature ] "cpp`" body "`"
 //   restore   := "%restore" [ signature [ "in" signature ] ]
 //   hooks     := "%hooks"
@@ -58,6 +59,7 @@ enum class CommandKind {
   Class,
   Info,
   Demangle,
+  DefineVariable,
   Symbols,
   Mock,
   Pre,
@@ -107,6 +109,7 @@ struct ParsedCommand {
   std::optional<Operand> library_regex;  // %symbols lib
   std::optional<Operand> name_regex;     // %symbols name
   std::optional<Span> all_symbols;       // %symbols all (include system libraries)
+  std::optional<Span> undefined_symbols; // %symbols undefined (unresolved only)
   std::optional<Span> all_libraries;     // %libs all (include system libraries)
   std::optional<Operand> signature;   // %mock / %pre / %post / %restore target
   std::optional<Operand> caller;      // optional direct caller after "in"

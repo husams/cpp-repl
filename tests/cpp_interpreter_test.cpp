@@ -1,6 +1,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -9,9 +10,7 @@
 #include <string>
 #include <vector>
 
-#ifdef CPP_REPL_NATIVE_CALL_PATCHES
 #include <dlfcn.h>
-#endif
 
 #include <gtest/gtest.h>
 
@@ -44,6 +43,8 @@ class CppInterpreterTest : public ::testing::Test {
 
 CppInterpreter* CppInterpreterTest::cpp_ = nullptr;
 
+std::string info_field(const std::string& text, const std::string& label);
+
 TEST_F(CppInterpreterTest, KeepsDeclarationsAcrossInputs) {
   EXPECT_EQ(cpp_->evaluate("int twice(int x) { return x * 2; }"), "");
   EXPECT_EQ(cpp_->evaluate("int n = 21;"), "");
@@ -58,6 +59,172 @@ TEST_F(CppInterpreterTest, FindsStandardLibraryHeaders) {
   EXPECT_EQ(cpp_->evaluate("v.size()"), "(unsigned long) 3\n");
   EXPECT_TRUE(cpp_->execute("std::string s = std::string(\"ab\") + \"c\";"));
   EXPECT_EQ(cpp_->evaluate("s.c_str()"), "(const char *) \"abc\"\n");
+}
+
+TEST_F(CppInterpreterTest,
+       RejectsThreadLocalPublicationBeforeRunningTheInitializer) {
+  ASSERT_TRUE(cpp_->execute(
+      "namespace tls_publication { extern thread_local int pending; "
+      "int effects = 0; }"));
+  std::string error;
+  EXPECT_FALSE(cpp_->define_variable("tls_publication::pending",
+                                    "(++tls_publication::effects, 7)", error));
+  EXPECT_NE(error.find("thread-local"), std::string::npos);
+  EXPECT_EQ(cpp_->evaluate("tls_publication::effects"), "(int) 0\n");
+}
+
+TEST_F(CppInterpreterTest,
+       DefinesStorageBeforeLoadingASingleUndefinedLibrary) {
+  LibraryManager libs;
+  libs.set_load_hook([](const std::string& path) {
+    return cpp_->load_library(path);
+  });
+  const auto missing = libs.load(UNRESOLVED_STORAGE_LIBRARY);
+  ASSERT_FALSE(missing.ok);
+  ASSERT_TRUE(cpp_->add_source(UNRESOLVED_STORAGE_HEADER).ok);
+  std::string error;
+  const std::string member = "unresolved_storage_fixture::State::";
+  ASSERT_TRUE(cpp_->define_variable(member + "value_", "17 * 3LL", error))
+      << error;
+  ASSERT_TRUE(cpp_->define_variable(member + "label_",
+                                    "std::string(\"created in REPL\")", error))
+      << error;
+  const auto loaded = libs.load(UNRESOLVED_STORAGE_LIBRARY);
+  ASSERT_TRUE(loaded.ok) << loaded.message;
+  EXPECT_EQ(cpp_->evaluate(member + "read()"), "(long long) 51\n");
+  EXPECT_EQ(cpp_->evaluate(member + "label()"),
+            "(const char *) \"created in REPL\"\n");
+  const auto info = cpp_->symbol_info(member + "value_", error);
+  ASSERT_TRUE(info) << error;
+  void* published = dlsym(RTLD_DEFAULT, info_field(*info, "Mangled").c_str());
+  ASSERT_NE(published, nullptr);
+  const auto address = std::to_string(reinterpret_cast<std::uintptr_t>(published));
+  EXPECT_EQ(cpp_->evaluate(member + "value_address() == "
+                          "reinterpret_cast<const void*>(" + address + "ULL)"),
+            "(bool) true\n");
+}
+
+TEST_F(CppInterpreterTest,
+       DefinesMissingStaticMembersUsingTheirActualCppTypes) {
+  ASSERT_TRUE(cpp_->execute("#include <string>\n#include <vector>\n"));
+  for (unsigned index = 0; index < 2; ++index) {
+    const auto space = "generic_storage_" + std::to_string(index);
+    ASSERT_TRUE(cpp_->execute(
+        "namespace " + space +
+        " { int backing = 6; int make_value() { return 7; } "
+        "class State { static long long hidden; public: static long long "
+        "read() { return hidden; } "
+        "static std::string text; static std::vector<int> values; static const "
+        "int table[3]; "
+        "static int (*callback)(int); static int& reference; }; }"));
+    std::string error;
+    const auto before = cpp_->symbol_list(
+        "^<session>$", "^" + space + "::State::", error, false, true);
+    ASSERT_TRUE(before) << error;
+    EXPECT_NE(before->find(space + "::State::hidden\n"), std::string::npos);
+    const auto member = space + "::State::";
+    ASSERT_TRUE(
+        cpp_->define_variable(member + "hidden", "make_value() * 6LL", error))
+        << error;
+    ASSERT_TRUE(cpp_->define_variable(
+        member + "text", "std::string(\"answer \") + std::to_string(42)",
+        error))
+        << error;
+    ASSERT_TRUE(cpp_->define_variable(member + "values",
+                                      "std::vector<int>{2, 5, 8}", error))
+        << error;
+    ASSERT_TRUE(cpp_->define_variable(member + "table", "{3, 4, 5}", error))
+        << error;
+    ASSERT_TRUE(cpp_->define_variable(member + "callback",
+                                      "+[](int x) { return x * 3; }", error))
+        << error;
+    ASSERT_TRUE(cpp_->define_variable(member + "reference", "backing", error))
+        << error;
+    EXPECT_EQ(cpp_->evaluate("int(" + member + "read())"), "(int) 42\n");
+    EXPECT_EQ(cpp_->evaluate(member + "text.c_str()"),
+              "(const char *) \"answer 42\"\n");
+    EXPECT_EQ(cpp_->evaluate(member + "values[1] + " + member + "table[2]"),
+              "(int) 10\n");
+    EXPECT_EQ(cpp_->evaluate(member + "callback(4)"), "(int) 12\n");
+    ASSERT_TRUE(cpp_->execute(member + "reference = 9;"));
+    EXPECT_EQ(cpp_->evaluate(space + "::backing"), "(int) 9\n");
+    EXPECT_EQ(cpp_->symbol_list("^<session>$", "^" + space + "::State::", error,
+                                false, true),
+              "");
+  }
+}
+
+TEST_F(CppInterpreterTest,
+       MissingVariableDefinitionErrorsPreserveStateAndPermitRetry) {
+  ASSERT_TRUE(cpp_->execute(
+      "namespace definition_recovery { int side_effects = 0; "
+      "int existing = 4; extern int pending; void function(); }"));
+  std::string error;
+  EXPECT_FALSE(cpp_->define_variable("definition_recovery::existing",
+                                     "++definition_recovery::side_effects",
+                                     error));
+  EXPECT_FALSE(
+      cpp_->define_variable("definition_recovery::unknown", "1", error));
+  EXPECT_FALSE(
+      cpp_->define_variable("definition_recovery::function", "1", error));
+  EXPECT_FALSE(
+      cpp_->define_variable("definition_recovery::pending", " ", error));
+  EXPECT_FALSE(cpp_->define_variable("definition_recovery::pending",
+                                     "unknown_initializer_value", error));
+  ASSERT_TRUE(
+      cpp_->define_variable("definition_recovery::pending", "42", error))
+      << error;
+  EXPECT_EQ(cpp_->evaluate("definition_recovery::pending"), "(int) 42\n");
+  EXPECT_EQ(
+      cpp_->evaluate(
+          "definition_recovery::existing + definition_recovery::side_effects"),
+      "(int) 4\n");
+}
+
+TEST_F(CppInterpreterTest,
+       LibraryStaticMembersResolveWithoutReplacingTheirStorage) {
+  ASSERT_TRUE(cpp_->load_library(HOOK_TEST_LIBRARY).empty());
+  ASSERT_TRUE(cpp_->execute("#include \"" HOOK_TEST_HEADER "\"\n"));
+  std::string error;
+  const auto unresolved = cpp_->symbol_list(
+      "^<session>$", "^hook_library::StaticStorage::", error, false, true);
+  ASSERT_TRUE(unresolved) << error;
+  EXPECT_TRUE(unresolved->empty());
+  EXPECT_EQ(cpp_->evaluate("int(hook_library::StaticStorage::total)"),
+            "(int) 37\n");
+  EXPECT_EQ(cpp_->evaluate("hook_library::StaticStorage::label"),
+            "(const char *) \"native static storage\"\n");
+  EXPECT_FALSE(
+      cpp_->define_variable("hook_library::StaticStorage::total", "99", error));
+  EXPECT_NE(error.find("existing storage"), std::string::npos) << error;
+  EXPECT_EQ(cpp_->evaluate("int(hook_library::StaticStorage::total)"),
+            "(int) 37\n");
+}
+
+TEST(CppVariables, FailedStaticDefinitionsRecoverWithSessionCompilerFlags) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->set_compile_options({"-DRECOVERED_VALUE=42"}, error))
+      << error;
+  ASSERT_TRUE(
+      cpp->execute("namespace scoped_recovery { int unavailable(); "
+                   "class State { static long long value; public: static long "
+                   "long read() { return value; } }; }"));
+  EXPECT_FALSE(cpp->define_variable("scoped_recovery::State::value",
+                                    "unavailable()", error));
+  EXPECT_FALSE(cpp->define_variable("scoped_recovery::State::value",
+                                    "unknown_initializer", error));
+  EXPECT_EQ(cpp->symbol_list("<session>", "^scoped_recovery::State::value$",
+                             error, false, true),
+            "scoped_recovery::State::value\n");
+  ASSERT_TRUE(cpp->define_variable("scoped_recovery::State::value",
+                                   "RECOVERED_VALUE", error))
+      << error;
+  EXPECT_EQ(cpp->evaluate("int(scoped_recovery::State::read())"), "(int) 42\n");
+  const auto info = cpp->symbol_info("scoped_recovery::State::value", error);
+  ASSERT_TRUE(info) << error;
+  EXPECT_EQ(info_field(*info, "Definition"), "yes");
 }
 
 TEST_F(CppInterpreterTest, StaysUsableAfterAParseError) {

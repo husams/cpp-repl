@@ -217,8 +217,17 @@ void parse_symbol_filters(std::string_view text, ParsedCommand& cmd) {
       pos = skip_blank(text, end);
       continue;
     }
+    if (flag == "undefined") {
+      if (cmd.undefined_symbols) {
+        set_error(cmd, "duplicate undefined option", {begin, end});
+        return;
+      }
+      cmd.undefined_symbols = Span{begin, end};
+      pos = skip_blank(text, end);
+      continue;
+    }
     if (flag != "lib" && flag != "name") {
-      set_error(cmd, "expected all, lib <regex> or name <regex>", {begin, end});
+      set_error(cmd, "expected all, undefined, lib <regex> or name <regex>", {begin, end});
       return;
     }
     auto& filter = flag == "lib" ? cmd.library_regex : cmd.name_regex;
@@ -270,11 +279,13 @@ void parse_inspection_operand(std::string_view text, ParsedCommand& cmd, bool re
     value = std::string(text.substr(begin + 1, close - begin - 1));
   } else value = std::string(text.substr(begin, end - begin));
   cmd.symbol = Operand{std::move(value), {begin, end}};
-  if (cmd.kind == CommandKind::Demangle && cmd.symbol->value.empty())
+  if ((cmd.kind == CommandKind::Demangle || cmd.kind == CommandKind::DefineVariable) &&
+      cmd.symbol->value.empty())
     set_error(cmd, "missing symbol name", {begin, end});
   const auto extra = skip_blank(text, end);
   if (extra < text.size()) set_error(cmd, cmd.name + " takes one " +
-      ((cmd.kind == CommandKind::Info || cmd.kind == CommandKind::Demangle) ?
+      ((cmd.kind == CommandKind::Info || cmd.kind == CommandKind::Demangle ||
+        cmd.kind == CommandKind::DefineVariable) ?
           "symbol name" : "library name or regex"), {extra, text.size()});
 }
 
@@ -313,15 +324,21 @@ void parse_hook(std::string_view text, ParsedCommand& cmd) {
   while (marker != std::string_view::npos && marker > cmd.arg_begin &&
          !is_blank(text[marker - 1])) marker = text.find("cpp`", marker + 4);
   if (marker == std::string_view::npos) {
-    set_error(cmd, "expected <signature> cpp`<C++ body>`", {cmd.arg_begin, text.size()});
+    set_error(cmd, cmd.kind == CommandKind::DefineVariable ?
+        "expected <symbol> cpp`<C++ initializer>`" :
+        "expected <signature> cpp`<C++ body>`", {cmd.arg_begin, text.size()});
     return;
   }
   const std::size_t end = text.find_last_not_of(kBlank, marker - 1);
   if (marker == cmd.arg_begin || end == std::string_view::npos || end < cmd.arg_begin) {
-    set_error(cmd, "missing function signature", {cmd.arg_begin, marker});
+    set_error(cmd, cmd.kind == CommandKind::DefineVariable ?
+        "missing variable name" : "missing function signature", {cmd.arg_begin, marker});
     return;
   }
-  parse_signature(text, cmd.arg_begin, end + 1, cmd);
+  if (cmd.kind == CommandKind::DefineVariable)
+    parse_inspection_operand(text.substr(0, end + 1), cmd, true, cmd.arg_begin);
+  else
+    parse_signature(text, cmd.arg_begin, end + 1, cmd);
   if (!cmd.error.empty()) return;
   const std::size_t begin = marker + 4;
   // Backticks inside C++ strings, raw strings, chars and comments are data.
@@ -343,6 +360,9 @@ void parse_hook(std::string_view text, ParsedCommand& cmd) {
     return;
   }
   cmd.code = Operand{std::string(text.substr(begin, close - begin)), {begin, close}};
+  if (cmd.kind == CommandKind::DefineVariable &&
+      cmd.code->value.find_first_not_of(kBlank) == std::string::npos)
+    set_error(cmd, "missing C++ initializer", {begin, close});
   const std::size_t next = skip_blank(text, close + 1);
   if (next < text.size()) set_error(cmd, "unexpected text after cpp` block", {next, text.size()});
 }
@@ -380,7 +400,9 @@ const std::vector<CommandInfo>& command_table() {
        "show symbol definitions, imports and reference sites"},
       {"%demangle", CommandKind::Demangle, " <symbol>",
        "print a readable C++ symbol name without loading its library"},
-      {"%symbols", CommandKind::Symbols, " [all] [lib <regex>] [name <regex>]",
+      {"%define", CommandKind::DefineVariable, " <symbol> cpp`<initializer>`",
+       "define missing variable storage using its declared C++ type"},
+      {"%symbols", CommandKind::Symbols, " [all] [undefined] [lib <regex>] [name <regex>]",
        "list loaded symbol names (all includes system libraries)"},
       {"%mock", CommandKind::Mock, " <signature> [in <caller>] cpp`<body>`",
        "replace a function or method body"},
@@ -472,6 +494,7 @@ ParsedCommand parse_command(std::string_view text) {
     case CommandKind::Mock:
     case CommandKind::Pre:
     case CommandKind::Post:
+    case CommandKind::DefineVariable:
       parse_hook(text, cmd);
       break;
     case CommandKind::Restore: {
@@ -576,6 +599,7 @@ bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out,
     case CommandKind::AddCompileOpt:
     case CommandKind::SetCompileOpts:
     case CommandKind::UseCompileOpts:
+    case CommandKind::DefineVariable:
     case CommandKind::Class:    // owns the interpreter
     case CommandKind::Info:
     case CommandKind::Libs:

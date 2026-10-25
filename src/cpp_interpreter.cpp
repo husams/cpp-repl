@@ -46,6 +46,7 @@
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
 #include "loaded_symbols.hpp"
+#include "native_symbol_exports.hpp"
 #include "project_compilation_database.hpp"
 #include "runtime_inspection.hpp"
 #include "source_compile_options.hpp"
@@ -264,7 +265,8 @@ std::vector<std::string> missing_symbols(const clang::Interpreter& interp,
 CppInterpreter::CppInterpreter(std::unique_ptr<clang::Interpreter> interp,
                                std::vector<std::string> args,
                                std::unique_ptr<ProjectCompilationDatabase> database)
-    : interp_(std::move(interp)), hooks_(*interp_), args_(std::move(args)),
+    : native_exports_(std::make_unique<NativeSymbolExports>()),
+      interp_(std::move(interp)), hooks_(*interp_), args_(std::move(args)),
       database_(std::move(database)) {}
 
 CppInterpreter::~CppInterpreter() = default;
@@ -399,13 +401,64 @@ bool CppInterpreter::restore(const std::string& signature, std::string& error, c
   return hooks_.restore(signature, error, caller);
 }
 
-std::vector<ActiveHook> CppInterpreter::active_hooks() const { return hooks_.active(); }
+std::vector<ActiveHook> CppInterpreter::active_hooks() const {
+  return hooks_.active();
+}
 
-std::optional<std::string> CppInterpreter::symbol_list(const std::string& library_regex,
-    const std::string& name_regex, std::string& error, bool include_system) {
+bool CppInterpreter::define_variable(const std::string& name,
+                                     const std::string& initializer,
+                                     std::string& error) {
+  error.clear();
+  if (initializer.find_first_not_of(" \t\n\r") == std::string::npos) {
+    error = "missing C++ initializer";
+    return false;
+  }
+  const auto variable =
+      variable_definition(interp_->getASTContext(), name, error);
+  if (!variable) return false;
+  if (variable->defined) {
+    error = "variable already has a C++ definition: " + name;
+    return false;
+  }
+  if (variable->thread_local_storage) {
+    error = "native publication of thread-local storage is not supported: " + name;
+    return false;
+  }
+  auto address = interp_->getSymbolAddress(variable->mangled);
+  if (address && address->getValue()) {
+    error = "variable already resolves to existing storage: " + name;
+    return false;
+  }
+  if (!address) llvm::consumeError(address.takeError());
+  if (!native_exports_->prepare(error)) return false;
+  // Native imports may use even constant members never ODR-used in the REPL.
+  // Force their storage to be emitted before looking up its JIT address.
+  if (!execute("__attribute__((used)) " + variable->declaration + " = " +
+               initializer + ";\n")) {
+    discard_failed_variable_definition(interp_->getASTContext(), name);
+    error = "could not define variable: " + name;
+    return false;
+  }
+  auto storage = interp_->getSymbolAddress(variable->mangled);
+  if (!storage || !storage->getValue()) {
+    if (!storage) llvm::consumeError(storage.takeError());
+    error = "variable is defined, but its storage address is unavailable: " + name;
+    return false;
+  }
+  if (!native_exports_->publish(variable->mangled, storage->getValue(), error)) {
+    error = "variable is defined in the session, but native publication failed: " + error;
+    return false;
+  }
+  return true;
+}
+
+std::optional<std::string> CppInterpreter::symbol_list(
+    const std::string& library_regex, const std::string& name_regex,
+    std::string& error, bool include_system, bool undefined_only) {
   error.clear();
   std::regex library, name;
-  auto compile = [&](const std::string& text, std::regex& regex, const char* flag) {
+  auto compile = [&](const std::string& text, std::regex& regex,
+                     const char* flag) {
     try {
       regex.assign(text, std::regex::ECMAScript);
       return true;
@@ -414,24 +467,41 @@ std::optional<std::string> CppInterpreter::symbol_list(const std::string& librar
       return false;
     }
   };
-  if (!compile(library_regex, library, "lib") || !compile(name_regex, name, "name"))
+  if (!compile(library_regex, library, "lib") ||
+      !compile(name_regex, name, "name"))
     return std::nullopt;
   std::vector<LoadedSymbol> symbols;
-  native_loaded_symbols(library, name, symbols, include_system);
-  const auto declarations = runtime_symbol_declarations(interp_->getASTContext());
+  if (undefined_only)
+    native_undefined_symbols(library, name, symbols, include_system);
+  else
+    native_loaded_symbols(library, name, symbols, include_system);
+  const auto declarations =
+      runtime_symbol_declarations(interp_->getASTContext());
   std::map<std::string, std::string> kinds;
   for (const auto& decl : declarations) kinds.emplace(decl.mangled, decl.kind);
   for (auto& symbol : symbols) {
-    const auto mangled = symbol.mangled.rfind("__Z", 0) == 0 ? symbol.mangled.substr(1) : symbol.mangled;
-    if (const auto kind = kinds.find(mangled); kind != kinds.end()) symbol.kind = kind->second;
+    const auto mangled = symbol.mangled.rfind("__Z", 0) == 0
+                             ? symbol.mangled.substr(1)
+                             : symbol.mangled;
+    if (const auto kind = kinds.find(mangled); kind != kinds.end())
+      symbol.kind = kind->second;
   }
   if (std::regex_search(std::string("<session>"), library)) {
     for (const auto& decl : declarations) {
-      if (!decl.defined) continue;
+      if (decl.defined == undefined_only) continue;
       const auto readable = readable_symbol_name(decl.mangled);
       if (!std::regex_search(readable, name)) continue;
       auto address = interp_->getSymbolAddress(decl.mangled);
-      if (!address) { llvm::consumeError(address.takeError()); continue; }
+      if (undefined_only) {
+        if (address && address->getValue()) continue;
+        if (!address) llvm::consumeError(address.takeError());
+        symbols.push_back({"<session>", decl.kind, readable, decl.mangled});
+        continue;
+      }
+      if (!address) {
+        llvm::consumeError(address.takeError());
+        continue;
+      }
       Dl_info info{};
       if (dladdr(address->toPtr<void*>(), &info) && info.dli_fbase) continue;
       symbols.push_back({"<session>", decl.kind, readable, decl.mangled});
