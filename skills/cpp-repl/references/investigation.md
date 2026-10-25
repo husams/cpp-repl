@@ -44,7 +44,7 @@ function:
 %libinfo libexample
 %symbols lib 'libexample' name '^app::'
 %symbols undefined
-%syminfo app::Worker::run
+%syminfo 'app::Worker::run(int)'
 ```
 
 `%libinfo` requires a loaded library; if loading failed, preserve the loader
@@ -52,14 +52,13 @@ diagnostic and inspect the binary/dependencies externally. A full `%lib` path
 removes name ambiguity; `%add-path` assists dependency lookup. System libraries
 are hidden by default even with a `lib` filter; add `all` when appropriate.
 Filters are case-sensitive ECMAScript regex searches over full paths/readable
-names. No matches is an empty list. Inspect a bare qualified name first and read
-the reported declarations/overloads; demangle exact failing import names. Some
-binaries accept a full signature for `%syminfo`, others report `no symbol named`
-for it even when bare-name inspection succeeds. If trying a signature query,
-verify support on this binary and fall back to the bare qualified name on a
-miss. Do not treat that query mismatch as evidence of an undefined function.
-Select hook/restore overloads with parameter types and member qualifiers;
-successful hook signature parsing does not validate symbol-query syntax.
+names. No matches is an empty list. Bare qualified names show the declaration or
+overload set; typed signatures select an overload in current builds, including
+session functions. Demangle exact failing import names. For an older executable
+that rejects a typed query, fall back to the bare qualified name or the actual
+mangled name shown in metadata and verify its revision. A query mismatch alone
+is not evidence of an undefined function. Hook/restore signatures remain a
+separate grammar; do not assume their parameter-name syntax works in `%syminfo`.
 
 If the intended experiment needs a missing definition, load its declarations,
 then supply the definition **before** loading its native consumer:
@@ -70,7 +69,7 @@ then supply the definition **before** loading its native consumer:
 %define app::State::value cpp`42`
 %define app::adjust(int x) cpp`return x + 7;`
 %lib /absolute/path/to/libconsumer.so
-%syminfo app::adjust
+%syminfo 'app::adjust(int)'
 ```
 
 Use the real platform extension (`.dylib` on macOS). `%define` defines a missing
@@ -93,6 +92,32 @@ must be treated as capability limits, not solved with guessed mangled names.
 If publication fails after successful initialization/compilation, the diagnostic
 can say the definition remains in the session. Do not blindly retry and assume
 rollback; fix the environment and use a fresh process.
+
+## Select an overload without running it
+
+Both `%syminfo` and `%info` accept a bare name, a typed signature or a mangled
+name. Typed queries use parameter types without names or return types, plus
+method `const`/`volatile` and `&`/`&&` qualifiers where needed. They accept
+declared alias and canonical type spellings, ordinary parameter whitespace and
+prefix/postfix const-reference forms. Supported `noexcept` queries must match
+a nonthrowing declaration. This is AST spelling comparison, not arbitrary
+semantic normalization of every possible alias or template spelling.
+
+```text
+namespace inspect { int calls = 0; int pick(int x) { ++calls; return x; } double pick(double x) { ++calls; return x; } struct Probe { int get() & { return 1; } int get() const & { return 2; } }; }
+%syminfo inspect::pick
+%syminfo 'inspect::pick(int)'
+%info 'inspect::Probe::get() const &'
+%syminfo 'inspect::pick(1)'
+inspect::calls
+```
+
+The bare query shows both overloads; the typed queries select one declaration
+each. The argument-expression query is rejected and `calls` remains 0. Neither
+successful nor rejected inspection parses helper declarations or executes C++.
+An unavailable address for an unemitted inline method does not mean its
+declaration is absent. Use the actual reported mangled name for a later query;
+prompt redefinitions can introduce internal version names, so do not guess it.
 
 ## Observe and change one call
 
@@ -169,12 +194,30 @@ headers first included in a rejected input may require a fresh session. Use
 the matching `examples/include-recovery` and `examples/undo-crash` reproducers
 when diagnosing those paths, rather than repeatedly adding the same header.
 
-In some installed builds, a syntax error reopening an existing namespace can
-make later qualified source expressions report that namespace undeclared.
-Arithmetic, existing objects and already compiled callers may still work;
-native symbol metadata may still show storage as defined. Compare those
-observations before claiming code or storage disappeared. Preserve the failed
-input and diagnostics, then replay successful headers/definitions/source loads
-in a fresh process to continue. A merged fix or wiki test result for another
-revision does not establish this installed binary's recovery behavior. Neither
-`%clear` nor `%restore` repairs compiler lookup state.
+Current builds restore earlier namespace lookup after syntax errors and rejected
+unresolved-symbol inputs. Check useful qualified source expressions, existing
+objects and earlier compiled callers in the **same process**, then continue if
+they remain correct. This also applies to namespaces loaded with `%add`.
+
+```text
+namespace recover { int value = 75; int read() { return value; } }
+int retained() { return recover::read(); }
+namespace recover { int broken = ; }
+recover::value
+retained()
+namespace recover { int missing(); } int rejected = recover::missing();
+recover::read()
+retained()
+```
+
+The two rejected inputs produce their respective parse/undefined-symbol errors;
+the four observations still print 75 without restarting. This validates retained
+lookup/code, not complete rollback of preprocessing, nested declarations or
+external effects. Keep the first successful header input separate from risky code.
+
+Older installed builds can instead report the previously valid namespace as
+undeclared while arithmetic, old callers or native metadata still work. If
+that regression occurs, preserve the exact inputs, compare the installed
+revision with the intended build, and replay the known-good setup in a fresh
+process. A merged fix or historical wiki result does not prove installation
+freshness. Neither `%clear` nor `%restore` repairs damaged compiler lookup state.
