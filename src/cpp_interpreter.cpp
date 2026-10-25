@@ -39,6 +39,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/CrashRecoveryContext.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/TargetSelect.h"
@@ -494,10 +495,28 @@ CppInterpreter::Completions CppInterpreter::complete(const std::string& code) {
       const auto column = static_cast<unsigned>(
           (newline == std::string::npos ? code.size() : code.size() - newline - 1) + 1);
       std::vector<std::string> results;
-      clang::ReplCodeCompleter completer;
-      completer.codeComplete(fresh_ci, code, line, column, interp_->getCompilerInstance(),
-                             results);
-      names.insert(results.begin(), results.end());
+      // Importing the session's declarations reports failures (e.g. a
+      // RecoveryExpr left by a failed input) through the main interpreter's
+      // diagnostics; keep them quiet and don't let them fail the next input.
+      clang::DiagnosticsEngine& diags = interp_->getCompilerInstance()->getDiagnostics();
+      const bool had_errors = diags.hasErrorOccurred();
+      std::unique_ptr<clang::DiagnosticConsumer> owned = diags.takeClient();
+      clang::DiagnosticConsumer* client = diags.getClient();
+      diags.setClient(new clang::IgnoringDiagConsumer(), true);
+      // A crash inside Clang's completion costs the completions, not the session.
+      llvm::CrashRecoveryContext::Enable();
+      llvm::CrashRecoveryContext crc;
+      const bool completed = crc.RunSafely([&] {
+        clang::ReplCodeCompleter completer;
+        completer.codeComplete(fresh_ci, code, line, column, interp_->getCompilerInstance(),
+                               results);
+      });
+      llvm::CrashRecoveryContext::Disable();
+      if (owned) diags.setClient(owned.release(), true);
+      else diags.setClient(client, false);
+      if (!had_errors) diags.Reset(/*soft=*/true);
+      if (completed) names.insert(results.begin(), results.end());
+      else (void)fresh->release();  // half-torn-down after a crash; don't destroy it
     } else {
       llvm::consumeError(fresh.takeError());
     }
