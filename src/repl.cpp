@@ -7,8 +7,8 @@
 
 #include "commands.hpp"
 #include "highlight_repl.hpp"
-#include "inspection_output.hpp"
 #include "runtime_inspection.hpp"
+#include "session_commands.hpp"
 
 namespace example {
 
@@ -66,6 +66,30 @@ Replxx::completions_t complete(CppInterpreter& cpp, const std::string& input,
          complete_path(typed, cmd.kind == CommandKind::AddPath)) {
       out.emplace_back(p);
     }
+  } else if (cmd.kind == CommandKind::CompileOpts ||
+             cmd.kind == CommandKind::AddCompileOpt ||
+             cmd.kind == CommandKind::SetCompileOpts ||
+             cmd.kind == CommandKind::UseCompileOpts) {
+    // Only the first operand can be a filename. Flag values may themselves be
+    // paths; do not mistake those for the scope operand.
+    auto typed = input.substr(cmd.arg_begin);
+    if (!typed.empty() && typed.front() == '-') return out;
+    char quote = 0;
+    if (!typed.empty() && (typed.front() == '"' || typed.front() == '\'')) {
+      quote = typed.front();
+      typed.erase(0, 1);
+      const auto close = typed.find(quote);
+      if (close != std::string::npos) {
+        if (close + 1 != typed.size()) return out;
+        typed.pop_back();
+      }
+    } else if (typed.find_first_of(" \t") != std::string::npos)
+      return out;
+    context_len = static_cast<int>(utf8_length(typed));
+    for (auto path : complete_path(typed, false)) {
+      if (quote && !path.empty() && path.back() != '/') path += quote;
+      out.emplace_back(path);
+    }
   } else if (cmd.kind == CommandKind::Libs && !cmd.all_libraries) {
     const std::string typed = input.substr(cmd.arg_begin);
     context_len = static_cast<int>(utf8_length(typed));
@@ -105,35 +129,6 @@ Replxx::completions_t complete(CppInterpreter& cpp, const std::string& input,
     if (!cmd.all_symbols && starts_with("all", typed)) out.emplace_back("all");
   }
   return out;
-}
-
-// %add [path ...]: adds each source file, or lists the added ones.
-void add_sources(CppInterpreter& cpp, const ParsedCommand& cmd) {
-  if (cmd.paths.empty()) {
-    if (cpp.sources().empty()) std::cout << "no source files added\n";
-    for (const std::string& file : cpp.sources()) std::cout << file << '\n';
-    return;
-  }
-  for (const Operand& p : cmd.paths) {
-    const CppInterpreter::AddResult r = cpp.add_source(p.value);
-    std::cout << (r.ok ? "" : "error: ") << r.message << '\n';
-  }
-}
-
-// %class [name]: lists the session's classes, or describes one.
-void show_class(CppInterpreter& cpp, const ParsedCommand& cmd) {
-  if (!cmd.class_name) {
-    const std::vector<std::string> names = cpp.class_names();
-    if (names.empty()) std::cout << "no classes defined\n";
-    for (const std::string& name : names) std::cout << name << '\n';
-    return;
-  }
-  std::string error;
-  if (const auto synopsis = cpp.describe_class(cmd.class_name->value, error)) {
-    std::cout << *synopsis;
-  } else {
-    std::cout << "error: " << error << '\n';
-  }
 }
 
 Replxx::hints_t hint(const std::string& input, int& context_len,
@@ -191,82 +186,12 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
 }
 
 bool execute(LibraryManager& libs, CppInterpreter& cpp, const std::string& line) {
-  const ParsedCommand cmd = parse_command(line);
+  const auto cmd = parse_command(line);
   if (cmd.kind == CommandKind::Cpp) {
-    cpp.execute(line);  // errors are reported by the interpreter
+    cpp.execute(line);
     return true;
   }
-  if (cmd.kind == CommandKind::Add && cmd.error.empty()) {
-    add_sources(cpp, cmd);
-    return true;
-  }
-  if (cmd.kind == CommandKind::Class && cmd.error.empty()) {
-    show_class(cpp, cmd);
-    return true;
-  }
-  if (cmd.kind == CommandKind::Info && cmd.error.empty()) {
-    std::string error;
-    if (const auto info = cpp.symbol_info(cmd.symbol->value, error)) std::cout << color_inspection(*info, inspection_colors_enabled());
-    else std::cout << color_inspection("error: " + error + '\n', inspection_colors_enabled());
-    return true;
-  }
-  if ((cmd.kind == CommandKind::Libs || cmd.kind == CommandKind::LibInfo) && cmd.error.empty()) {
-    std::string error;
-    const auto query = cmd.symbol ? cmd.symbol->value : "";
-    const auto result = cmd.kind == CommandKind::Libs ?
-        library_list(query, error, cmd.all_libraries.has_value()) : library_info(query, error);
-    std::cout << color_inspection(error.empty() ? result : "error: " + error + '\n',
-        inspection_colors_enabled(), cmd.kind == CommandKind::Libs);
-    return true;
-  }
-  if (cmd.kind == CommandKind::Symbols && cmd.error.empty()) {
-    std::string error;
-    const auto result = cpp.symbol_list(cmd.library_regex ? cmd.library_regex->value : "",
-                                         cmd.name_regex ? cmd.name_regex->value : "", error,
-                                         cmd.all_symbols.has_value());
-    if (result) std::cout << color_inspection(*result, inspection_colors_enabled(), true);
-    else std::cout << color_inspection("error: " + error + '\n', inspection_colors_enabled());
-    return true;
-  }
-  if (cmd.kind == CommandKind::Restore && cmd.error.empty()) {
-    std::string error;
-    const std::string signature = cmd.signature ? cmd.signature->value : "";
-    if (cpp.restore(signature, error, cmd.caller ? cmd.caller->value : "")) {
-      if (cmd.signature) std::cout << "restored: " << signature
-          << (cmd.caller ? " in " + cmd.caller->value : "") << '\n';
-      else std::cout << "restored all mocks and hooks\n";
-    } else {
-      std::cout << "error: " << error << '\n';
-    }
-    return true;
-  }
-  if (cmd.kind == CommandKind::Hooks && cmd.error.empty()) {
-    const auto hooks = cpp.active_hooks();
-    if (hooks.empty()) std::cout << "no active mocks or hooks\n";
-    for (const auto& hook : hooks) {
-      const char* name = hook.kind == HookKind::Mock ? "%mock" :
-                         hook.kind == HookKind::Pre ? "%pre" : "%post";
-      std::cout << name << ' ' << hook.signature
-                << (hook.caller.empty() ? "" : " in " + hook.caller)
-                << " cpp`" << hook.body << "`\n";
-    }
-    return true;
-  }
-  if ((cmd.kind == CommandKind::Mock || cmd.kind == CommandKind::Pre ||
-       cmd.kind == CommandKind::Post) && cmd.error.empty()) {
-    const HookKind kind = cmd.kind == CommandKind::Mock ? HookKind::Mock :
-                          cmd.kind == CommandKind::Pre ? HookKind::Pre : HookKind::Post;
-    std::string error;
-    if (!cpp.set_hook(kind, cmd.signature->value, cmd.code->value, error,
-                      cmd.caller ? cmd.caller->value : "")) {
-      std::cout << "error: " << error << '\n';
-    } else {
-      std::cout << cmd.name << (cmd.code->value.empty() ? " cleared: " : " set: ")
-                << cmd.signature->value << (cmd.caller ? " in " + cmd.caller->value : "") << '\n';
-    }
-    return true;
-  }
-  return dispatch(cmd, libs, std::cout);
+  return execute_command(libs, cpp, cmd, std::cout).keep_running;
 }
 
 }  // namespace example

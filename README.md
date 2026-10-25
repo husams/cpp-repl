@@ -100,6 +100,106 @@ then compiled and run by the interpreter.
   dependencies without changing the library files or rebuilding them.
 - `%add-path <path[:path...]>` - add one or more library search directories,
   separated by `:` (each must exist), e.g. `%add-path /opt/lib:~/lib`.
+- `%compile-opts [file]` - show current global options or the effective options
+  for a source file or header. Output includes the selected compilation
+  database command, global flags, file flags, working directory, and combined
+  flags, with aligned fields and terminal colors. With no filename, it also
+  lists explicitly configured file overrides.
+- `%add-compile-opt [file] <flags...>` - append flags globally or for one file.
+  Omit the filename when changing globals. File flags take precedence over
+  globals, and globals take precedence over compilation database options.
+- `%use-compile-opts <file>` - use the file's compile settings as the session
+  reference. This copies its database options and file overrides into the
+  session defaults, retaining manual global flags. Relative database paths
+  retain their original build-directory meaning; the REPL stays in its current
+  directory. The file is not compiled or added to the session by this command.
+  The defaults apply to later C++ input, hooks, and added files. Switching to
+  another reference replaces the previous reference's settings. This is a
+  snapshot: after changing a file's options, run the command again to refresh
+  the session defaults. `%compile-opts` shows the selected reference, and a
+  global `%set-compile-opts` replaces or clears it.
+- `%set-compile-opts [file] [flags...]` - replace the flags for that scope.
+  Globally, this replaces all global flags, including startup command-line
+  flags. For a file, this replaces its database options and previously added
+  file flags; global flags still apply. Supplying no flags clears that scope;
+  an empty file replacement uses only global and built-in platform settings.
+  Changes affect future compilation, including interactive C++ and hook
+  bodies for globals. Existing declarations, objects, and compiled hooks
+  remain in the session; added files are not automatically recompiled.
+  Updates are validated before being stored, and rejected updates preserve
+  the previous options.
+  A filename is the optional first word before the flags; there is no `--`
+  separator. Quote filenames, include directories, or flag values that contain
+  spaces. Single/double quotes and backslash escapes group compiler arguments;
+  the REPL performs no shell expansion or command execution. Relative manual
+  include paths resolve from the directory where the command is entered,
+  even when the database command uses a different build directory. File
+  settings can be recorded before the source file exists. For filenames
+  beginning with `-`, use `./-filename.cpp`.
+
+  ```text
+  %compile-opts
+  %add-compile-opt -std=c++20 -I "include directory"
+  %add-compile-opt src/point.cpp -DTRACE_CALLS=1
+  %set-compile-opts src/point.cpp -std=c++20 -DTRACE_CALLS=2
+  %compile-opts src/point.cpp
+  %use-compile-opts src/point.cpp
+  %set-compile-opts -std=c++17 -DGLOBAL_VALUE=42
+  %set-compile-opts src/point.cpp
+  %set-compile-opts
+  ```
+
+- At startup, the REPL loads scripts from the **directory** `~/.cpp-repl/`.
+  Name each script `<number>-<name>.repl`, for example:
+
+  ```text
+  ~/.cpp-repl/
+    0-options.repl
+    2-types.repl
+    10-helpers.repl
+  ```
+
+  Scripts execute in numeric order before the first prompt (`2` before `10`);
+  leading zeros are allowed, and equal numbers sort by filename. Other files
+  and subdirectories are ignored. A missing directory is silently ignored.
+  An ordinary file at `~/.cpp-repl` reports an error; put startup inputs in
+  numbered scripts inside the directory instead.
+
+  Each script accepts C++ and `%commands`, just like the prompt, including
+  multiline C++ and hook bodies with blank lines. Use C++ `//` or `/* */`
+  comments; `#include` and other preprocessor directives remain C++ input.
+  Use `%add` to load source/header files. Commands and C++ run in one shared
+  session; paths in commands resolve from the directory where the REPL starts.
+  Use `~/` or absolute paths to make them independent of that directory.
+
+  For example, `~/.cpp-repl/0-options.repl`:
+
+  ```text
+  %use-compile-opts ~/workspace/project/src/main.cpp
+  %add-compile-opt -std=c++20 -DREPL_SESSION=1
+  %compile-opts
+  ```
+
+  `~/.cpp-repl/2-types.repl`:
+
+  ```cpp
+  #include <iostream>
+  ```
+
+  `~/.cpp-repl/10-helpers.repl`:
+
+  ```text
+  %add ~/workspace/project/include/common.hpp
+  %add "~/workspace/project/src/session helpers.cpp"
+  ```
+
+  The options script runs before either later script. Start the REPL from the
+  project directory so its `compile_commands.json` is discovered. Errors report
+  the script path and input's starting line; later inputs and scripts still
+  run. An unfinished C++ or hook block is reported at that script's end, and
+  loading resumes with the next script. `%quit` exits immediately, skipping
+  later inputs and scripts.
+
 - `%add [path ...]` - parse and run C++ source files in the session, as if
   each were `#include`d. Diagnostics then point into the file, and its own
   `#include "..."` lines resolve next to it. Each file can be added once. Its
@@ -195,6 +295,10 @@ libs      := "%libs" [ "all" ] [ regex ]
 paths     := "%paths"
 libinfo   := "%libinfo" library
 add       := "%add" { path }
+compile-opts := "%compile-opts" [ file ]
+add-compile-opt := "%add-compile-opt" [ file ] flag { flag-or-value }
+set-compile-opts := "%set-compile-opts" [ file ] { flag-or-value }
+use-compile-opts := "%use-compile-opts" file
 class     := "%class" [ name ]                  name := ident { "::" ident }
 hook      := ("%mock" | "%pre" | "%post") signature [ "in" signature ] "cpp`" body "`"
 restore   := "%restore" [ signature [ "in" signature ] ]
@@ -476,6 +580,7 @@ printf 'int n = 6;\nn * 7\n%%quit\n' | ./build/cpp-repl
   Clang Tooling compile-command selection and adjustment
 - `src/source_compile_options.cpp` - scoped per-file frontend options,
   include search paths and macro restoration
+- `src/startup_files.cpp` - numbered `.repl` scripts from `~/.cpp-repl/`
 - `src/cpp_symbols.cpp` - `%info` symbol metadata, overload lookup and aligned output
 - `src/function_hooks.cpp` - overload lookup, per-function JIT routing,
   mock and hook compilation

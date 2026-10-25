@@ -115,6 +115,58 @@ TEST(Grammar, AddTakesBlankSeparatedSourceFiles) {
   EXPECT_EQ(parse_command("%add-path /tmp").kind, CommandKind::AddPath);  // not %add
 }
 
+TEST(Grammar, CompileOptionsSupportGlobalAndFileScopesWithoutSeparators) {
+  auto cmd = parse_command("%compile-opts");
+  EXPECT_EQ(cmd.kind, CommandKind::CompileOpts);
+  EXPECT_TRUE(cmd.error.empty()) << cmd.error;
+  EXPECT_TRUE(cmd.paths.empty());
+  cmd = parse_command("%compile-opts 'my sources/foo.cc'");
+  ASSERT_TRUE(cmd.error.empty()) << cmd.error;
+  EXPECT_EQ(values(cmd), (std::vector<std::string>{"my sources/foo.cc"}));
+  EXPECT_FALSE(parse_command("%compile-opts a.cpp b.cpp").error.empty());
+
+  cmd = parse_command(
+      R"(%add-compile-opt -I 'my include' -D'NAME="hello world"')");
+  ASSERT_TRUE(cmd.error.empty()) << cmd.error;
+  EXPECT_EQ(cmd.kind, CommandKind::AddCompileOpt);
+  EXPECT_TRUE(cmd.paths.empty());
+  std::vector<std::string> flags;
+  for (const auto& flag : cmd.compile_flags) flags.push_back(flag.value);
+  EXPECT_EQ(flags, (std::vector<std::string>{"-I", "my include",
+                                             "-DNAME=\"hello world\""}));
+
+  cmd = parse_command(
+      R"(%set-compile-opts "my sources/foo.cc" -std=c++20 -DVALUE=42)");
+  ASSERT_TRUE(cmd.error.empty()) << cmd.error;
+  EXPECT_EQ(cmd.kind, CommandKind::SetCompileOpts);
+  EXPECT_EQ(values(cmd), (std::vector<std::string>{"my sources/foo.cc"}));
+  ASSERT_EQ(cmd.compile_flags.size(), 2u);
+  EXPECT_EQ(cmd.compile_flags[0].value, "-std=c++20");
+  EXPECT_EQ(cmd.compile_flags[1].value, "-DVALUE=42");
+  EXPECT_TRUE(parse_command("%set-compile-opts").error.empty());
+  EXPECT_TRUE(parse_command("%set-compile-opts foo.hpp").error.empty());
+  EXPECT_FALSE(parse_command("%add-compile-opt").error.empty());
+  EXPECT_FALSE(parse_command("%add-compile-opt foo.cpp").error.empty());
+  EXPECT_FALSE(parse_command("%add-compile-opt -I 'broken").error.empty());
+  EXPECT_FALSE(parse_command("%set-compile-opts foo.cpp stray.cpp -DOK=1")
+                   .error.empty());
+  EXPECT_FALSE(wants_more_input("%add-compile-opt -D'VALUE=(1)'"));
+}
+
+TEST(Grammar, UseCompileOptionsRequiresOneReferenceFilename) {
+  const auto cmd = parse_command("%use-compile-opts 'my sources/point.cpp'");
+  EXPECT_EQ(cmd.kind, CommandKind::UseCompileOpts);
+  EXPECT_TRUE(cmd.error.empty()) << cmd.error;
+  EXPECT_EQ(values(cmd), (std::vector<std::string>{"my sources/point.cpp"}));
+  EXPECT_TRUE(cmd.compile_flags.empty());
+  EXPECT_FALSE(parse_command("%use-compile-opts").error.empty());
+  EXPECT_FALSE(parse_command("%use-compile-opts ''").error.empty());
+  EXPECT_FALSE(parse_command("%use-compile-opts a.cpp b.cpp").error.empty());
+  EXPECT_FALSE(
+      parse_command("%use-compile-opts a.cpp -DVALUE=1").error.empty());
+  EXPECT_FALSE(parse_command("%use-compile-opts 'unfinished").error.empty());
+}
+
 TEST(Grammar, ClassTakesAnOptionalQualifiedName) {
   ParsedCommand cmd = parse_command("%class");
   EXPECT_EQ(cmd.kind, CommandKind::Class);
@@ -383,7 +435,7 @@ TEST(Dispatch, QuitStopsAndHelpListsCommands) {
   for (const std::string& name : command_names()) {
     EXPECT_NE(out.str().find(name), std::string::npos) << name;
   }
-  EXPECT_EQ(command_names().size(), 17u);
+  EXPECT_EQ(command_names().size(), 21u);
 }
 
 TEST(Dispatch, PathsShowsConfiguredDirectoriesAndLoaderSettings) {

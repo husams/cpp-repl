@@ -1,16 +1,18 @@
-#include <cerrno>
 #include <unistd.h>
+
+#include <cerrno>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "cpp_interpreter.hpp"
 #include "commands.hpp"
+#include "cpp_interpreter.hpp"
 #include "library_manager.hpp"
 #include "repl.hpp"
 #include "replxx.hxx"
+#include "startup_files.hpp"
 
 namespace {
 
@@ -41,6 +43,7 @@ int main(int argc, char** argv) {
   if (!cpp->compilation_database_path().empty()) {
     std::cout << "Compile options: " << cpp->compilation_database_path() << '\n';
   }
+  if (example::load_startup_files(libs, *cpp, std::cout).quit) return EXIT_SUCCESS;
 
   std::string pending;
 

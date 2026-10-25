@@ -76,6 +76,71 @@ void parse_paths(std::string_view text, ParsedCommand& cmd) {
   }
 }
 
+// Shell-style grouping and escapes, with no variable expansion or execution.
+// The first word is a filename only when it does not start with '-'.
+void parse_compile_options(std::string_view text, ParsedCommand& cmd) {
+  std::vector<Operand> words;
+  auto pos = cmd.arg_begin;
+  while (pos < text.size()) {
+    const auto begin = pos;
+    std::string word;
+    char quote = 0;
+    while (pos < text.size() && (quote || !is_blank(text[pos]))) {
+      const char c = text[pos++];
+      if ((c == '\'' || c == '"') && (!quote || quote == c)) {
+        quote = quote ? 0 : c;
+      } else if (c == '\\' && quote != '\'') {
+        if (pos == text.size()) {
+          set_error(cmd, "trailing escape", {pos - 1, pos});
+          return;
+        }
+        const char next = text[pos];
+        if (!quote || next == '"' || next == '\\' || next == '$' || next == '`')
+          word += text[pos++];
+        else
+          word += c;
+      } else
+        word += c;
+    }
+    if (quote) {
+      set_error(cmd, "unterminated quote", {begin, text.size()});
+      return;
+    }
+    words.push_back({std::move(word), {begin, pos}});
+    pos = skip_blank(text, pos);
+  }
+  if (cmd.kind == CommandKind::CompileOpts ||
+      cmd.kind == CommandKind::UseCompileOpts) {
+    if (words.size() > 1) {
+      set_error(cmd, cmd.name + " takes one filename", words[1].span);
+      return;
+    }
+    if (words.empty() && cmd.kind == CommandKind::UseCompileOpts) {
+      set_error(cmd, "missing reference filename", {text.size(), text.size()});
+      return;
+    }
+    if (!words.empty()) cmd.paths.push_back(std::move(words.front()));
+  } else {
+    auto first = words.begin();
+    if (first != words.end() &&
+        (first->value.empty() || first->value.front() != '-')) {
+      cmd.paths.push_back(*first++);
+    }
+    if (first != words.end() &&
+        (first->value.empty() || first->value.front() != '-')) {
+      set_error(cmd, "expected a compiler flag after the filename",
+                first->span);
+      return;
+    }
+    cmd.compile_flags.assign(first, words.end());
+    if (cmd.kind == CommandKind::AddCompileOpt && cmd.compile_flags.empty()) {
+      set_error(cmd, "missing compiler flags", {text.size(), text.size()});
+    }
+  }
+  if (!cmd.paths.empty() && cmd.paths.front().value.empty())
+    set_error(cmd, "empty filename", cmd.paths.front().span);
+}
+
 // add-path := "%add-path" path { ":" path }
 void parse_add_path(std::string_view text, ParsedCommand& cmd) {
   std::size_t pos = cmd.arg_begin;
@@ -285,24 +350,41 @@ const std::vector<CommandInfo>& command_table() {
        "load shared libraries (no argument: list loaded libraries)"},
       {"%libs", CommandKind::Libs, " [all] [regex]",
        "list loaded library names (all includes system libraries)"},
-      {"%libinfo", CommandKind::LibInfo, " <library>", "show library path, versions, ABI requirements and dependencies"},
-      {"%paths", CommandKind::Paths, "", "show library search paths and loader settings"},
+      {"%libinfo", CommandKind::LibInfo, " <library>",
+       "show library path, versions, ABI requirements and dependencies"},
+      {"%paths", CommandKind::Paths, "",
+       "show library search paths and loader settings"},
       {"%add-path", CommandKind::AddPath, " <path[:path...]>",
        "add library search directories, separated by ':'"},
       {"%add", CommandKind::Add, " [path ...]",
-       "parse and run C++ files using compile_commands.json (no argument: list added files)"},
+       "parse and run C++ files using compile_commands.json (no argument: list "
+       "added files)"},
+      {"%compile-opts", CommandKind::CompileOpts, " [file]",
+       "show global or effective file compile options"},
+      {"%add-compile-opt", CommandKind::AddCompileOpt, " [file] <flags...>",
+       "append global or file compile flags"},
+      {"%set-compile-opts", CommandKind::SetCompileOpts, " [file] [flags...]",
+       "replace global or file compile flags (no flags: clear)"},
+      {"%use-compile-opts", CommandKind::UseCompileOpts, " <file>",
+       "use a file's effective compile options as the session defaults"},
       {"%class", CommandKind::Class, " [name]",
        "show a class's members and layout (no argument: list classes)"},
-      {"%info", CommandKind::Info, " <symbol>", "show symbol declarations, types, locations and JIT addresses"},
-      {"%syminfo", CommandKind::Info, " <symbol>", "show symbol definitions, imports and reference sites"},
+      {"%info", CommandKind::Info, " <symbol>",
+       "show symbol declarations, types, locations and JIT addresses"},
+      {"%syminfo", CommandKind::Info, " <symbol>",
+       "show symbol definitions, imports and reference sites"},
       {"%symbols", CommandKind::Symbols, " [all] [lib <regex>] [name <regex>]",
        "list loaded symbol names (all includes system libraries)"},
-      {"%mock", CommandKind::Mock, " <signature> [in <caller>] cpp`<body>`", "replace a function or method body"},
-      {"%pre", CommandKind::Pre, " <signature> [in <caller>] cpp`<body>`", "run before a function or method call"},
-      {"%post", CommandKind::Post, " <signature> [in <caller>] cpp`<body>`", "run after a call (result is available)"},
+      {"%mock", CommandKind::Mock, " <signature> [in <caller>] cpp`<body>`",
+       "replace a function or method body"},
+      {"%pre", CommandKind::Pre, " <signature> [in <caller>] cpp`<body>`",
+       "run before a function or method call"},
+      {"%post", CommandKind::Post, " <signature> [in <caller>] cpp`<body>`",
+       "run after a call (result is available)"},
       {"%restore", CommandKind::Restore, " [signature [in <caller>]]",
        "remove mocks and hooks (no argument: restore the whole session)"},
-      {"%hooks", CommandKind::Hooks, "", "list active mocks and hooks with signatures and C++ bodies"},
+      {"%hooks", CommandKind::Hooks, "",
+       "list active mocks and hooks with signatures and C++ bodies"},
       {"%help", CommandKind::Help, "", "show this help"},
       {"%quit", CommandKind::Quit, "", "exit the REPL"},
   };
@@ -351,6 +433,12 @@ ParsedCommand parse_command(std::string_view text) {
       break;
     case CommandKind::Add:
       parse_paths(text, cmd);
+      break;
+    case CommandKind::CompileOpts:
+    case CommandKind::AddCompileOpt:
+    case CommandKind::SetCompileOpts:
+    case CommandKind::UseCompileOpts:
+      parse_compile_options(text, cmd);
       break;
     case CommandKind::Class:
       parse_class(text, cmd);
@@ -408,8 +496,11 @@ bool wants_more_input(std::string_view text) {
   return is_command_line(text) ? parse_command(text).incomplete : is_incomplete(text);
 }
 
-bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out) {
+bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out,
+              bool* ok) {
+  if (ok) *ok = true;
   if (!cmd.error.empty()) {
+    if (ok) *ok = false;
     out << "error: " << cmd.error << '\n';
     if (const CommandInfo* info = find_command(cmd.name)) {
       out << "usage: " << info->name << info->usage << '\n';
@@ -445,6 +536,7 @@ bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out)
     case CommandKind::AddPath:
       for (const Operand& p : cmd.paths) {
         const auto r = libs.add_path(p.value);
+        if (ok && !r.ok) *ok = false;
         out << (r.ok ? "" : "error: ") << r.message << '\n';
       }
       break;
@@ -457,10 +549,15 @@ bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out)
       }
       for (const Operand& p : cmd.paths) {
         const auto r = libs.load(p.value);
+        if (ok && !r.ok) *ok = false;
         out << (r.ok ? "" : "error: ") << r.message << '\n';
       }
       break;
     case CommandKind::Add:      // %add and %class are run by the REPL, which
+    case CommandKind::CompileOpts:
+    case CommandKind::AddCompileOpt:
+    case CommandKind::SetCompileOpts:
+    case CommandKind::UseCompileOpts:
     case CommandKind::Class:    // owns the interpreter
     case CommandKind::Info:
     case CommandKind::Libs:

@@ -22,6 +22,8 @@ def session(binary, cwd, steps):
         # This test needs replxx's full terminal mode even when CTest's parent
         # shell uses TERM=dumb (as many automation runners do).
         os.environ["TERM"] = "xterm-256color"
+        # Keep the user's actual ~/.cpp-repl out of test sessions.
+        os.environ["HOME"] = cwd
         os.execv(binary, [binary])
 
     # Reads until the output goes quiet; with `wait`, first until the next
@@ -168,7 +170,7 @@ def main():
             ],
         )
         help_text = plain(out["help"])
-        check("%help lists the seventeen commands", all(c in help_text for c in ("%lib", "%libs", "%libinfo", "%syminfo", "%paths", "%add-path", "%add", "%class", "%info", "%symbols", "%mock", "%pre", "%post", "%restore", "%hooks", "%help", "%quit")))
+        check("%help lists the twenty-one commands", all(c in help_text for c in ("%lib", "%libs", "%libinfo", "%syminfo", "%paths", "%add-path", "%add", "%compile-opts", "%add-compile-opt", "%set-compile-opts", "%use-compile-opts", "%class", "%info", "%symbols", "%mock", "%pre", "%post", "%restore", "%hooks", "%help", "%quit")))
         check("%add-path rejects a missing dir", "error:" in plain(out["bad_path"]))
         check("%add-path accepts an existing dir", "error:" not in plain(out["good_path"]))
         path_list = plain(out["path_list"])
@@ -237,6 +239,108 @@ def main():
         check("%add reports a missing file", "no such file: nope.cpp" in plain(out["missing"]))
         check("%add lists the added files", "geometry.cpp" in plain(out["list"]))
         check("%quit exits with status 0 after %add", status == 0)
+
+        for name, function in (("option file.cpp", "terminal_file_flag"),
+                               ("other option.cpp", "terminal_other_flag")):
+            with open(os.path.join(cwd, name), "w", encoding="utf8") as f:
+                f.write("int " + function + "() { return TERM_FLAG; }\n")
+        out, status = session(binary, cwd, [
+            ("append", b"%add-compile-opt -std=c++20 -DTERM_FLAG=7\r", True),
+            ("global_value", b"TERM_FLAG\r", True),
+            ("set_file", b'%set-compile-opts "option file.cpp" -std=c++20 -DTERM_FLAG=42\r', True),
+            ("file_tab", b'%compile-opts "option f\t'),
+            ("file_options", b"\r", True),
+            ("add_file", b'%add "option file.cpp"\r', True),
+            ("add_other", b'%add "other option.cpp"\r', True),
+            ("file_value", b"terminal_file_flag()\r", True),
+            ("other_value", b"terminal_other_flag()\r", True),
+            ("use_tab", b"%use-comp\t"),
+            ("use_file", b' "option file.cpp"\r', True),
+            ("reference_value", b"TERM_FLAG\r", True),
+            ("overview", b"%compile-opts\r", True),
+            ("replace", b"%set-compile-opts -DTERM_FLAG=9\r", True),
+            ("bad", b"%add-compile-opt -fnot-a-valid-terminal-option\r", True),
+            ("kept", b"TERM_FLAG\r", True),
+            ("clear", b"%set-compile-opts\r", True),
+            ("cleared", b"#ifdef TERM_FLAG\n#error flag leaked\n#endif\r", True),
+            ("quit", b"%quit\r"),
+        ])
+        check("global compile flags affect interactive C++", "(int) 7" in plain(out["global_value"]))
+        check("file compile flags override globals without affecting other files",
+              "(int) 42" in plain(out["file_value"]) and "(int) 7" in plain(out["other_value"]))
+        check("compile option filenames with spaces complete with Tab", "option file.cpp" in plain(out["file_tab"]))
+        check("file compile options show effective flags with aligned fields",
+              all(text in plain(out["file_options"]) for text in ("Scope", "Global flags", "File flags", "Effective flags", "TERM_FLAG=42")))
+        if "NO_COLOR" not in os.environ:
+            check("compile option fields are colored in terminals", b"\x1b[36m" in out["file_options"])
+        check("bare compile options show global flags and file overrides", "File override" in plain(out["overview"]))
+        check("use compile options completes and adopts file flags for the session",
+              "%use-compile-opts" in plain(out["use_tab"]) and "(int) 42" in plain(out["reference_value"])
+              and "Reference file" in plain(out["overview"]))
+        check("invalid compiler flags preserve previous options", "error:" in plain(out["bad"]) and "(int) 9" in plain(out["kept"]))
+        check("set compile options without flags clears globals", "error:" not in plain(out["cleared"]))
+        check("compile option commands exit normally", status == 0)
+
+        with tempfile.TemporaryDirectory(dir=cwd) as preload_home:
+            with open(os.path.join(preload_home, "first header.hpp"), "w", encoding="utf8") as f:
+                f.write("int startup_input_value = STARTUP_VALUE;\n")
+            with open(os.path.join(preload_home, "reference.cpp"), "w", encoding="utf8") as f:
+                f.write("int reference_should_not_load = 0;\n")
+            with open(os.path.join(preload_home, "second.cpp"), "w", encoding="utf8") as f:
+                f.write('extern "C" const char* zlibVersion();\n'
+                        'int startup_answer() { return startup_input_value * 2; }\n'
+                        'const char* startup_library_version() { return zlibVersion(); }\n')
+            startup_dir = os.path.join(preload_home, ".cpp-repl")
+            os.mkdir(startup_dir)
+            with open(os.path.join(startup_dir, "0-options.repl"), "w", encoding="utf8") as f:
+                f.write('// commands before files\n'
+                        '%set-compile-opts reference.cpp -std=c++20 -DSTARTUP_VALUE=21\n'
+                        '%use-compile-opts reference.cpp\n'
+                        '%lib z\n%unknown-startup-command\n%add missing.cpp\n')
+            with open(os.path.join(startup_dir, "2-header.repl"), "w", encoding="utf8") as f:
+                f.write('#include <cstddef>\n%add "first header.hpp"\n')
+            with open(os.path.join(startup_dir, "10-functions.repl"), "w", encoding="utf8") as f:
+                f.write('%add second.cpp\n'
+                        'int startup_script_sum() {\n\nreturn STARTUP_VALUE * 2;\n}\n')
+            out, status = session(binary, preload_home, [
+                ("call", b"startup_answer()\r", True),
+                ("list", b"%add\r", True),
+                ("options", b"%compile-opts\r", True),
+                ("value", b"STARTUP_VALUE\r", True),
+                ("library", b"startup_library_version()\r", True),
+                ("script", b"startup_script_sum()\r", True),
+                ("quit", b"%quit\r"),
+            ])
+            check("startup reads ~/.cpp-repl directory and continues after a missing entry",
+                  "missing.cpp" in plain(out["start"]) and "preloaded:" in plain(out["start"])
+                  and "(int) 42" in plain(out["call"]))
+            check("preloaded source files appear in the session", "second.cpp" in plain(out["list"]) and status == 0)
+            check("startup commands configure session defaults before subsequent files",
+                  "Reference file" in plain(out["options"])
+                  and "(int) 21" in plain(out["value"])
+                  and "reference.cpp" not in plain(out["list"]))
+            check("startup command errors include configuration line and later entries run",
+                  "0-options.repl:5:" in plain(out["start"])
+                  and "unknown command" in plain(out["start"])
+                  and "(int) 42" in plain(out["call"]))
+            check("startup libraries remain available to preloaded C++",
+                  '(const char *) "1.' in plain(out["library"]))
+            check("numbered startup scripts execute in numeric order with multiline C++",
+                  "2-header.repl" in plain(out["start"])
+                  and "10-functions.repl" in plain(out["start"])
+                  and "(int) 42" in plain(out["script"]))
+
+        with tempfile.TemporaryDirectory(dir=cwd) as quit_home:
+            os.mkdir(os.path.join(quit_home, ".cpp-repl"))
+            with open(os.path.join(quit_home, ".cpp-repl", "0-quit.repl"), "w", encoding="utf8") as f:
+                f.write("%quit\n%add missing-after-quit.cpp\n")
+            quit_run = subprocess.run(
+                [binary], cwd=quit_home, input="int should_not_run = 1;\n",
+                text=True, capture_output=True, timeout=30,
+                env={**os.environ, "HOME": quit_home})
+            check("startup quit exits before the prompt or later entries",
+                  quit_run.returncode == 0 and "missing-after-quit" not in quit_run.stdout
+                  and "cpp-repl>" not in plain(quit_run.stdout.encode()))
 
         out, status = session(
             binary,

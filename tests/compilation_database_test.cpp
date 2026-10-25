@@ -11,6 +11,8 @@
 #include <vector>
 
 #include "cpp_interpreter.hpp"
+#include "library_manager.hpp"
+#include "startup_files.hpp"
 
 namespace example {
 namespace {
@@ -319,6 +321,230 @@ TEST(CompileOptions,
   EXPECT_TRUE(
       cpp->execute("#if __cplusplus >= 202002L\n#error old reference standard "
                    "leaked\n#endif\n"));
+}
+
+TEST(StartupFiles, LoadsNumberedScriptsInNumericOrderAndIgnoresOtherEntries) {
+  TemporaryProject project;
+  project.write(".cpp-repl/10-last.repl",
+                "startup_order = startup_order * 10 + 4;\n");
+  project.write(".cpp-repl/2-b.repl",
+                "startup_order = startup_order * 10 + 3;\n");
+  project.write(".cpp-repl/0002-a.repl",
+                "startup_order = startup_order * 10 + 2;\n");
+  project.write(".cpp-repl/0000-init.repl",
+                "// startup\n\nint startup_order = 1;\n");
+  project.write(".cpp-repl/9999999999999999999999999999999-final.repl",
+                "startup_order = startup_order * 10 + 5;\n");
+  for (const auto* name :
+       {"notes.txt", "setup.repl", "-bad.repl", "1-.repl", ".1-hidden.repl",
+        "1-wrong.cpp", "x-bad.repl", "3-subdirectory.repl/0-nested.repl"}) {
+    project.write(fs::path(".cpp-repl") / name, "#error must not be loaded\n");
+  }
+  CurrentDirectory cwd(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  LibraryManager libs;
+  std::ostringstream output;
+  const auto result = load_startup_files(
+      libs, *cpp, output, (project.root() / ".cpp-repl").string());
+  EXPECT_TRUE(result.found);
+  EXPECT_EQ(result.loaded, 5u);
+  EXPECT_EQ(result.failed, 0u) << output.str();
+  EXPECT_EQ(cpp->evaluate("startup_order"), "(int) 12345\n");
+  EXPECT_EQ(fs::current_path(), fs::canonical(project.root()));
+}
+
+TEST(StartupFiles, UsesCompilationDatabaseAndMissingDirectoryIsSilent) {
+  TemporaryProject project;
+  const auto build = project.root() / "build";
+  fs::create_directories(build);
+  project.write("preload.cpp",
+                "#if __cplusplus < 202002L\n#error requires C++20\n#endif\nint "
+                "preloaded_database() { return PRELOAD_VALUE; }\n");
+  project.write(".cpp-repl/0-files.repl", "%add preload.cpp\n");
+  write_database(project,
+                 arguments_entry(build, "../preload.cpp",
+                                 {"clang++", "-std=c++20", "-DPRELOAD_VALUE=42",
+                                  "-c", "../preload.cpp"}));
+  CurrentDirectory cwd(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  LibraryManager libs;
+  std::ostringstream output;
+  const auto missing = load_startup_files(libs, *cpp, output,
+                                          (project.root() / "absent").string());
+  EXPECT_FALSE(missing.found);
+  EXPECT_EQ(missing.failed, 0u);
+  EXPECT_TRUE(output.str().empty());
+  const auto loaded = load_startup_files(
+      libs, *cpp, output, (project.root() / ".cpp-repl").string());
+  EXPECT_EQ(loaded.loaded, 1u);
+  EXPECT_EQ(loaded.failed, 0u) << output.str();
+  EXPECT_EQ(cpp->evaluate("preloaded_database()"), "(int) 42\n");
+  EXPECT_TRUE(cpp->execute(
+      "#ifdef PRELOAD_VALUE\n#error preload flags leaked\n#endif\n"));
+}
+
+TEST(StartupFiles, ReferenceDefaultsAndExtraFlagsApplyBeforeLaterScripts) {
+  TemporaryProject project;
+  const auto build = project.root() / "build";
+  fs::create_directories(build);
+  project.write("include dir/config.hpp", "#define INCLUDED_VALUE 2\n");
+  project.write("reference dir/reference.cpp", "int not_preloaded = 0;\n");
+  project.write("config/files/first.hpp",
+                "#if __cplusplus < 202002L || !DEBUG_SESSION\n"
+                "#error missing startup defaults\n#endif\n"
+                "#include <config.hpp>\n"
+                "int configured_value = REFERENCE_VALUE + INCLUDED_VALUE;\n");
+  project.write("config/files/second.cpp",
+                "int configured_answer() { return configured_value; }\n");
+  project.write(".cpp-repl/10-files.repl",
+                "%add config/files/first.hpp config/files/second.cpp\n"
+                "%compile-opts\n");
+  project.write(".cpp-repl/2-options.repl",
+                "%use-compile-opts \"reference dir/reference.cpp\"\n"
+                "%add-compile-opt -DDEBUG_SESSION=1\n");
+  write_database(
+      project, arguments_entry(build, "../reference dir/reference.cpp",
+                               {"clang++", "-std=c++20", "-DREFERENCE_VALUE=40",
+                                "-I../include dir", "-c",
+                                "../reference dir/reference.cpp"}));
+  CurrentDirectory cwd(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  LibraryManager libs;
+  std::ostringstream output;
+  const auto result = load_startup_files(
+      libs, *cpp, output, (project.root() / ".cpp-repl").string());
+  EXPECT_EQ(result.failed, 0u) << output.str();
+  EXPECT_EQ(result.loaded, 2u);
+  EXPECT_EQ(result.commands, 4u);
+  EXPECT_EQ(cpp->sources().size(), 2u);
+  EXPECT_EQ(cpp->evaluate("configured_answer()"), "(int) 42\n");
+  EXPECT_EQ(cpp->evaluate("REFERENCE_VALUE + DEBUG_SESSION"), "(int) 41\n");
+  EXPECT_NE(output.str().find("Reference file"), std::string::npos);
+  EXPECT_EQ(fs::current_path(), fs::canonical(project.root()));
+}
+
+TEST(StartupFiles, ErrorsReportScriptLocationsAndLaterScriptsStillRun) {
+  TemporaryProject project;
+  project.write(".cpp-repl/0-options.repl",
+                "%set-compile-opts -DPRELOAD_VALUE=42\n");
+  const auto failed_script = project.write(
+      ".cpp-repl/2-errors.repl",
+      "%not-a-command\n%use-compile-opts missing.cpp\n"
+      "%add-compile-opt -fnot-a-real-option\n%add-path missing-libraries\n"
+      "int = ;\n%add missing.cpp\n");
+  project.write(".cpp-repl/10-later.repl",
+                "int after_startup_errors = PRELOAD_VALUE;\n");
+  CurrentDirectory cwd(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  LibraryManager libs;
+  std::ostringstream output;
+  const auto result = load_startup_files(
+      libs, *cpp, output, (project.root() / ".cpp-repl").string());
+  EXPECT_EQ(result.failed, 6u) << output.str();
+  EXPECT_EQ(result.loaded, 3u);
+  EXPECT_EQ(cpp->evaluate("after_startup_errors"), "(int) 42\n");
+  for (unsigned line = 1; line <= 6; ++line) {
+    EXPECT_NE(output.str().find(failed_script.string() + ":" +
+                                std::to_string(line) + ":"),
+              std::string::npos);
+  }
+}
+
+TEST(StartupFiles, MultilineCppAndHooksPreserveBlankLinesAndRestore) {
+  TemporaryProject project;
+  project.write(".cpp-repl/0-target.repl",
+                "int startup_target(int n) {\n\nreturn n + 1;\n}\n"
+                "int startup_hook_hits = 0;\n");
+  project.write(
+      ".cpp-repl/1-hooks.repl",
+      "%pre startup_target(int n) cpp`\n"
+      "\n#if 1\n++startup_hook_hits;\n#endif\n`\n"
+      "%mock startup_target(int n) cpp`\nreturn n + 10;\n`\n"
+      "%post startup_target(int n) cpp`result += startup_hook_hits;`\n"
+      "int hooked_result = startup_target(2);\n");
+  project.write(".cpp-repl/2-restore.repl",
+                "%restore\nint restored_result = startup_target(2);\n");
+  CurrentDirectory cwd(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  LibraryManager libs;
+  std::ostringstream output;
+  const auto result = load_startup_files(
+      libs, *cpp, output, (project.root() / ".cpp-repl").string());
+  EXPECT_EQ(result.failed, 0u) << output.str();
+  EXPECT_EQ(result.loaded, 3u);
+  EXPECT_EQ(result.commands, 4u);
+  EXPECT_EQ(cpp->evaluate("hooked_result"), "(int) 13\n");
+  EXPECT_EQ(cpp->evaluate("restored_result"), "(int) 3\n");
+  EXPECT_TRUE(cpp->active_hooks().empty());
+}
+
+TEST(StartupFiles, QuitStopsRemainingScripts) {
+  TemporaryProject project;
+  project.write(".cpp-repl/0-quit.repl", "%quit\n%add missing.cpp\n");
+  project.write(".cpp-repl/1-skipped.repl", "#error must not run\n");
+  CurrentDirectory cwd(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  LibraryManager libs;
+  std::ostringstream output;
+  const auto result = load_startup_files(
+      libs, *cpp, output, (project.root() / ".cpp-repl").string());
+  EXPECT_TRUE(result.quit);
+  EXPECT_EQ(result.loaded, 1u);
+  EXPECT_EQ(result.commands, 1u);
+  EXPECT_EQ(result.failed, 0u);
+  EXPECT_TRUE(cpp->sources().empty());
+}
+
+TEST(StartupFiles, IncompleteInputsReportStartingLinesAndLaterScriptsStillRun) {
+  TemporaryProject project;
+  const auto hook = project.write(
+      ".cpp-repl/0-hook.repl", "// startup\n%pre target(int n) cpp`\n\n++n;\n");
+  const auto code =
+      project.write(".cpp-repl/1-code.repl",
+                    "// startup\nint incomplete(int n) {\n\nreturn n;\n");
+  project.write(".cpp-repl/2-last.repl", "int after_incomplete = 42;\n");
+  CurrentDirectory cwd(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  LibraryManager libs;
+  std::ostringstream output;
+  const auto result = load_startup_files(
+      libs, *cpp, output, (project.root() / ".cpp-repl").string());
+  EXPECT_EQ(result.failed, 2u);
+  EXPECT_NE(output.str().find(hook.string() + ":2: unterminated cpp` block"),
+            std::string::npos);
+  EXPECT_NE(output.str().find(code.string() + ":2: incomplete C++ input"),
+            std::string::npos);
+  EXPECT_EQ(cpp->evaluate("after_incomplete"), "(int) 42\n");
+}
+
+TEST(StartupFiles, RejectsAFileWhereTheDirectoryShouldBe) {
+  TemporaryProject project;
+  const auto file = project.write(".cpp-repl", "%quit\n");
+  CurrentDirectory cwd(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  LibraryManager libs;
+  std::ostringstream output;
+  const auto result = load_startup_files(libs, *cpp, output, file.string());
+  EXPECT_TRUE(result.found);
+  EXPECT_EQ(result.failed, 1u);
+  EXPECT_FALSE(result.quit);
+  EXPECT_NE(output.str().find("must be a directory"), std::string::npos);
 }
 
 TEST(CompileOptions,

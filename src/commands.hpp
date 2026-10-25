@@ -14,13 +14,22 @@ namespace example {
 // A line whose first non-blank character is '%' is a REPL command; everything
 // else is C++. Command grammar (blanks separate words):
 //
-//   command   := lib | libs | libinfo | add-path | add | class | info | symbols | hook | hooks | restore | help | quit
+// clang-format off
+//   command   := lib | libs | libinfo | paths | add-path | add | class | info
+//              | symbols | hook | hooks | restore | compile-opts
+//              | add-compile-opt | set-compile-opts | use-compile-opts | help | quit
 //   lib       := "%lib" { path }                 zero or more paths
 //   libs      := "%libs" [ "all" ] [ regex ]     loaded library names only
 //   paths     := "%paths"                       current library search paths
-//   libinfo   := "%libinfo" library               name, path or regex
+//   libinfo   := "%libinfo" library              name, path or regex
 //   add-path  := "%add-path" path { ":" path }   blanks around ':' allowed
 //   add       := "%add" { path }                 zero or more source files
+//   compile-opts := "%compile-opts" [ file ]
+//   add-compile-opt := "%add-compile-opt" [ file ] flag { flag-or-value }
+//   set-compile-opts := "%set-compile-opts" [ file ] { flag-or-value }
+//   use-compile-opts := "%use-compile-opts" file
+//   file      := first shell-quoted word not starting with '-'
+//   flag-or-value := shell-quoted word, without expansion or execution
 //   class     := "%class" [ name ]               name := ident { "::" ident }
 //   info      := "%info" symbol                  qualified or mangled name
 //   symbols   := "%symbols" [ "all" ] [ "lib" regex ] [ "name" regex ]
@@ -32,7 +41,31 @@ namespace example {
 //   path      := '"' { any char but '"' } '"'    quoted, may contain blanks
 //              | word                            no blanks (and no ':' in
 //                                                %add-path)
-enum class CommandKind { Cpp, Lib, Libs, LibInfo, Paths, AddPath, Add, Class, Info, Symbols, Mock, Pre, Post, Restore, Hooks, Help, Quit, Unknown };
+// clang-format on
+enum class CommandKind {
+  Cpp,
+  Lib,
+  Libs,
+  LibInfo,
+  Paths,
+  AddPath,
+  Add,
+  CompileOpts,
+  AddCompileOpt,
+  SetCompileOpts,
+  UseCompileOpts,
+  Class,
+  Info,
+  Symbols,
+  Mock,
+  Pre,
+  Post,
+  Restore,
+  Hooks,
+  Help,
+  Quit,
+  Unknown
+};
 
 struct CommandInfo {
   const char* name;  // including the leading '%'
@@ -65,6 +98,7 @@ struct ParsedCommand {
   std::size_t name_end = 0;
   std::size_t arg_begin = 0;  // text.size() when there is no argument
   std::vector<Operand> paths;         // %lib / %add-path / %add operands
+  std::vector<Operand> compile_flags;  // shell-quoted compiler flags and values
   std::vector<Span> separators;       // the ':' between %add-path operands
   std::optional<Operand> class_name;  // %class operand
   std::optional<Operand> symbol;      // %info operand
@@ -92,9 +126,11 @@ bool wants_more_input(std::string_view text);
 
 // Runs a parsed command, writing all output (errors prefixed "error: ") to
 // `out`. A command with a grammar error only prints the error and its usage.
-// Returns false when the REPL should exit (%quit). Cpp kind is a no-op, and so
+// Returns false when the REPL should exit (%quit); optional ok reports success.
+// Cpp kind is a no-op, and so
 // are interpreter commands (%add, %class and hooks): the REPL runs them.
-bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out);
+bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out,
+              bool* ok = nullptr);
 
 // Filesystem completions for a partially typed path (keeps the typed
 // directory prefix, appends '/' to directories).

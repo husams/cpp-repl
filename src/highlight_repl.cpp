@@ -34,6 +34,8 @@ void highlight_input(const std::string& input, Replxx::colors_t& colors) {
   const ParsedCommand cmd = parse_command(input);
   paint(input, {cmd.name_begin, cmd.name_end}, kCommandColor, colors);
   for (const Operand& p : cmd.paths) paint(input, p.span, kPathColor, colors);
+  for (const Operand& flag : cmd.compile_flags)
+    paint(input, flag.span, kClassNameColor, colors);
   for (const Span& s : cmd.separators) paint(input, s, kSeparatorColor, colors);
   if (cmd.class_name) paint(input, cmd.class_name->span, kClassNameColor, colors);
   if (cmd.symbol) paint(input, cmd.symbol->span, kClassNameColor, colors);
