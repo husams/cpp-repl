@@ -1,0 +1,71 @@
+Linux x86_64
+Verified: 2026-10-25T14:01:44Z
+SUPPLIED_LIBRARY_COUNT_PASS: 1
+UNDEFINED IN FINAL CONSUMER LIBRARY:
+unresolved_demo::State::title[abi:cxx11] U
+unresolved_demo::State::total_ U
+unresolved_demo::State::samples U
+unresolved_demo::State::weights U
+
+LOADING WITHOUT DEFINITIONS:
+EXPECTED_LOAD_FAILURE: /home/husam/cpp-repl-examples/unresolved-library/build/libunresolved_consumer.so: undefined symbol: _ZN15unresolved_demo5State5titleB5cxx11E
+
+LOADING WITH REPL DEFINITIONS:
+cpp-repl (LLVM 21.1.8). Type %help for commands.
+Compile options: /home/husam/cpp-repl-examples/unresolved-library/build/compile_commands.json
+added: /home/husam/cpp-repl-examples/unresolved-library/build
+preloaded: /home/husam/cpp-repl-examples/unresolved-library/.cpp-repl/0-search.repl
+added: /home/husam/cpp-repl-examples/unresolved-library/include/state.hpp
+unresolved_demo::State::read_total()
+unresolved_demo::State::samples
+unresolved_demo::State::title[abi:cxx11]
+unresolved_demo::State::total_
+unresolved_demo::State::weights
+defined: unresolved_demo::State::total_
+defined: unresolved_demo::State::title
+defined: unresolved_demo::State::samples
+defined: unresolved_demo::State::weights
+preloaded: /home/husam/cpp-repl-examples/unresolved-library/.cpp-repl/10-definitions.repl
+loaded: /home/husam/cpp-repl-examples/unresolved-library/build/libunresolved_consumer.so
+preloaded: /home/husam/cpp-repl-examples/unresolved-library/.cpp-repl/20-consumer.repl
+Native private scalar: 42
+Native string: provided at startup
+Native vector: 3, 5, 8
+Native array: 2, 4, 6
+NATIVE_LIBRARY_PASS
+SHARED_STORAGE_PASS
+NATIVE_READS_REPL_WRITE_PASS
+Symbol: unresolved_demo::State::total_
+  Kind        : variable
+  Declaration : long long unresolved_demo::State::total_
+  Type        : long long
+  Mangled     : _ZN15unresolved_demo5State6total_E
+  Linkage     : external
+  Definition  : yes
+  Location    : input_line_3:1:57
+  Size        : 8 bytes
+  Alignment   : 8 bytes
+  Address     : 0x7f6af4e69000
+  Resolved    : yes
+  Defined     : yes (session definition)
+  Undefined   : no
+  Source refs : 0
+Symbol: unresolved_demo::State::title
+  Kind        : variable
+  Declaration : std::string unresolved_demo::State::title
+  Type        : std::string
+  Mangled     : _ZN15unresolved_demo5State5titleB5cxx11E
+  Linkage     : external
+  Definition  : yes
+  Location    : input_line_4:1:59
+  Size        : 32 bytes
+  Alignment   : 8 bytes
+  Address     : 0x7f6ae8b66008
+  Resolved    : yes
+  Defined     : yes (session definition)
+  Undefined   : no
+  Source refs : 2
+  Ref source  : input_line_10:1:1
+  Ref source  : input_line_9:1:84
+
+CONSUMER_UNCHANGED_PASS: a44352643ac3cc09a56aab07d78050e94adce5aa6f04902428fb1058392f4925  build/libunresolved_consumer.so

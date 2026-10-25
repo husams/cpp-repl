@@ -1,0 +1,7 @@
+// The only supplied library has no definitions for these members.
+%add include/state.hpp
+%symbols undefined name '^unresolved_demo::State::'
+%define unresolved_demo::State::total_ cpp`6 * 7LL`
+%define unresolved_demo::State::title cpp`std::string("provided") + " at startup"`
+%define unresolved_demo::State::samples cpp`std::vector<int>{3, 5, 8}`
+%define unresolved_demo::State::weights cpp`{2, 4, 6}`

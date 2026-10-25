@@ -1,0 +1,8 @@
+unresolved_demo::verify();
+std::cout << (unresolved_demo::native_title_address() == static_cast<const void*>(&unresolved_demo::State::title) ? "SHARED_STORAGE_PASS\n" : "SHARED_STORAGE_FAIL\n");
+unresolved_demo::State::title = "changed in REPL";
+std::cout << (std::string(unresolved_demo::read_title()) == "changed in REPL" ? "NATIVE_READS_REPL_WRITE_PASS\n" : "NATIVE_READS_REPL_WRITE_FAIL\n");
+%syminfo unresolved_demo::State::total_
+%syminfo unresolved_demo::State::title
+%symbols undefined lib unresolved_consumer name '^unresolved_demo::State::'
+%quit

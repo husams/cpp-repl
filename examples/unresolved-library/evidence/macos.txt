@@ -1,0 +1,71 @@
+Darwin arm64
+Verified: 2026-10-25T14:01:43Z
+SUPPLIED_LIBRARY_COUNT_PASS: 1
+UNDEFINED IN FINAL CONSUMER LIBRARY:
+unresolved_demo::State::title U 0 0
+unresolved_demo::State::total_ U 0 0
+unresolved_demo::State::samples U 0 0
+unresolved_demo::State::weights U 0 0
+
+LOADING WITHOUT DEFINITIONS:
+EXPECTED_LOAD_FAILURE: dlopen(/Users/husam/workspace/replxx-example/examples/unresolved-library/build/libunresolved_consumer.dylib, 0x000A): symbol not found in flat namespace '__ZN15unresolved_demo5State5titleE'
+
+LOADING WITH REPL DEFINITIONS:
+cpp-repl (LLVM 22.1.8). Type %help for commands.
+Compile options: /Users/husam/workspace/replxx-example/examples/unresolved-library/build/compile_commands.json
+added: /Users/husam/workspace/replxx-example/examples/unresolved-library/build
+preloaded: /Users/husam/workspace/replxx-example/examples/unresolved-library/.cpp-repl/0-search.repl
+added: /Users/husam/workspace/replxx-example/examples/unresolved-library/include/state.hpp
+unresolved_demo::State::read_total()
+unresolved_demo::State::samples
+unresolved_demo::State::title
+unresolved_demo::State::total_
+unresolved_demo::State::weights
+defined: unresolved_demo::State::total_
+defined: unresolved_demo::State::title
+defined: unresolved_demo::State::samples
+defined: unresolved_demo::State::weights
+preloaded: /Users/husam/workspace/replxx-example/examples/unresolved-library/.cpp-repl/10-definitions.repl
+loaded: /Users/husam/workspace/replxx-example/examples/unresolved-library/build/libunresolved_consumer.dylib
+preloaded: /Users/husam/workspace/replxx-example/examples/unresolved-library/.cpp-repl/20-consumer.repl
+Native private scalar: 42
+Native string: provided at startup
+Native vector: 3, 5, 8
+Native array: 2, 4, 6
+NATIVE_LIBRARY_PASS
+SHARED_STORAGE_PASS
+NATIVE_READS_REPL_WRITE_PASS
+Symbol: unresolved_demo::State::total_
+  Kind        : variable
+  Declaration : long long unresolved_demo::State::total_
+  Type        : long long
+  Mangled     : _ZN15unresolved_demo5State6total_E
+  Linkage     : external
+  Definition  : yes
+  Location    : input_line_3:1:57
+  Size        : 8 bytes
+  Alignment   : 8 bytes
+  Address     : 0x104928000
+  Resolved    : yes
+  Defined     : yes (session definition)
+  Undefined   : no
+  Source refs : 0
+Symbol: unresolved_demo::State::title
+  Kind        : variable
+  Declaration : std::string unresolved_demo::State::title
+  Type        : std::string
+  Mangled     : _ZN15unresolved_demo5State5titleE
+  Linkage     : external
+  Definition  : yes
+  Location    : input_line_4:1:59
+  Size        : 24 bytes
+  Alignment   : 8 bytes
+  Address     : 0x104958088
+  Resolved    : yes
+  Defined     : yes (session definition)
+  Undefined   : no
+  Source refs : 2
+  Ref source  : input_line_10:1:1
+  Ref source  : input_line_9:1:84
+
+CONSUMER_UNCHANGED_PASS: d188a7b1fdc54ed90468246de7ff72e4b3df9d0e71cbfefe944ba2171ffd20d0  build/libunresolved_consumer.dylib

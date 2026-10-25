@@ -1,0 +1,2 @@
+%lib unresolved_consumer
+#include <iostream>
