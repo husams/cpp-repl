@@ -982,6 +982,19 @@ std::optional<std::string> CppInterpreter::describe_class(
   return example::describe_class(interp_->getASTContext(), *record);
 }
 
+std::optional<std::string> CppInterpreter::describe_members(const std::string& name,
+                                                            MemberKind kind, MemberOptions options,
+                                                            std::string& error) {
+  error.clear();
+  auto& ctx = interp_->getASTContext();
+  const auto* record = find_class(ctx, name);
+  if (!record) {
+    error = "no complete record named '" + name + "' (try %class)";
+    return std::nullopt;
+  }
+  return example::describe_members(ctx, *record, kind, options);
+}
+
 std::string CppInterpreter::version() { return "LLVM " LLVM_VERSION_STRING; }
 
 std::vector<std::string> CppInterpreter::symbol_names() {

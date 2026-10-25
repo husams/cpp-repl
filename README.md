@@ -313,6 +313,21 @@ keep their literal contents; substitutions belong outside those bodies.
   (`geo::Vec2`) or a typedef. With no argument it lists the classes from user
   code: your inputs, `%add`-ed files and their own headers. Classes from
   system headers (the standard library, the SDK) are left out.
+- `%methods <name> [access public|private|protected|all] [include-parents true|false]`
+  and `%fields <name> [access public|private|protected|all] [include-parents true|false]`
+  list methods or data members of a class, struct or union already parsed in
+  the session. Names can be qualified or typedefs, as with `%class`.
+  Defaults are `access all` and `include-parents false`; options may appear in
+  either order. Output groups fully qualified member names and types under
+  their declaring record, with the record itself first and bases traversed
+  depth first in declaration order. Each ancestor appears once, including in
+  diamond hierarchies. Access filters use the member's declared access, even
+  through private inheritance. Fields include static data members; methods
+  include declared constructors, destructors, operators, overloads and method
+  templates. Compiler-generated implicit members, nested types and inherited
+  `using` declarations are omitted. An empty group says `no matching methods`
+  or `no matching fields`. Queries read the retained AST without executing code.
+  See [the manual example](examples/record-members/README.md).
 - `%mock <signature> [in <caller signature>] cpp\`<body>\`` - replace a function or method body.
 - `%pre <signature> [in <caller signature>] cpp\`<body>\`` - run immediately before each call.
 - `%post <signature> [in <caller signature>] cpp\`<body>\`` - run after a normal return, including a
@@ -490,6 +505,9 @@ add-compile-opt := "%add-compile-opt" [ file ] flag { flag-or-value }
 set-compile-opts := "%set-compile-opts" [ file ] { flag-or-value }
 use-compile-opts := "%use-compile-opts" file
 class     := "%class" [ name ]                  name := ident { "::" ident }
+members   := ("%methods" | "%fields") name [ "access" access ]
+             [ "include-parents" ("true" | "false") ]
+access    := "public" | "private" | "protected" | "all"
 hook      := ("%mock" | "%pre" | "%post") signature [ "in" signature ] "cpp`" body "`"
 restore   := "%restore" [ signature [ "in" signature ] ]
 hooks     := "%hooks"
@@ -749,7 +767,9 @@ session's global scope and accesses members using ordinary C++ access rules.
   offers only methods after `.` / `->`, so cpp-repl adds the data members
   (inherited ones included) of a variable or of a field chain such as
   `a.b->`. Tab also completes `%` commands, filesystem paths after `%lib `,
-  `%add-path `, `%add ` and `%reload `, and class names after `%class `.
+  `%add-path `, `%add ` and `%reload `, and class names after `%class `,
+  `%methods ` and `%fields `. The member commands also complete their option
+  keywords, access values and parent traversal booleans.
 - History persists in `./.replxx_history`; Ctrl+L clears the screen; Ctrl+D
   (or `%quit`) exits.
 
@@ -766,7 +786,8 @@ printf 'int n = 6;\nn * 7\n%%quit\n' | ./build/cpp-repl
 - `src/cpp_interpreter.cpp` - `clang::Interpreter` wrapper: platform flags
   (resource dir, libc++, SDK), execution, value printing, symbol check,
   `%lib` hand-over to the JIT, code completion
-- `src/cpp_inspect.cpp` - AST queries: user classes, `%class` synopsis and
+- `src/cpp_inspect.cpp` - AST queries: user classes, `%class` synopsis,
+  `%methods` / `%fields` member lists and
   layout, member names for completion
 - `src/project_compilation_database.cpp` - startup database discovery and
   Clang Tooling compile-command selection and adjustment

@@ -1,0 +1,11 @@
+%add records.hpp
+%methods demo::Record
+%fields demo::Record
+%methods demo::Record access public
+%fields demo::Record access private include-parents true
+%methods demo::Record access protected include-parents true
+%fields demo::Record include-parents true
+%methods demo::Record include-parents true access all
+%fields demo::Choice
+%methods demo::Choice
+%quit

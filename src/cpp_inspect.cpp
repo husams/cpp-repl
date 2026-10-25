@@ -1,7 +1,7 @@
 #include "cpp_inspect.hpp"
-#include "definition_shadowing.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <set>
 #include <utility>
 
@@ -10,8 +10,11 @@
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/PrettyPrinter.h"
+#include "clang/AST/QualTypeNames.h"
 #include "clang/AST/RecordLayout.h"
+#include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/Basic/SourceManager.h"
+#include "definition_shadowing.hpp"
 #include "llvm/Support/raw_ostream.h"
 
 namespace example {
@@ -94,6 +97,41 @@ std::string bytes(clang::CharUnits size) {
 std::string one_line(std::string s) {
   std::replace(s.begin(), s.end(), '\n', ' ');
   return s;
+}
+
+clang::QualType qualified_member_type(clang::ASTContext& ctx, clang::QualType type) {
+  // Clang's qualification helper does not recurse through function types.
+  // Rebuild signatures with qualified results and parameters first, retaining
+  // cv/ref qualifiers, calling convention, variadic and exception information.
+  if (const auto* fn = type->getAs<clang::FunctionProtoType>()) {
+    std::vector<clang::QualType> params;
+    for (auto param : fn->param_types()) {
+      params.push_back(qualified_member_type(ctx, param));
+    }
+    return ctx.getFunctionType(qualified_member_type(ctx, fn->getReturnType()), params,
+                               fn->getExtProtoInfo());
+  }
+  if (type->isPointerType()) {
+    return ctx.getQualifiedType(
+        ctx.getPointerType(qualified_member_type(ctx, type->getPointeeType())),
+        type.getLocalQualifiers());
+  }
+  if (type->isLValueReferenceType()) {
+    return ctx.getLValueReferenceType(qualified_member_type(ctx, type->getPointeeType()));
+  }
+  if (type->isRValueReferenceType()) {
+    return ctx.getRValueReferenceType(qualified_member_type(ctx, type->getPointeeType()));
+  }
+  if (const auto* array = ctx.getAsConstantArrayType(type)) {
+    return ctx.getConstantArrayType(qualified_member_type(ctx, array->getElementType()),
+                                    array->getSize(), array->getSizeExpr(),
+                                    array->getSizeModifier(), array->getIndexTypeCVRQualifiers());
+  }
+  if (const auto* array = ctx.getAsIncompleteArrayType(type)) {
+    return ctx.getIncompleteArrayType(qualified_member_type(ctx, array->getElementType()),
+                                      array->getSizeModifier(), array->getIndexTypeCVRQualifiers());
+  }
+  return clang::TypeName::getFullyQualifiedType(type, ctx);
 }
 
 }  // namespace
@@ -218,6 +256,74 @@ std::string describe_class(clang::ASTContext& ctx, const clang::CXXRecordDecl& r
     os << row << '\n';
   }
   os << "};\n";
+  return out;
+}
+
+std::string describe_members(clang::ASTContext& ctx, const clang::CXXRecordDecl& record,
+                             MemberKind kind, MemberOptions options) {
+  using namespace clang::ast_matchers;
+  const DeclarationMatcher matcher = kind == MemberKind::Methods
+                                         ? DeclarationMatcher(cxxMethodDecl(unless(isImplicit())))
+                                         : DeclarationMatcher(decl(anyOf(fieldDecl(), varDecl())));
+  auto policy = ctx.getPrintingPolicy();
+  policy.SuppressScope = false;
+  policy.SuppressTagKeyword = true;
+  std::string out;
+  llvm::raw_string_ostream os(out);
+  std::set<const clang::CXXRecordDecl*> visited;
+  std::function<void(const clang::CXXRecordDecl&)> append = [&](const auto& rd) {
+    if (!visited.insert(rd.getCanonicalDecl()).second) {
+      return;
+    }
+    rd.getNameForDiagnostic(os, policy, true);
+    os << ":\n";
+    bool found = false;
+    for (const clang::Decl* decl : rd.decls()) {
+      // Method and static data member templates wrap their declared member.
+      if (const auto* templ = llvm::dyn_cast<clang::TemplateDecl>(decl)) {
+        decl = templ->getTemplatedDecl();
+      }
+      if (decl->isImplicit() || decl->isInvalidDecl() || match(matcher, *decl, ctx).empty()) {
+        continue;
+      }
+      const auto* member = llvm::dyn_cast<clang::ValueDecl>(decl);
+      if (!member || member->getDeclName().isEmpty()) {
+        continue;
+      }
+      auto access = member->getAccess();
+      if (access == clang::AS_none) {
+        access = rd.isClass() ? clang::AS_private : clang::AS_public;
+      }
+      if (options.access != AccessFilter::All &&
+          !((options.access == AccessFilter::Public && access == clang::AS_public) ||
+            (options.access == AccessFilter::Private && access == clang::AS_private) ||
+            (options.access == AccessFilter::Protected && access == clang::AS_protected))) {
+        continue;
+      }
+      found = true;
+      os << "  " << clang::getAccessSpelling(access) << ' ';
+      if (const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(member);
+          method && method->isStatic()) {
+        os << "static ";
+      }
+      if (llvm::isa<clang::VarDecl>(member)) {
+        os << "static ";
+      }
+      member->getNameForDiagnostic(os, policy, true);
+      os << " : " << qualified_member_type(ctx, member->getType()).getAsString(policy) << '\n';
+    }
+    if (!found) {
+      os << "  (no matching " << (kind == MemberKind::Methods ? "methods" : "fields") << ")\n";
+    }
+    if (options.include_parents) {
+      for (const auto& base : rd.bases()) {
+        if (const auto* definition = definition_of(base.getType())) {
+          append(*definition);
+        }
+      }
+    }
+  };
+  append(record);
   return out;
 }
 

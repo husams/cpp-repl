@@ -7,6 +7,7 @@
 #include <string_view>
 #include <vector>
 
+#include "cpp_inspect.hpp"
 #include "library_manager.hpp"
 
 namespace example {
@@ -15,7 +16,7 @@ namespace example {
 // else is C++. Command grammar (blanks separate words):
 //
 // clang-format off
-//   command   := lib | libs | libinfo | paths | add-path | add | reload | class | info
+//   command   := lib | libs | libinfo | paths | add-path | add | reload | class | methods | fields | info
 //              | symbols | demangle | define | hook | hooks | restore | compile-opts
 //              | add-compile-opt | set-compile-opts | use-compile-opts | clear | help | quit
 //   lib       := "%lib" { path }                 zero or more paths
@@ -32,6 +33,9 @@ namespace example {
 //   file      := first shell-quoted word not starting with '-'
 //   flag-or-value := shell-quoted word, without expansion or execution
 //   class     := "%class" [ name ]               name := ident { "::" ident }
+//   members   := ("%methods" | "%fields") name [ "access" access ]
+//                [ "include-parents" ("true" | "false") ]
+//   access    := "public" | "private" | "protected" | "all"
 //   info      := "%info" symbol                  qualified or mangled name
 //   demangle  := "%demangle" symbol              mangled or plain name
 //   define    := "%define" (symbol | signature) "cpp`" (initializer | body) "`"
@@ -62,6 +66,8 @@ enum class CommandKind {
   SetCompileOpts,
   UseCompileOpts,
   Class,
+  Methods,
+  Fields,
   Info,
   Demangle,
   DefineVariable,
@@ -111,6 +117,9 @@ struct ParsedCommand {
   std::vector<Operand> compile_flags;  // shell-quoted compiler flags and values
   std::vector<Span> separators;       // the ':' between %add-path operands
   std::optional<Operand> class_name;  // %class operand
+  MemberOptions member_options;       // %methods / %fields defaults
+  std::optional<Operand> access_filter;
+  std::optional<Operand> parents_filter;
   std::optional<Operand> symbol;      // %info / %demangle / library inspection
   std::optional<Operand> library_regex;  // %symbols lib
   std::optional<Operand> name_regex;     // %symbols name
