@@ -24,6 +24,24 @@ struct StartupScript {
   std::string order;
 };
 
+class StartupDirectoryScope {
+ public:
+  explicit StartupDirectoryScope(const fs::path& directory) {
+    previous_ = fs::current_path(error_);
+    if (!error_) fs::current_path(directory, error_);
+  }
+  ~StartupDirectoryScope() {
+    if (previous_.empty()) return;
+    std::error_code ignored;
+    fs::current_path(previous_, ignored);
+  }
+  const std::error_code& error() const { return error_; }
+
+ private:
+  fs::path previous_;
+  std::error_code error_;
+};
+
 std::optional<std::string> script_order(const fs::path& path) {
   const auto name = path.filename().string();
   const auto dash = name.find('-');
@@ -152,6 +170,62 @@ StartupFilesResult load_startup_files(LibraryManager& libs, CppInterpreter& cpp,
     load_script(libs, cpp, output, script.path, result);
     if (result.quit) break;
   }
+  return result;
+}
+
+StartupFilesResult load_startup_directories(LibraryManager& libs,
+                                            CppInterpreter& cpp,
+                                            std::ostream& output,
+                                            const std::string& user_config) {
+  StartupFilesResult result;
+  auto fail = [&](const std::string& message) {
+    ++result.failed;
+    output << color_inspection("error: " + message + '\n',
+                               inspection_colors_enabled());
+  };
+  auto merge = [&](const StartupFilesResult& scope) {
+    result.found = result.found || scope.found;
+    result.loaded += scope.loaded;
+    result.commands += scope.commands;
+    result.failed += scope.failed;
+    result.quit = result.quit || scope.quit;
+  };
+
+  // Discover the project before running scripts, since C++ can change cwd.
+  std::error_code ec;
+  auto directory = fs::current_path(ec);
+  fs::path project;
+  if (ec) {
+    fail("cannot find project startup directory: " + ec.message());
+  } else {
+    const auto user = fs::absolute(expand_home(user_config), ec);
+    const auto home =
+        ec ? fs::path() : fs::weakly_canonical(user.parent_path(), ec);
+    for (;;) {
+      if (!home.empty() && directory == home) break;
+      const auto candidate = directory / ".cpp-repl";
+      ec.clear();
+      const bool exists = fs::exists(candidate, ec);
+      if (exists || ec) {
+        std::error_code same_error;
+        if (!fs::equivalent(candidate, user, same_error)) project = candidate;
+        break;
+      }
+      const auto parent = directory.parent_path();
+      if (parent == directory) break;
+      directory = parent;
+    }
+  }
+
+  merge(load_startup_files(libs, cpp, output, user_config));
+  if (result.quit || project.empty()) return result;
+  StartupDirectoryScope scope(project.parent_path());
+  if (scope.error()) {
+    fail("cannot enter project startup directory: " +
+         project.parent_path().string() + ": " + scope.error().message());
+    return result;
+  }
+  merge(load_startup_files(libs, cpp, output, project.string()));
   return result;
 }
 

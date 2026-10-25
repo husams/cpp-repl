@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
   if (!cpp->compilation_database_path().empty()) {
     std::cout << "Compile options: " << cpp->compilation_database_path() << '\n';
   }
-  if (example::load_startup_files(libs, *cpp, std::cout).quit) return EXIT_SUCCESS;
+  if (example::load_startup_directories(libs, *cpp, std::cout).quit) return EXIT_SUCCESS;
 
   std::string pending;
 

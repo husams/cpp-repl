@@ -560,6 +560,117 @@ TEST(StartupFiles, RejectsAFileWhereTheDirectoryShouldBe) {
   EXPECT_NE(output.str().find("must be a directory"), std::string::npos);
 }
 
+TEST(StartupFiles,
+     UserScriptsRunBeforeTheNearestProjectWithProjectRelativePaths) {
+  TemporaryProject project;
+  const auto user = project.root() / "home/.cpp-repl";
+  project.write("home/.cpp-repl/0-options.repl",
+                "%set-compile-opts -DVALUE=1\n");
+  project.write("home/.cpp-repl/99-user.repl", "int user_value = VALUE;\n");
+  project.write("work/.cpp-repl/0-ignored.repl",
+                "#error farther project must not load\n");
+  project.write("work/project/.cpp-repl/2-options.repl",
+                "%add-compile-opt -DVALUE=2\n");
+  project.write("work/project/.cpp-repl/10-files.repl", "%add src/value.cpp\n");
+  project.write("work/project/src/value.cpp",
+                "int project_value() { return user_value + VALUE; }\n");
+  const auto nested = project.root() / "work/project/src/nested";
+  fs::create_directories(nested);
+  CurrentDirectory cwd(nested);
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  LibraryManager libs;
+  std::ostringstream output;
+  const auto result =
+      load_startup_directories(libs, *cpp, output, user.string());
+  EXPECT_EQ(result.loaded, 4u);
+  EXPECT_EQ(result.failed, 0u) << output.str();
+  EXPECT_EQ(cpp->evaluate("user_value"), "(int) 1\n");
+  EXPECT_EQ(cpp->evaluate("project_value()"), "(int) 3\n");
+  EXPECT_EQ(cpp->evaluate("VALUE"), "(int) 2\n");
+  EXPECT_EQ(fs::current_path(), fs::canonical(nested));
+}
+
+TEST(StartupFiles, UserDirectoryAndProjectAliasAreEachLoadedOnlyOnce) {
+  for (const bool alias : {false, true}) {
+    TemporaryProject project;
+    const auto user = project.root() / "home/.cpp-repl";
+    project.write("home/.cpp-repl/0-user.repl", "int startup_runs = 1;\n");
+    const auto directory = project.root() / (alias ? "work" : "home/nested");
+    fs::create_directories(directory);
+    if (alias) fs::create_directory_symlink(user, directory / ".cpp-repl");
+    CurrentDirectory cwd(directory);
+    std::string error;
+    auto cpp = create_interpreter(error);
+    ASSERT_NE(cpp, nullptr) << error;
+    LibraryManager libs;
+    std::ostringstream output;
+    const auto result =
+        load_startup_directories(libs, *cpp, output, user.string());
+    EXPECT_EQ(result.loaded, 1u);
+    EXPECT_EQ(result.failed, 0u) << output.str();
+    EXPECT_EQ(cpp->evaluate("startup_runs"), "(int) 1\n");
+  }
+}
+
+TEST(StartupFiles, UserErrorsDoNotPreventProjectLoading) {
+  TemporaryProject project;
+  const auto user = project.write("home/.cpp-repl", "%quit\n");
+  project.write("work/.cpp-repl/0-project.repl",
+                "int project_after_error = 42;\n");
+  CurrentDirectory cwd(project.root() / "work");
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  LibraryManager libs;
+  std::ostringstream output;
+  const auto result =
+      load_startup_directories(libs, *cpp, output, user.string());
+  EXPECT_EQ(result.failed, 1u);
+  EXPECT_EQ(result.loaded, 1u);
+  EXPECT_FALSE(result.quit);
+  EXPECT_EQ(cpp->evaluate("project_after_error"), "(int) 42\n");
+}
+
+TEST(StartupFiles, UserQuitPreventsProjectLoading) {
+  TemporaryProject project;
+  const auto user = project.root() / "home/.cpp-repl";
+  project.write("home/.cpp-repl/0-quit.repl", "%quit\n");
+  project.write("work/.cpp-repl/0-skipped.repl", "#error must not run\n");
+  CurrentDirectory cwd(project.root() / "work");
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  LibraryManager libs;
+  std::ostringstream output;
+  const auto result =
+      load_startup_directories(libs, *cpp, output, user.string());
+  EXPECT_TRUE(result.quit);
+  EXPECT_EQ(result.failed, 0u);
+  EXPECT_EQ(result.loaded, 1u);
+}
+
+TEST(StartupFiles, MissingDirectoriesAreSilentAndDiscoveryStopsAtHome) {
+  TemporaryProject project;
+  const auto user = project.root() / "home/.cpp-repl";
+  project.write(".cpp-repl/0-outside-home.repl", "#error must not run\n");
+  const auto nested = project.root() / "home/project";
+  fs::create_directories(nested);
+  CurrentDirectory cwd(nested);
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  LibraryManager libs;
+  std::ostringstream output;
+  const auto result =
+      load_startup_directories(libs, *cpp, output, user.string());
+  EXPECT_FALSE(result.found);
+  EXPECT_EQ(result.failed, 0u);
+  EXPECT_EQ(result.loaded, 0u);
+  EXPECT_TRUE(output.str().empty());
+}
+
 TEST(CompileOptions,
      FileAppendOverridesDatabaseAndGlobalAndSetReplacesDatabaseOptions) {
   TemporaryProject project;

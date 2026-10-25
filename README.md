@@ -149,7 +149,12 @@ then compiled and run by the interpreter.
   %set-compile-opts
   ```
 
-- At startup, the REPL loads scripts from the **directory** `~/.cpp-repl/`.
+- At startup, the REPL loads scripts from **directories** in this order:
+  first `~/.cpp-repl/` for user defaults, then the nearest project `.cpp-repl/`
+  found in the startup directory or its ancestors. Only the nearest project
+  directory is loaded; discovery stops at the user's home directory or the
+  filesystem root. The user directory is loaded once, including when the
+  project path is a symlink to it.
   Name each script `<number>-<name>.repl`, for example:
 
   ```text
@@ -159,8 +164,11 @@ then compiled and run by the interpreter.
     10-helpers.repl
   ```
 
-  Scripts execute in numeric order before the first prompt (`2` before `10`);
-  leading zeros are allowed, and equal numbers sort by filename. Other files
+  Scripts execute in numeric order within each directory before the first
+  prompt (`2` before `10`); all user scripts finish before any project script,
+  regardless of their numbers. Project commands can append to user flags or
+  replace them with `%set-compile-opts`.
+  Leading zeros are allowed, and equal numbers sort by filename. Other files
   and subdirectories are ignored. A missing directory is silently ignored.
   An ordinary file at `~/.cpp-repl` reports an error; put startup inputs in
   numbered scripts inside the directory instead.
@@ -169,8 +177,12 @@ then compiled and run by the interpreter.
   multiline C++ and hook bodies with blank lines. Use C++ `//` or `/* */`
   comments; `#include` and other preprocessor directives remain C++ input.
   Use `%add` to load source/header files. Commands and C++ run in one shared
-  session; paths in commands resolve from the directory where the REPL starts.
-  Use `~/` or absolute paths to make them independent of that directory.
+  session. User scripts resolve relative paths from the directory where the
+  REPL starts. Project scripts resolve them from the project root containing
+  `.cpp-repl/`, even when launched from a subdirectory. The prompt returns to
+  the original working directory after project scripts finish. Use `~/` or
+  absolute paths in user scripts to make them independent of the startup
+  directory.
 
   For example, `~/.cpp-repl/0-options.repl`:
 
@@ -191,6 +203,15 @@ then compiled and run by the interpreter.
   ```text
   %add ~/workspace/project/include/common.hpp
   %add "~/workspace/project/src/session helpers.cpp"
+  ```
+
+  Project-specific settings can instead live in
+  `~/workspace/project/.cpp-repl/0-options.repl`:
+
+  ```text
+  %use-compile-opts src/main.cpp
+  %add-compile-opt -DPROJECT_SESSION=1
+  %add src/session_helpers.cpp
   ```
 
   The options script runs before either later script. Start the REPL from the
@@ -588,7 +609,7 @@ printf 'int n = 6;\nn * 7\n%%quit\n' | ./build/cpp-repl
   Clang Tooling compile-command selection and adjustment
 - `src/source_compile_options.cpp` - scoped per-file frontend options,
   include search paths and macro restoration
-- `src/startup_files.cpp` - numbered `.repl` scripts from `~/.cpp-repl/`
+- `src/startup_files.cpp` - user scripts, then nearest-project numbered `.repl` scripts
 - `src/cpp_symbols.cpp` - `%info` symbol metadata, overload lookup and aligned output
 - `src/function_hooks.cpp` - overload lookup, per-function JIT routing,
   mock and hook compilation
