@@ -32,6 +32,7 @@
 #include "cpp_inspect.hpp"
 #include "cpp_lexer.hpp"
 #include "cpp_symbols.hpp"
+#include "interpreter_undo.hpp"
 #include "library_manager.hpp"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Demangle/Demangle.h"
@@ -346,7 +347,7 @@ bool CppInterpreter::run_raw(const std::string& code, clang::Value& value) {
         list += (list.empty() ? "" : ", ") + name;
       llvm::errs() << "error: undefined symbol"
                    << (missing.size() > 1 ? "s" : "") << ": " << list << '\n';
-      if (llvm::Error u = interp_->Undo()) report(std::move(u));
+      if (llvm::Error u = undo_input(*interp_, ptu->TUPart)) report(std::move(u));
       return false;
     }
     if (llvm::Error e = interp_->Execute(*ptu)) {
@@ -354,7 +355,7 @@ bool CppInterpreter::run_raw(const std::string& code, clang::Value& value) {
       report(std::move(e));
       // Drop the input whose code failed to link (e.g. a missing symbol):
       // left in place, every later input retries its initializer and fails.
-      if (llvm::Error u = interp_->Undo()) report(std::move(u));
+      if (llvm::Error u = undo_input(*interp_, ptu->TUPart)) report(std::move(u));
       return false;
     }
   }
@@ -363,7 +364,7 @@ bool CppInterpreter::run_raw(const std::string& code, clang::Value& value) {
   // Value*. An empty input does that without running anything, and Undo()
   // removes the empty input again.
   if (llvm::Error e = interp_->ParseAndExecute("", &value)) return report(std::move(e));
-  if (llvm::Error e = interp_->Undo()) report(std::move(e));
+  if (llvm::Error e = undo_input(*interp_, nullptr)) report(std::move(e));
   return true;
 }
 

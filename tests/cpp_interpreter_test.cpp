@@ -74,6 +74,60 @@ TEST_F(CppInterpreterTest, StaysUsableAfterALinkError) {
   EXPECT_EQ(cpp_->evaluate("use"), "(int) 7\n");
 }
 
+TEST_F(CppInterpreterTest, UndoSurvivesAnonymousNamespace) {
+  EXPECT_FALSE(cpp_->execute(
+      "namespace { int undo_anon_local = 1; } extern int undo_anon_missing; "
+      "int undo_anon_result = undo_anon_missing;"));
+  ASSERT_TRUE(cpp_->execute("int undo_anon_result = 7; int undo_anon_local = 2;"));
+  EXPECT_EQ(cpp_->evaluate("undo_anon_result + undo_anon_local"), "(int) 9\n");
+  ASSERT_TRUE(cpp_->execute("namespace { int undo_anon_next = 3; }"));
+  EXPECT_EQ(cpp_->evaluate("undo_anon_next"), "(int) 3\n");
+}
+
+TEST_F(CppInterpreterTest, UndoRemovesOnlyRejectedUsingDirectives) {
+  ASSERT_TRUE(cpp_->execute(
+      "namespace UndoKept { int undo_kept = 4; } using namespace UndoKept; "
+      "namespace UndoLookup { int undo_leaked = 5; }"));
+  EXPECT_FALSE(cpp_->execute(
+      "using namespace UndoLookup; using namespace UndoKept; "
+      "namespace UndoRejected { int value = 1; } using namespace UndoRejected; "
+      "extern int undo_using_missing; int undo_using_result = undo_using_missing;"));
+  EXPECT_FALSE(cpp_->execute("int undo_lookup_use = undo_leaked;"));
+  EXPECT_EQ(cpp_->evaluate("undo_kept"), "(int) 4\n");
+  ASSERT_TRUE(cpp_->execute(
+      "namespace UndoRejected { int value = 9; } int undo_using_result = 7;"));
+  EXPECT_EQ(cpp_->evaluate("UndoRejected::value"), "(int) 9\n");
+  EXPECT_EQ(cpp_->evaluate("UndoLookup::undo_leaked"), "(int) 5\n");
+}
+
+TEST_F(CppInterpreterTest, UndoSurvivesNestedUsingDirectives) {
+  EXPECT_FALSE(cpp_->execute(
+      "namespace UndoNested { namespace Names { int source = 4; } "
+      "namespace { int value = 1; } using namespace Names; } "
+      "namespace { namespace { int undo_nested_value = 2; } } "
+      "extern int undo_nested_missing; int undo_nested_result = undo_nested_missing;"));
+  ASSERT_TRUE(cpp_->execute(
+      "namespace UndoNested { int value = 7; } int undo_nested_value = 2;"));
+  EXPECT_EQ(cpp_->evaluate("UndoNested::value + undo_nested_value"), "(int) 9\n");
+}
+
+TEST_F(CppInterpreterTest, FailedInstrumentedInputRollsBackAndPreservesHooks) {
+  ASSERT_TRUE(cpp_->execute("int undo_hook_target(int x) { return x + 1; }"));
+  std::string error;
+  ASSERT_TRUE(cpp_->set_hook(HookKind::Mock, "undo_hook_target(int x)",
+                             "return x + 10;", error)) << error;
+  EXPECT_FALSE(cpp_->execute(
+      "namespace { int undo_hook_local = 1; } "
+      "int undo_hook_caller(int x) { return undo_hook_target(x); } "
+      "extern int undo_hook_missing; int undo_hook_result = undo_hook_missing;"));
+  ASSERT_TRUE(cpp_->execute(
+      "int undo_hook_local = 2; int undo_hook_result = 7; "
+      "int undo_hook_caller(int x) { return undo_hook_target(x) + 1; }"));
+  EXPECT_EQ(cpp_->evaluate("undo_hook_caller(3)"), "(int) 14\n");
+  EXPECT_EQ(cpp_->evaluate("undo_hook_local + undo_hook_result"), "(int) 9\n");
+  ASSERT_TRUE(cpp_->restore("undo_hook_target(int)", error)) << error;
+}
+
 TEST_F(CppInterpreterTest, RejectsTopLevelReturnInsteadOfCrashing) {
   EXPECT_FALSE(cpp_->execute("return 1;"));
   EXPECT_FALSE(cpp_->execute("if (true) return;"));
@@ -220,6 +274,26 @@ TEST_F(CppInterpreterTest, AddSourceReportsErrors) {
   const std::string good = dir.write("good.cpp", "struct FromFile { int a; };\n");
   ASSERT_TRUE(cpp_->add_source(good).ok);
   EXPECT_TRUE(has(cpp_->class_names(), "FromFile"));
+}
+
+TEST_F(CppInterpreterTest, AddSourceWithAnonymousNamespaceCanBeRetriedAfterRollback) {
+  const auto source = std::filesystem::path(__FILE__).parent_path().parent_path() /
+                      "examples/undo-crash/anonymous.cpp";
+  const auto previous_sources = cpp_->sources();
+  EXPECT_FALSE(cpp_->add_source(source.string()).ok);
+  EXPECT_EQ(cpp_->sources(), previous_sources);
+  ASSERT_TRUE(cpp_->execute("int undo_local = 2; int undo_result = 7;"));
+  EXPECT_EQ(cpp_->evaluate("undo_result + undo_local"), "(int) 9\n");
+
+  // Use a new session to retry the identical source after supplying its import.
+  std::string error;
+  auto retry = CppInterpreter::create({}, error);
+  ASSERT_NE(retry, nullptr) << error;
+  EXPECT_FALSE(retry->add_source(source.string()).ok);
+  ASSERT_TRUE(retry->execute("int undo_missing = 5;"));
+  const auto result = retry->add_source(source.string());
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_EQ(retry->evaluate("undo_result + undo_local"), "(int) 6\n");
 }
 
 // Returns the value of an aligned metadata field without depending on an
