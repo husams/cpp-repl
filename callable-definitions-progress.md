@@ -1,7 +1,7 @@
 # Callable definitions before loading a native library
 
 Baseline: `408976e938c7fa34457b494daa95247ed7aedc16`.
-Branch: `codex/define-callables`; no push requested.
+Branch: `codex/define-callables`; delivery: [PR #3](https://github.com/husams/cpp-repl/pull/3).
 
 - [x] Extend `%define` with signature/body syntax and AST-derived native ABI definitions.
 - [x] Cover overloads and private static/non-static methods with ordinary C++ member bodies.
@@ -46,13 +46,15 @@ blockers after aggregate mock/restore coverage was added.
 
 ## Final validation (2026-10-25)
 
-- macOS ARM64 / LLVM 22.1.8: **185/185 CTest tests passed**, including PTY
+- macOS ARM64 / LLVM 22.1.8: **191/191 CTest tests passed**, including PTY
   multiline recovery and numbered user/project startup loading of the native
-  consumer. Complete log: `build/callable-ctest-macos.txt`.
-- linux-dev x86_64 / LLVM 21.1.8: **183/183 CTest tests passed**, including the
+  consumer. Complete log: `build/callable-pr-ctest-macos.txt`.
+- linux-dev x86_64 / LLVM 21.1.8: **189/189 CTest tests passed**, including the
   same PTY/startup checks. Complete log:
-  `/tmp/cpp-repl-release-linux.tOOrpl/build/callable-ctest-linux.txt`.
+  `/tmp/cpp-repl-release-linux.tOOrpl/build/callable-pr-ctest-linux.txt`.
+- These complete suites include main's shell-substitution and `%clear`
+  changes from `e4724aa`, integrated at `8b4ba32` without conflicts.
 - Both configured example `verify.sh` runs passed with all six imports
   remaining undefined in the original file and equal before/after hashes.
 - Shell syntax checks and `git diff --check` passed. Existing rollback fix is
-  preserved. Feature remains on the local branch; no push or install performed.
+  preserved. PR #3 tracks publication and merge; no install performed.
