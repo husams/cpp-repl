@@ -1,0 +1,4 @@
+// A concrete override, called through the secondary API base in native code.
+%define virtual_demo::Implementation::compute(int x) const cpp`
+return this->bias_ + x * 2;
+`

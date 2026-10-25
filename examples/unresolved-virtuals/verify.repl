@@ -1,0 +1,5 @@
+std::cout << (virtual_demo::non_pure_probe(2) == 42 ? "NON_PURE_VIRTUAL_PASS" : "NON_PURE_VIRTUAL_FAIL") << '\n';
+std::cout << (virtual_demo::override_probe(3) == 106 ? "VIRTUAL_OVERRIDE_PASS" : "VIRTUAL_OVERRIDE_FAIL") << '\n';
+std::cout << (virtual_demo::rtti_probe() == 1 ? "RTTI_PASS" : "RTTI_FAIL") << '\n';
+std::cout << (virtual_demo::direct_probe() == 1 ? "DIRECT_CALLS_PASS" : "DIRECT_CALLS_FAIL") << '\n';
+%quit

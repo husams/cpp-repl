@@ -1,5 +1,3 @@
-#include <unistd.h>
-
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
@@ -11,14 +9,15 @@
 #include <vector>
 
 #include <dlfcn.h>
-
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include "commands.hpp"
 #include "cpp_interpreter.hpp"
 #include "cpp_symbols.hpp"
 #include "library_manager.hpp"
 #include "loaded_symbols.hpp"
+#include "native_symbol_exports.hpp"
 #include "runtime_inspection.hpp"
 
 namespace example {
@@ -120,11 +119,97 @@ TEST_F(CppInterpreterTest, DefinesCallablesBeforeLoadingOneUnchangedNativeLibrar
   // Handles stay loaded while native exports refer to session code.
 }
 
+TEST_F(CppInterpreterTest, DefinesVirtualMethodsAndOverridesBeforeNativeLoading) {
+  ASSERT_EQ(dlopen(UNRESOLVED_VIRTUALS_LIBRARY, RTLD_NOW | RTLD_GLOBAL), nullptr);
+  ASSERT_TRUE(cpp_->add_source(UNRESOLVED_VIRTUALS_HEADER).ok);
+  std::string error;
+  ASSERT_TRUE(cpp_->define_callable("virtual_fixture::Service::compute(int x) const",
+                                    "return seed_ + x;", error))
+      << error;
+  ASSERT_TRUE(cpp_->define_callable("virtual_fixture::Implementation::compute(int x) const",
+                                    "return this->bias_ + x * 2;", error))
+      << error;
+  ASSERT_TRUE(cpp_->define_callable("virtual_fixture::NativeTable::compute(int x) const",
+                                    "return bias_ + x * 3;", error))
+      << error;
+  ASSERT_TRUE(cpp_->define_callable("virtual_fixture::VirtualBase::compute(int x) const",
+                                    "return bias_ + x * 4;", error))
+      << error;
+  ASSERT_TRUE(cpp_->define_callable("virtual_fixture::Covariant::self()", "return this;", error))
+      << error;
+  void* handle = dlopen(UNRESOLVED_VIRTUALS_LIBRARY, RTLD_NOW | RTLD_GLOBAL);
+  ASSERT_NE(handle, nullptr) << dlerror();
+  const auto non_pure = reinterpret_cast<int (*)(int)>(dlsym(handle, "virtual_non_pure_probe"));
+  const auto override = reinterpret_cast<int (*)(int)>(dlsym(handle, "virtual_override_probe"));
+  const auto rtti = reinterpret_cast<int (*)()>(dlsym(handle, "virtual_rtti_probe"));
+  ASSERT_NE(non_pure, nullptr);
+  ASSERT_NE(override, nullptr);
+  ASSERT_NE(rtti, nullptr);
+  EXPECT_EQ(non_pure(2), 42);
+  EXPECT_EQ(override(3), 106);
+  EXPECT_EQ(rtti(), 1);
+  auto native_table = reinterpret_cast<int (*)(int)>(dlsym(handle, "virtual_native_table_probe"));
+  auto virtual_base = reinterpret_cast<int (*)(int)>(dlsym(handle, "virtual_base_probe"));
+  auto covariant = reinterpret_cast<int (*)()>(dlsym(handle, "virtual_covariant_probe"));
+  ASSERT_NE(native_table, nullptr);
+  ASSERT_NE(virtual_base, nullptr);
+  ASSERT_NE(covariant, nullptr);
+  EXPECT_EQ(native_table(2), 206);
+  EXPECT_EQ(virtual_base(2), 308);
+  EXPECT_EQ(covariant(), 1);
+  ASSERT_EQ(cpp_->load_library(UNRESOLVED_VIRTUALS_LIBRARY), "");
+  EXPECT_EQ(cpp_->evaluate("virtual_fixture::virtual_non_pure_probe(2)"), "(int) 42\n");
+  EXPECT_EQ(cpp_->evaluate("virtual_fixture::virtual_override_probe(3)"), "(int) 106\n");
+  EXPECT_EQ(cpp_->evaluate("virtual_fixture::virtual_rtti_probe()"), "(int) 1\n");
+  ASSERT_TRUE(cpp_->set_hook(HookKind::Mock, "virtual_fixture::Service::compute(int x) const",
+                             "return x + 1000;", error))
+      << error;
+  EXPECT_EQ(non_pure(2), 1002);
+  ASSERT_TRUE(cpp_->restore("virtual_fixture::Service::compute(int x) const", error)) << error;
+  EXPECT_EQ(non_pure(2), 42);
+  EXPECT_FALSE(cpp_->define_callable("virtual_fixture::NativeTable::anchor()", "", error));
+  EXPECT_NE(error.find("existing implementation"), std::string::npos);
+}
+
+TEST(NativeSymbolExports, ConflictingBatchPublishesNoneOfItsNewSymbols) {
+  NativeSymbolExports exports;
+  std::string error;
+  const auto address = reinterpret_cast<std::uintptr_t>(dlsym(RTLD_DEFAULT, "malloc"));
+  ASSERT_NE(address, 0u);
+  const std::string name = "cpp_repl_atomic_virtual_export_probe";
+  ASSERT_EQ(dlsym(RTLD_DEFAULT, name.c_str()), nullptr);
+  EXPECT_FALSE(exports.publish({{name, address}, {"malloc", 1}}, error));
+  EXPECT_NE(error.find("different address"), std::string::npos);
+  EXPECT_EQ(dlsym(RTLD_DEFAULT, name.c_str()), nullptr);
+  ASSERT_TRUE(exports.publish({{name, address}}, error)) << error;
+  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(dlsym(RTLD_DEFAULT, name.c_str())), address);
+}
+
+TEST_F(CppInterpreterTest, VirtualDefinitionErrorsAllowRetryAndRejectPureDeclarations) {
+  ASSERT_TRUE(cpp_->execute("namespace virtual_recovery { int absent(int); "
+                            "struct Service { virtual int compute(int) const; }; "
+                            "struct Abstract { virtual int compute(int) const = 0; }; }"));
+  std::string error;
+  EXPECT_FALSE(cpp_->define_callable("virtual_recovery::Abstract::compute(int x) const",
+                                     "return x;", error));
+  EXPECT_NE(error.find("pure virtual"), std::string::npos);
+  EXPECT_FALSE(cpp_->define_callable("virtual_recovery::Service::compute(int x) const",
+                                     "return nonexistent;", error));
+  EXPECT_FALSE(cpp_->define_callable("virtual_recovery::Service::compute(int x) const",
+                                     "return absent(x);", error));
+  ASSERT_TRUE(cpp_->define_callable("virtual_recovery::Service::compute(int x) const",
+                                    "return x * 3;", error))
+      << error;
+  ASSERT_TRUE(cpp_->execute("virtual_recovery::Service virtual_recovered; "
+                            "virtual_recovery::Service* virtual_pointer = &virtual_recovered;"));
+  EXPECT_EQ(cpp_->evaluate("virtual_pointer->compute(14)"), "(int) 42\n");
+}
+
 TEST_F(CppInterpreterTest, CallableDefinitionsRecoverAndRejectUnsupportedTargets) {
   ASSERT_TRUE(cpp_->execute(
       "namespace callable_recovery { int pending(int); int dependency(int); int absent(int); "
       "int existing(int x) { return x; } static int local(int); "
-      "int variadic(int, ...); struct A { virtual int virtual_method(int); }; }"));
+      "int variadic(int, ...); struct A { virtual int virtual_method(int) = 0; }; }"));
   std::string error;
   EXPECT_FALSE(
       cpp_->define_callable("callable_recovery::pending(int x)", "return no_such_name;", error));
@@ -367,6 +452,100 @@ TEST_F(CppInterpreterTest, StaysUsableAfterALinkError) {
   EXPECT_EQ(cpp_->evaluate("use"), "(int) 7\n");
 }
 
+TEST(IncludeRecovery, StandardNamespaceSurvivesLinkFailure) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  EXPECT_FALSE(cpp->execute(
+      "namespace std { int lookup_missing(); } int lookup_result = std::lookup_missing();"));
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  ASSERT_TRUE(cpp->execute("std::string recovered = \"ss\";"));
+  EXPECT_EQ(cpp->evaluate("int(recovered.size())"), "(int) 2\n");
+  ASSERT_TRUE(cpp->execute("int lookup_result = 7;"));
+  EXPECT_EQ(cpp->evaluate("lookup_result"), "(int) 7\n");
+}
+
+TEST(IncludeRecovery, StandardNamespaceSurvivesParseFailure) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  EXPECT_FALSE(cpp->execute("namespace std { int lookup_broken = ; }"));
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  ASSERT_TRUE(cpp->execute("std::string recovered = \"ss\";"));
+  EXPECT_EQ(cpp->evaluate("int(recovered.size())"), "(int) 2\n");
+}
+
+TEST(IncludeRecovery, FirstSystemHeaderNamespaceLookupSurvivesParseFailure) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  EXPECT_FALSE(cpp->execute("#include <string>\nnamespace std { int lookup_broken = ; }"));
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  // Parsing a rejected first include need not emit the header's inline code.
+  // This regression covers name lookup; successful execution is tested above.
+  ASSERT_TRUE(cpp->execute("static_assert(sizeof(std::string) > 0);"));
+}
+
+TEST(IncludeRecovery, EarlierNamespaceSurvivesRepeatedFailures) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("namespace Kept { int value = 42; }"));
+  ASSERT_TRUE(cpp->execute("namespace Kept { int other = 7; }"));
+  EXPECT_FALSE(cpp->execute("namespace Kept { int broken = ; }"));
+  EXPECT_EQ(cpp->evaluate("Kept::value + Kept::other"), "(int) 49\n");
+  EXPECT_FALSE(cpp->execute(
+      "namespace Kept { int missing(); } int result = Kept::missing();"));
+  EXPECT_EQ(cpp->evaluate("Kept::value + Kept::other"), "(int) 49\n");
+}
+
+TEST(IncludeRecovery, RestoresEveryOverloadAndPreservesSurvivingOverloads) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute(
+      "int lookup_pick(int) { return 42; } int lookup_pick(double) { return 7; }"));
+  EXPECT_FALSE(cpp->execute(
+      "int lookup_pick(int); extern int absent; int result = absent;"));
+  EXPECT_EQ(cpp->evaluate("lookup_pick(1)"), "(int) 42\n");
+  EXPECT_EQ(cpp->evaluate("lookup_pick(0.5)"), "(int) 7\n");
+  EXPECT_FALSE(cpp->execute(
+      "int lookup_pick(int); int lookup_pick(double); extern int absent; int result = absent;"));
+  EXPECT_EQ(cpp->evaluate("lookup_pick(1)"), "(int) 42\n");
+  EXPECT_EQ(cpp->evaluate("lookup_pick(0.5)"), "(int) 7\n");
+  EXPECT_FALSE(cpp->execute(
+      "int lookup_pick(int); int lookup_pick(double); int broken = ;"));
+  EXPECT_EQ(cpp->evaluate("lookup_pick(1)"), "(int) 42\n");
+  EXPECT_EQ(cpp->evaluate("lookup_pick(0.5)"), "(int) 7\n");
+}
+
+TEST(IncludeRecovery, EarlierClassDefinitionSurvivesRejectedForwardDeclaration) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("struct LookupRecord { int value = 42; };"));
+  EXPECT_FALSE(cpp->execute("struct LookupRecord; int broken = ;"));
+  EXPECT_EQ(cpp->evaluate("LookupRecord{}.value"), "(int) 42\n");
+  EXPECT_FALSE(cpp->execute(
+      "struct LookupRecord; extern int absent; int result = absent;"));
+  EXPECT_EQ(cpp->evaluate("LookupRecord{}.value"), "(int) 42\n");
+}
+
+TEST(IncludeRecovery, DoesNotPublishNamespacesFromRejectedUserCode) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  EXPECT_FALSE(cpp->execute(
+      "namespace Rejected { int leaked = 17; } extern int absent; int result = absent;"));
+  EXPECT_FALSE(cpp->execute(
+      "namespace Rejected { int other = 23; } extern int absent; int result = absent;"));
+  EXPECT_FALSE(cpp->execute("int use = Rejected::leaked;"));
+  ASSERT_TRUE(cpp->execute("namespace Rejected { int leaked = 42; }"));
+  EXPECT_EQ(cpp->evaluate("Rejected::leaked"), "(int) 42\n");
+}
+
 TEST_F(CppInterpreterTest, UndoSurvivesAnonymousNamespace) {
   EXPECT_FALSE(cpp_->execute(
       "namespace { int undo_anon_local = 1; } extern int undo_anon_missing; "
@@ -567,6 +746,33 @@ TEST_F(CppInterpreterTest, AddSourceReportsErrors) {
   const std::string good = dir.write("good.cpp", "struct FromFile { int a; };\n");
   ASSERT_TRUE(cpp_->add_source(good).ok);
   EXPECT_TRUE(has(cpp_->class_names(), "FromFile"));
+}
+
+TEST(IncludeRecovery, FailedAddPreservesEarlierHeaderDeclarations) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  const auto source = std::filesystem::path(__FILE__).parent_path().parent_path() /
+                      "examples/include-recovery/failed.cpp";
+  EXPECT_FALSE(cpp->add_source(source.string()).ok);
+  EXPECT_TRUE(cpp->sources().empty());
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  ASSERT_TRUE(cpp->execute("std::string recovered = \"ss\";"));
+  EXPECT_EQ(cpp->evaluate("int(recovered.size())"), "(int) 2\n");
+}
+
+TEST(IncludeRecovery, FailedAddPreservesNewSystemHeaderNamespaces) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  const auto source = std::filesystem::path(__FILE__).parent_path().parent_path() /
+                      "examples/include-recovery/failed.cpp";
+  EXPECT_FALSE(cpp->add_source(source.string()).ok);
+  EXPECT_TRUE(cpp->sources().empty());
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  ASSERT_TRUE(cpp->execute("std::string recovered = \"ss\";"));
+  EXPECT_EQ(cpp->evaluate("int(recovered.size())"), "(int) 2\n");
 }
 
 TEST_F(CppInterpreterTest, AddSourceWithAnonymousNamespaceCanBeRetriedAfterRollback) {

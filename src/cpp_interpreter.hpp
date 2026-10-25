@@ -123,7 +123,8 @@ class CppInterpreter {
   CppInterpreter(std::unique_ptr<clang::Interpreter> interp, std::vector<std::string> args,
                  std::unique_ptr<ProjectCompilationDatabase> database);
   bool run(const std::string& code, clang::Value& value);
-  bool run_raw(const std::string& code, clang::Value& value);
+  bool run_raw(const std::string& code, clang::Value& value,
+               std::vector<std::string>* abi_exports = nullptr);
   bool with_compile_options(const SourceCompileOptions& options,
                             const std::function<bool()>& action,
                             std::string& error);
