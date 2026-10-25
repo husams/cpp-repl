@@ -61,6 +61,75 @@ TEST_F(CppInterpreterTest, FindsStandardLibraryHeaders) {
   EXPECT_EQ(cpp_->evaluate("s.c_str()"), "(const char *) \"abc\"\n");
 }
 
+TEST(HiddenSymbolsTest, CapturesStringValues) {
+  std::string error;
+  auto cpp = CppInterpreter::create({"-fvisibility=hidden"}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  for (int i = 0; i != 2; ++i) {
+    const auto value = cpp->evaluate("std::string(\"Sample\")");
+    ASSERT_TRUE(value.has_value());
+    EXPECT_NE(value->find("basic_string"), std::string::npos) << *value;
+  }
+}
+
+TEST_F(CppInterpreterTest, CapturesDefaultVisibilityStringValues) {
+  ASSERT_TRUE(cpp_->execute("#include <string>\n"));
+  const auto value = cpp_->evaluate("std::string(\"Sample\")");
+  ASSERT_TRUE(value.has_value());
+  EXPECT_NE(value->find("basic_string"), std::string::npos) << *value;
+}
+
+TEST(HiddenSymbolsTest, DefinesStringReturningMethodFromHeader) {
+  std::string error;
+  auto cpp = CppInterpreter::create({"-fvisibility=hidden"}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  const auto header = std::filesystem::path(__FILE__).parent_path() / "fixtures/newtag_person.hpp";
+  ASSERT_TRUE(cpp->execute("#include \"" + header.string() + "\"\n"));
+  ASSERT_TRUE(cpp->define_callable("std::string Person::getName() const",
+                                 "return \"Sample\";", error)) << error;
+  ASSERT_TRUE(cpp->execute("Person p;"));
+  EXPECT_TRUE(cpp->execute("p.getName();"));
+  const auto value = cpp->evaluate("p.getName()");
+  ASSERT_TRUE(value.has_value());
+  EXPECT_NE(value->find("basic_string"), std::string::npos) << *value;
+  EXPECT_EQ(cpp->evaluate("p.getName() == \"Sample\""), "(bool) true\n");
+}
+
+TEST(HiddenSymbolsTest, RejectsMissingSymbolsAndKeepsHiddenDefinitionsUsable) {
+  std::string error;
+  auto cpp = CppInterpreter::create({"-fvisibility=hidden"}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("#include <string>\n"));
+  ASSERT_TRUE(cpp->execute("int effects = 0; int missing_function(); extern int missing_global;"));
+  EXPECT_FALSE(cpp->execute("int rejected = (++effects, missing_function());"));
+  EXPECT_FALSE(cpp->execute("int rejected = (++effects, missing_global);"));
+  EXPECT_EQ(cpp->evaluate("effects"), "(int) 0\n");
+  EXPECT_TRUE(cpp->evaluate("std::string(\"Recovered\")").has_value());
+  ASSERT_TRUE(cpp->execute("int hidden_function() { return 42; }"));
+  EXPECT_EQ(cpp->evaluate("hidden_function()"), "(int) 42\n");
+  ASSERT_TRUE(cpp->set_hook(HookKind::Mock, "hidden_function()", "return 7;", error)) << error;
+  EXPECT_EQ(cpp->evaluate("hidden_function()"), "(int) 7\n");
+  ASSERT_TRUE(cpp->restore("hidden_function()", error)) << error;
+  EXPECT_EQ(cpp->evaluate("hidden_function()"), "(int) 42\n");
+}
+
+TEST(HiddenSymbolsTest, PrefersHiddenJitStorageOverSameNamedProcessSymbol) {
+  void* process_storage = dlsym(RTLD_DEFAULT, "optind");
+  ASSERT_NE(process_storage, nullptr);
+  std::string error;
+  auto cpp = CppInterpreter::create({"-fvisibility=hidden"}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("extern \"C\" { int optind = 42; }"));
+  EXPECT_EQ(cpp->evaluate("optind"), "(int) 42\n");
+  const auto info = cpp->symbol_info("optind", error);
+  ASSERT_TRUE(info.has_value()) << error;
+  std::ostringstream native_address;
+  native_address << "0x" << std::hex << reinterpret_cast<std::uintptr_t>(process_storage);
+  ASSERT_FALSE(info_field(*info, "Address").empty()) << *info;
+  EXPECT_NE(info_field(*info, "Address"), native_address.str()) << *info;
+}
+
 TEST_F(CppInterpreterTest,
        RejectsThreadLocalPublicationBeforeRunningTheInitializer) {
   ASSERT_TRUE(cpp_->execute(

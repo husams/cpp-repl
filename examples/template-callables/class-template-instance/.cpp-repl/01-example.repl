@@ -1,0 +1,16 @@
+#include <api.hpp>
+
+%define std::string class_instance_demo::Person<int>::getName() const cpp` return "Person " + std::to_string(value); `
+%define std::string class_instance_demo::Person<long>::getName() const cpp` return "Person " + std::to_string(value); `
+
+class_instance_demo::Person<int> person{7};
+class_instance_demo::Person<long> other{9};
+person.getName()
+std::string name = person.getName();
+const char* text = name.c_str();
+text
+std::string other_name = other.getName();
+const char* other_text = other_name.c_str();
+other_text
+bool matches = name == "Person 7" && other_name == "Person 9";
+matches

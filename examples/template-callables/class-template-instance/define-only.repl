@@ -1,0 +1,7 @@
+#include <api.hpp>
+%define std::string class_instance_demo::Person<int>::getName() const cpp` return "Person " + std::to_string(value); `
+class_instance_demo::Person<int> person{7};
+std::string name = person.getName();
+bool matches = name == "Person 7";
+matches
+%quit

@@ -437,15 +437,29 @@ keep their literal contents; substitutions belong outside those bodies.
   names in signatures. The declaration determines `noexcept`, even if omitted
   from the command. Empty bodies are allowed for `void` functions.
 
+  Concrete template instances are supported, including methods on class
+  template instances, declared method specializations, and function template
+  instances. For example:
+
+  ```text
+  %define std::string Person<int>::getName() const cpp`return "Sample";`
+  %define describe<int>(int value) cpp`return std::to_string(value);`
+  ```
+
+  Clang selects the overload using parameter types,
+  member qualifiers, and the return type when provided; the REPL supplies the
+  required `template<>` prefixes. Define an instance before its first use.
+  Runnable examples are in `examples/template-callables`.
+
   As with variables, the user supplies no shim and never rebuilds or relinks
   the supplied library: generated temporary native metadata exports the JIT
   address, while imports in the original file remain undefined. Define
   dependencies first; unresolved bodies fail without poisoning later inputs.
   Existing definitions and resolved native implementations are rejected.
-  Constructors, destructors, operators, templates, constexpr functions,
-  variadic functions, pure virtual declarations, internal
+  Constructors, destructors, operators, dependent primary-template patterns,
+  constexpr functions, variadic functions, pure virtual declarations, internal
   linkage, and non-default calling conventions are unsupported and report
-  errors. Signature parsing supports simple qualified identifiers, ordinary
+  errors. Signature parsing supports qualified template-ids, ordinary
   parameter declarators and optional `const`, `volatile`, `&`, `&&`, `noexcept`;
   computed exception specifications and other suffixes are rejected.
   If publication fails after compilation, the error states that the callable

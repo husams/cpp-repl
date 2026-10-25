@@ -123,7 +123,8 @@ class CppInterpreter {
   static std::string version();
 
  private:
-  CppInterpreter(std::unique_ptr<clang::Interpreter> interp, std::vector<std::string> args,
+  CppInterpreter(std::unique_ptr<clang::Interpreter> interp, llvm::orc::LLJIT& jit,
+                 std::vector<std::string> args,
                  std::unique_ptr<ProjectCompilationDatabase> database);
   bool run(const std::string& code, clang::Value& value);
   bool run_raw(const std::string& code, clang::Value& value,
@@ -150,6 +151,7 @@ class CppInterpreter {
   // The preprocessor callbacks refer to this state until interpreter shutdown.
   std::unique_ptr<SourceReload> source_reload_;
   std::unique_ptr<clang::Interpreter> interp_;
+  llvm::orc::LLJIT& jit_;  // Owned by interp_'s incremental executor.
   FunctionHooks hooks_;
   std::vector<std::string> args_;  // the user's compiler flags, for completion
   std::vector<std::string> sources_;  // canonical paths of the %add-ed files
