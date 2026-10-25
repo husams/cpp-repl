@@ -1,0 +1,4 @@
+interface:
+  display_name: "C++ REPL Investigation"
+  short_description: "Debug and explain C++ behavior with cpp-repl"
+  default_prompt: "Use $cpp-repl to reproduce this C++ behavior and explain the evidence."

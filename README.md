@@ -794,6 +794,22 @@ can span multiple lines):
 printf 'int n = 6;\nn * 7\n%%quit\n' | ./build/cpp-repl
 ```
 
+## Agent skill
+
+The [cpp-repl skill](skills/cpp-repl/SKILL.md) guides Codex and Claude through
+reproducing C++ behavior, inspecting symbols and libraries, testing hooks, and
+debugging the REPL itself. Install the complete folder so its references remain
+available:
+
+```sh
+mkdir -p ~/.codex/skills ~/.claude/skills
+cp -R skills/cpp-repl ~/.codex/skills/
+cp -R skills/cpp-repl ~/.claude/skills/
+```
+
+Invoke it with `$cpp-repl` in Codex or `/cpp-repl` in Claude Code; matching tasks
+can also select it automatically.
+
 ## Layout
 
 - `src/main.cpp` - creates the interpreter, input loop, history, Ctrl+C/D
