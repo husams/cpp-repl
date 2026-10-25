@@ -287,6 +287,13 @@ def main():
                 ("class_list", b"%class\r", True),
                 ("class_tab", b"%class Po\t"),
                 ("class_show", b"\r", True),
+                ("methods_tab", b"%methods Po\t"),
+                ("methods", b"\r", True),
+                ("fields", b"%fields Point\r", True),
+                ("access_tab", b"%methods Point access pub\t"),
+                ("access", b"\r", True),
+                ("parents_tab", b"%fields Point include-parents fal\t"),
+                ("parents", b"\r", True),
                 ("quit", b"%quit\r"),
             ],
         )
@@ -299,6 +306,11 @@ def main():
         shown = plain(out["class_show"])
         check("%class Point shows the layout", "struct Point {  // size 8, align 4" in shown and "int x;" in shown)
         check("%class Point shows the methods", "int sum() const;" in shown)
+        check("Tab completes a record name after %methods", "Point" in plain(out["methods_tab"]))
+        check("%methods shows qualified names and types", "Point::sum : int () const" in plain(out["methods"]))
+        check("%fields shows data members", all(m in plain(out["fields"]) for m in ("Point::x : int", "Point::y : int")))
+        check("Tab completes access values", "public" in plain(out["access_tab"]) and "Point::sum" in plain(out["access"]))
+        check("Tab completes parent values", "false" in plain(out["parents_tab"]) and "Point::x" in plain(out["parents"]))
         check("%quit exits with status 0 after completion", status == 0)
 
         with open(os.path.join(cwd, "geometry.cpp"), "w", encoding="utf8") as f:

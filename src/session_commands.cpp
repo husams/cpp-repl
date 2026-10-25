@@ -123,6 +123,16 @@ CommandResult execute_command(LibraryManager& libs, CppInterpreter& cpp,
   if (cmd.kind == CommandKind::Class && cmd.error.empty()) {
     return {true, show_class(cpp, cmd, out)};
   }
+  if ((cmd.kind == CommandKind::Methods || cmd.kind == CommandKind::Fields) && cmd.error.empty()) {
+    std::string error;
+    const auto result = cpp.describe_members(cmd.class_name->value,
+                                             cmd.kind == CommandKind::Methods ? MemberKind::Methods
+                                                                              : MemberKind::Fields,
+                                             cmd.member_options, error);
+    out << color_inspection(result ? *result : "error: " + error + '\n',
+                            inspection_colors_enabled());
+    return {true, result.has_value()};
+  }
   if (cmd.kind == CommandKind::Info && cmd.error.empty()) {
     std::string error;
     if (const auto info = cpp.symbol_info(cmd.symbol->value, error))

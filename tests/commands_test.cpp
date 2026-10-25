@@ -195,6 +195,58 @@ TEST(Grammar, ClassErrors) {
   EXPECT_EQ(error_text(text, cmd), "B");
 }
 
+TEST(Grammar, MemberCommandsDefaultToDirectMembersWithAllAccess) {
+  for (const auto* name : {"%methods", "%fields"}) {
+    const auto cmd = parse_command(std::string(name) + " ::geo::Point");
+    ASSERT_TRUE(cmd.error.empty()) << cmd.error;
+    EXPECT_EQ(cmd.kind,
+              std::string(name) == "%methods" ? CommandKind::Methods : CommandKind::Fields);
+    ASSERT_TRUE(cmd.class_name);
+    EXPECT_EQ(cmd.class_name->value, "::geo::Point");
+    EXPECT_EQ(cmd.member_options.access, AccessFilter::All);
+    EXPECT_FALSE(cmd.member_options.include_parents);
+  }
+}
+
+TEST(Grammar, MemberCommandFiltersCanAppearInEitherOrder) {
+  for (const auto* name : {"%methods", "%fields"}) {
+    for (const auto& access :
+         std::vector<std::pair<std::string, AccessFilter>>{{"public", AccessFilter::Public},
+                                                           {"private", AccessFilter::Private},
+                                                           {"protected", AccessFilter::Protected},
+                                                           {"all", AccessFilter::All}}) {
+      for (const bool parents_first : {false, true}) {
+        const auto filters = parents_first ? "include-parents true access " + access.first
+                                           : "access " + access.first + " include-parents true";
+        const std::string input = std::string(name) + " A " + filters;
+        const auto cmd = parse_command(input);
+        ASSERT_TRUE(cmd.error.empty()) << input << ": " << cmd.error;
+        EXPECT_EQ(cmd.member_options.access, access.second);
+        EXPECT_TRUE(cmd.member_options.include_parents);
+        ASSERT_TRUE(cmd.access_filter);
+        EXPECT_EQ(input.substr(cmd.access_filter->span.begin,
+                               cmd.access_filter->span.end - cmd.access_filter->span.begin),
+                  access.first);
+      }
+    }
+    const auto cmd = parse_command(std::string(name) + " A include-parents false");
+    EXPECT_TRUE(cmd.error.empty());
+    EXPECT_FALSE(cmd.member_options.include_parents);
+  }
+}
+
+TEST(Grammar, MemberCommandsRejectMissingInvalidAndDuplicateOptions) {
+  for (const auto* name : {"%methods", "%fields"}) {
+    for (const auto* args :
+         {"", "  ", " 1bad", " a::", " A other", " A access", " A access internal",
+          " A include-parents", " A include-parents yes", " A access all access public",
+          " A include-parents true include-parents false"}) {
+      const std::string input = std::string(name) + args;
+      EXPECT_FALSE(parse_command(input).error.empty()) << input;
+    }
+  }
+}
+
 TEST(Grammar, HelpAndQuitTakeNoArguments) {
   const std::string text = "%help me now ";
   const ParsedCommand cmd = parse_command(text);
@@ -625,7 +677,7 @@ TEST(Dispatch, QuitStopsAndHelpListsCommands) {
   for (const std::string& name : command_names()) {
     EXPECT_NE(out.str().find(name), std::string::npos) << name;
   }
-  EXPECT_EQ(command_names().size(), 25u);
+  EXPECT_EQ(command_names().size(), 27u);
 }
 
 TEST(Dispatch, PathsShowsConfiguredDirectoriesAndLoaderSettings) {

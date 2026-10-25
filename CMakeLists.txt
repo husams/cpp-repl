@@ -216,6 +216,11 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
   target_compile_options(cpp_interpreter_test PRIVATE -Wall -Wextra -Wpedantic)
   gtest_discover_tests(cpp_interpreter_test DISCOVERY_TIMEOUT 30)
 
+  add_executable(record_members_test tests/record_members_test.cpp)
+  target_link_libraries(record_members_test PRIVATE cpp_interp GTest::gtest_main)
+  target_compile_options(record_members_test PRIVATE -Wall -Wextra -Wpedantic)
+  gtest_discover_tests(record_members_test DISCOVERY_TIMEOUT 30)
+
   add_executable(compilation_database_test tests/compilation_database_test.cpp)
   target_link_libraries(compilation_database_test PRIVATE cpp_interp GTest::gtest_main)
   target_compile_options(compilation_database_test PRIVATE -Wall -Wextra -Wpedantic)

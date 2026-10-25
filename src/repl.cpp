@@ -99,6 +99,44 @@ Replxx::completions_t complete(CppInterpreter& cpp, const std::string& input,
     context_len = static_cast<int>(utf8_length(typed));
     for (const auto& library : loaded_libraries())
       if (starts_with(library.name, typed)) out.emplace_back(library.name);
+  } else if (cmd.kind == CommandKind::Methods || cmd.kind == CommandKind::Fields) {
+    const auto args = input.substr(cmd.arg_begin);
+    const auto first_blank = args.find_first_of(" \t");
+    if (first_blank == std::string::npos) {
+      context_len = static_cast<int>(utf8_length(args));
+      for (const auto& name : cpp.class_names()) {
+        if (starts_with(name, args)) {
+          out.emplace_back(name);
+        }
+      }
+    } else {
+      const auto begin = input.find_last_of(" \t") + 1;
+      const auto typed = input.substr(begin);
+      context_len = static_cast<int>(utf8_length(typed));
+      const auto previous_end = input.find_last_not_of(" \t", begin - 1);
+      const auto previous_begin = input.find_last_of(" \t", previous_end);
+      const auto previous = input.substr(previous_begin + 1, previous_end - previous_begin);
+      if (previous == "access") {
+        for (const auto* value : {"public", "private", "protected", "all"}) {
+          if (starts_with(value, typed)) {
+            out.emplace_back(value);
+          }
+        }
+      } else if (previous == "include-parents") {
+        for (const auto* value : {"true", "false"}) {
+          if (starts_with(value, typed)) {
+            out.emplace_back(value);
+          }
+        }
+      } else {
+        if (!cmd.access_filter && starts_with("access", typed)) {
+          out.emplace_back("access");
+        }
+        if (!cmd.parents_filter && starts_with("include-parents", typed)) {
+          out.emplace_back("include-parents");
+        }
+      }
+    }
   } else if (cmd.kind == CommandKind::Class || cmd.kind == CommandKind::Info ||
              cmd.kind == CommandKind::DefineVariable) {
     const std::string typed = input.substr(cmd.arg_begin);

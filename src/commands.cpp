@@ -200,6 +200,64 @@ void parse_class(std::string_view text, ParsedCommand& cmd) {
   }
 }
 
+void parse_members(std::string_view text, ParsedCommand& cmd) {
+  auto pos = cmd.arg_begin;
+  auto word = [&]() {
+    const auto begin = pos;
+    while (pos < text.size() && !is_blank(text[pos])) {
+      ++pos;
+    }
+    Operand result{std::string(text.substr(begin, pos - begin)), {begin, pos}};
+    pos = skip_blank(text, pos);
+    return result;
+  };
+  if (pos == text.size()) {
+    set_error(cmd, "missing record name", {pos, pos});
+    return;
+  }
+  cmd.class_name = word();
+  if (!is_qualified_name(cmd.class_name->value)) {
+    set_error(cmd, "expected a qualified record name", cmd.class_name->span);
+    return;
+  }
+  while (pos < text.size()) {
+    const auto option = word();
+    if (option.value != "access" && option.value != "include-parents") {
+      set_error(cmd, "expected access or include-parents", option.span);
+      return;
+    }
+    auto& filter = option.value == "access" ? cmd.access_filter : cmd.parents_filter;
+    if (filter) {
+      set_error(cmd, "duplicate " + option.value + " option", option.span);
+      return;
+    }
+    if (pos == text.size()) {
+      set_error(cmd, "missing value after " + option.value, option.span);
+      return;
+    }
+    filter = word();
+    if (option.value == "access") {
+      if (filter->value == "all") {
+        cmd.member_options.access = AccessFilter::All;
+      } else if (filter->value == "public") {
+        cmd.member_options.access = AccessFilter::Public;
+      } else if (filter->value == "private") {
+        cmd.member_options.access = AccessFilter::Private;
+      } else if (filter->value == "protected") {
+        cmd.member_options.access = AccessFilter::Protected;
+      } else {
+        set_error(cmd, "expected public, private, protected or all", filter->span);
+        return;
+      }
+    } else if (filter->value == "true" || filter->value == "false") {
+      cmd.member_options.include_parents = filter->value == "true";
+    } else {
+      set_error(cmd, "expected true or false", filter->span);
+      return;
+    }
+  }
+}
+
 // Quotes group regexes containing spaces; preserve backslashes for std::regex.
 void parse_symbol_filters(std::string_view text, ParsedCommand& cmd) {
   std::size_t pos = cmd.arg_begin;
@@ -404,6 +462,12 @@ const std::vector<CommandInfo>& command_table() {
        "use a file's effective compile options as the session defaults"},
       {"%class", CommandKind::Class, " [name]",
        "show a class's members and layout (no argument: list classes)"},
+      {"%methods", CommandKind::Methods,
+       " <name> [access public|private|protected|all] [include-parents true|false]",
+       "list record methods by declaring record (defaults: all access, no parents)"},
+      {"%fields", CommandKind::Fields,
+       " <name> [access public|private|protected|all] [include-parents true|false]",
+       "list record data members by declaring record (defaults: all access, no parents)"},
       {"%info", CommandKind::Info, " <symbol>",
        "show symbol declarations, types, locations and JIT addresses"},
       {"%syminfo", CommandKind::Info, " <symbol>",
@@ -520,6 +584,10 @@ ParsedCommand parse_command(std::string_view text, bool allow_shell) {
       break;
     case CommandKind::Class:
       parse_class(text, cmd);
+      break;
+    case CommandKind::Methods:
+    case CommandKind::Fields:
+      parse_members(text, cmd);
       break;
     case CommandKind::Info:
     case CommandKind::Demangle:
@@ -659,6 +727,8 @@ bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out,
     case CommandKind::UseCompileOpts:
     case CommandKind::DefineVariable:
     case CommandKind::Class:    // owns the interpreter
+    case CommandKind::Methods:
+    case CommandKind::Fields:
     case CommandKind::Info:
     case CommandKind::Libs:
     case CommandKind::LibInfo:
