@@ -47,6 +47,9 @@ REPL
 Expected value: `(int) 42`. Save stdout **and** stderr for a bug report.
 An ordinary input error can still end with process exit status zero; check the
 diagnostics and expected result, not just the exit code.
+The REPL writes `.replxx_history` in its working directory even with piped input.
+Use an owned scratch directory for isolated experiments; preserve existing
+project history when the project's launch directory is needed.
 
 ## Select the smallest useful observation
 
@@ -58,10 +61,16 @@ diagnostics and expected result, not just the exit code.
 | What are a record's private or inherited members? | If listed in `%help`: `%methods ns::Type access private include-parents true` and `%fields ns::Type access all include-parents true` |
 | Which native libraries are loaded? | `%lib` lists explicitly loaded libraries; `%libs [all] [regex]` includes dependencies |
 | Why did library lookup fail? | `%paths`, `%libinfo library`, `%add-path /absolute/libdir` |
-| Is a symbol defined, resolved, or referenced? | `%syminfo 'ns::func(int)'` (`%info` is an alias); `%demangle _Z3addii` |
+| Is a symbol defined, resolved, or referenced? | `%syminfo ns::func` (`%info` is an alias); `%demangle _Z3addii` |
 | Which names or imports match? | `%symbols lib 'libname' name '^ns::'`; `%symbols undefined`; add `all` for system images |
 | Is instrumentation changing the result? | `%hooks`, an exact `%restore signature`, then rerun the same call |
 | Did edited source take effect? | If supported, `%reload path.cpp`; compare newly created objects/callers with old ones |
+
+Start symbol inspection with a bare qualified name and read its declaration or
+overload set. Some binaries reject full-signature `%syminfo` queries even when
+the function exists. On such a miss, retry the bare name; do not infer a missing
+definition. Hook/restore commands still require the exact target signature;
+their signature support does not establish signature support for symbol queries.
 
 Load library declarations with a header (`#include` or `%add`) as well as loading
 the binary with `%lib`. Include paths (`-I`) and native library search paths
@@ -82,7 +91,11 @@ in cpp-repl itself, read [the implementation guide](references/implementation.md
   still obeys ordinary C++ access rules.
 - A successful include retains header guards and compiler state. Failure
   recovery is not a complete compiler transaction. Include needed headers in a
-  successful earlier input; compare with a fresh process after suspicious errors.
+  successful earlier input. After an error, test an earlier declaration as well
+  as arithmetic: some installed builds lose source lookup for a namespace
+  reopened by rejected input while old compiled callers still run. If that
+  happens, replay the known-good setup in a fresh process; a newer checkout's
+  reported fix is not proof that the installed binary contains it.
 - In versions supporting redefinition/reload, later inputs use the newest
   definitions, while old objects, pointers and compiled callers can retain old
   types/code. Reload can rerun initializers; flag edits affect future compilation.
