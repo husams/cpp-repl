@@ -264,6 +264,13 @@ then compiled and run by the interpreter.
   shows Mach-O current/compatibility versions, install name and UUID, including
   metadata available from loaded dyld-cache images. Missing metadata is labeled
   unavailable or not recorded; a SONAME is not treated as a package version.
+- `%demangle <symbol>` - print the readable C++ name of a mangled symbol using
+  LLVM, without requiring its library to be loaded. Accepts Linux `_Z...` and
+  macOS `__Z...` names; plain or unrecognized names are printed unchanged.
+  For example, `%demangle _Z3addii` prints `add(int, int)`, and
+  `%demangle __ZN5Point3incEi` prints `Point::inc(int)`. Quote names containing
+  spaces. Tab completion and `%help` include the command; startup scripts can
+  use it too.
 - `%syminfo <symbol>` (also `%info`) - inspect a qualified C++ name (such as `Calculator::add`),
   a mangled name, or a JIT symbol. Shows aligned fields for the declaration,
   type, linkage, definition, source location and available address. Functions
@@ -305,6 +312,7 @@ restore   := "%restore" [ signature [ "in" signature ] ]
 hooks     := "%hooks"
 info      := "%info" symbol
 syminfo   := "%syminfo" symbol
+demangle  := "%demangle" symbol
 symbols   := "%symbols" [ "all" ] [ "lib" regex ] [ "name" regex ]
 add-path  := "%add-path" path { ":" path }     blanks around ':' are allowed
 help      := "%help"

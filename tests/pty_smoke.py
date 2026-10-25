@@ -156,6 +156,10 @@ def main():
                 ("good_path", b"%add-path /usr/lib\r", True),
                 ("path_list", b"%add-path /tmp:/no/such:/\r", True),
                 ("lib_ok", b"%lib z\r", True),
+                ("demangle_tab", b"%dema\t"),
+                ("demangle_linux", b" _Z3addii\r", True),
+                ("demangle_mac", b"%demangle __ZN5Point3incEi\r", True),
+                ("demangle_missing", b"%demangle\r", True),
                 ("zlib_decl", b'extern "C" const char* zlibVersion();\r', True),
                 ("zlib_call", b"zlibVersion()\r", True),
                 ("lib_missing", b"%lib no_such_library_xyz\r", True),
@@ -170,7 +174,14 @@ def main():
             ],
         )
         help_text = plain(out["help"])
-        check("%help lists the twenty-one commands", all(c in help_text for c in ("%lib", "%libs", "%libinfo", "%syminfo", "%paths", "%add-path", "%add", "%compile-opts", "%add-compile-opt", "%set-compile-opts", "%use-compile-opts", "%class", "%info", "%symbols", "%mock", "%pre", "%post", "%restore", "%hooks", "%help", "%quit")))
+        check("%help lists the twenty-two commands", all(c in help_text for c in ("%lib", "%libs", "%libinfo", "%syminfo", "%demangle", "%paths", "%add-path", "%add", "%compile-opts", "%add-compile-opt", "%set-compile-opts", "%use-compile-opts", "%class", "%info", "%symbols", "%mock", "%pre", "%post", "%restore", "%hooks", "%help", "%quit")))
+        check("demangle completes and prints readable Linux and Mac C++ names",
+              "%demangle" in plain(out["demangle_tab"])
+              and "add(int, int)" in plain(out["demangle_linux"])
+              and "Point::inc(int)" in plain(out["demangle_mac"]))
+        check("demangle reports missing input with usage",
+              "missing symbol name" in plain(out["demangle_missing"])
+              and "usage: %demangle <symbol>" in plain(out["demangle_missing"]))
         check("%add-path rejects a missing dir", "error:" in plain(out["bad_path"]))
         check("%add-path accepts an existing dir", "error:" not in plain(out["good_path"]))
         path_list = plain(out["path_list"])

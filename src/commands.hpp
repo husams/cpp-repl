@@ -16,7 +16,7 @@ namespace example {
 //
 // clang-format off
 //   command   := lib | libs | libinfo | paths | add-path | add | class | info
-//              | symbols | hook | hooks | restore | compile-opts
+//              | symbols | demangle | hook | hooks | restore | compile-opts
 //              | add-compile-opt | set-compile-opts | use-compile-opts | help | quit
 //   lib       := "%lib" { path }                 zero or more paths
 //   libs      := "%libs" [ "all" ] [ regex ]     loaded library names only
@@ -32,6 +32,7 @@ namespace example {
 //   flag-or-value := shell-quoted word, without expansion or execution
 //   class     := "%class" [ name ]               name := ident { "::" ident }
 //   info      := "%info" symbol                  qualified or mangled name
+//   demangle  := "%demangle" symbol              mangled or plain name
 //   symbols   := "%symbols" [ "all" ] [ "lib" regex ] [ "name" regex ]
 //   hook      := ("%mock" | "%pre" | "%post") signature [ "in" signature ] "cpp`" body "`"
 //   restore   := "%restore" [ signature [ "in" signature ] ]
@@ -56,6 +57,7 @@ enum class CommandKind {
   UseCompileOpts,
   Class,
   Info,
+  Demangle,
   Symbols,
   Mock,
   Pre,
@@ -101,7 +103,7 @@ struct ParsedCommand {
   std::vector<Operand> compile_flags;  // shell-quoted compiler flags and values
   std::vector<Span> separators;       // the ':' between %add-path operands
   std::optional<Operand> class_name;  // %class operand
-  std::optional<Operand> symbol;      // %info operand
+  std::optional<Operand> symbol;      // %info / %demangle / library inspection
   std::optional<Operand> library_regex;  // %symbols lib
   std::optional<Operand> name_regex;     // %symbols name
   std::optional<Span> all_symbols;       // %symbols all (include system libraries)

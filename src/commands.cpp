@@ -11,6 +11,7 @@
 
 #include "cpp_lexer.hpp"
 #include "inspection_output.hpp"
+#include "llvm/Demangle/Demangle.h"
 
 namespace example {
 
@@ -269,8 +270,12 @@ void parse_inspection_operand(std::string_view text, ParsedCommand& cmd, bool re
     value = std::string(text.substr(begin + 1, close - begin - 1));
   } else value = std::string(text.substr(begin, end - begin));
   cmd.symbol = Operand{std::move(value), {begin, end}};
+  if (cmd.kind == CommandKind::Demangle && cmd.symbol->value.empty())
+    set_error(cmd, "missing symbol name", {begin, end});
   const auto extra = skip_blank(text, end);
-  if (extra < text.size()) set_error(cmd, cmd.name + " takes one " + (cmd.kind == CommandKind::Info ? "symbol name" : "library name or regex"), {extra, text.size()});
+  if (extra < text.size()) set_error(cmd, cmd.name + " takes one " +
+      ((cmd.kind == CommandKind::Info || cmd.kind == CommandKind::Demangle) ?
+          "symbol name" : "library name or regex"), {extra, text.size()});
 }
 
 void parse_signature(std::string_view text, std::size_t begin, std::size_t end,
@@ -373,6 +378,8 @@ const std::vector<CommandInfo>& command_table() {
        "show symbol declarations, types, locations and JIT addresses"},
       {"%syminfo", CommandKind::Info, " <symbol>",
        "show symbol definitions, imports and reference sites"},
+      {"%demangle", CommandKind::Demangle, " <symbol>",
+       "print a readable C++ symbol name without loading its library"},
       {"%symbols", CommandKind::Symbols, " [all] [lib <regex>] [name <regex>]",
        "list loaded symbol names (all includes system libraries)"},
       {"%mock", CommandKind::Mock, " <signature> [in <caller>] cpp`<body>`",
@@ -444,6 +451,7 @@ ParsedCommand parse_command(std::string_view text) {
       parse_class(text, cmd);
       break;
     case CommandKind::Info:
+    case CommandKind::Demangle:
     case CommandKind::LibInfo:
       parse_inspection_operand(text, cmd, true, cmd.arg_begin);
       break;
@@ -512,6 +520,16 @@ bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out,
       break;
     case CommandKind::Quit:
       return false;
+    case CommandKind::Demangle: {
+      const auto& original = cmd.symbol->value;
+      // Mach-O symbol tables can retain the extra platform underscore.
+      const auto mangled = original.rfind("__Z", 0) == 0
+                               ? original.substr(1) : original;
+      const auto readable = llvm::demangle(mangled);
+      out << color_inspection((readable == mangled ? original : readable) + '\n',
+                              inspection_colors_enabled(), true);
+      break;
+    }
     case CommandKind::Help: {
       std::size_t width = 0;
       for (const CommandInfo& c : command_table()) {

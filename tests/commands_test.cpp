@@ -3,6 +3,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -303,6 +304,44 @@ TEST(Grammar, InfoRequiresExactlyOneSymbolName) {
   EXPECT_FALSE(wants_more_input("%info foo("));
 }
 
+TEST(Grammar, DemangleRequiresExactlyOneSymbolName) {
+  for (const char* input : {"%demangle _Z3addii", "%demangle '__Z3addii'",
+                             "%demangle \"Point::inc(int)\""}) {
+    const auto cmd = parse_command(input);
+    EXPECT_EQ(cmd.kind, CommandKind::Demangle);
+    ASSERT_TRUE(cmd.symbol);
+    EXPECT_TRUE(cmd.error.empty()) << cmd.error;
+  }
+  for (const char* input : {"%demangle", "%demangle ''", "%demangle \"\""})
+    EXPECT_EQ(parse_command(input).error, "missing symbol name");
+  EXPECT_EQ(parse_command("%demangle a b").error,
+            "%demangle takes one symbol name");
+  EXPECT_EQ(parse_command("%demangle 'x").error, "unterminated quote");
+  EXPECT_FALSE(wants_more_input("%demangle _Zbroken("));
+}
+
+TEST(Dispatch, DemangleSupportsLinuxMacAndUnrecognizedNamesWithoutLibraries) {
+  LibraryManager libs;
+  for (const auto& names : std::vector<std::pair<std::string, std::string>>{
+           {"_Z3addii", "add(int, int)"},
+           {"__Z3addii", "add(int, int)"},
+           {"_ZN5Point3incEi", "Point::inc(int)"},
+           {"__ZN5Point3incEi", "Point::inc(int)"},
+           {"printf", "printf"},
+           {"'Point::inc(int)'", "Point::inc(int)"},
+           {"_Zbroken", "_Zbroken"},
+           {"__Zbroken", "__Zbroken"}}) {
+    std::ostringstream output;
+    bool ok = false;
+    EXPECT_TRUE(dispatch(parse_command("%demangle " + names.first), libs,
+                         output, &ok));
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(output.str(), color_inspection(names.second + '\n',
+                                            inspection_colors_enabled(), true));
+  }
+  EXPECT_TRUE(libs.loaded().empty());
+}
+
 TEST(Grammar, SymbolsAcceptsQuotedRegexesInEitherOrder) {
   const auto all = parse_command("  %symbols  ");
   EXPECT_EQ(all.kind, CommandKind::Symbols);
@@ -435,7 +474,7 @@ TEST(Dispatch, QuitStopsAndHelpListsCommands) {
   for (const std::string& name : command_names()) {
     EXPECT_NE(out.str().find(name), std::string::npos) << name;
   }
-  EXPECT_EQ(command_names().size(), 21u);
+  EXPECT_EQ(command_names().size(), 22u);
 }
 
 TEST(Dispatch, PathsShowsConfiguredDirectoriesAndLoaderSettings) {
