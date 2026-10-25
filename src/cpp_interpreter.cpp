@@ -32,6 +32,7 @@
 #include "cpp_inspect.hpp"
 #include "cpp_lexer.hpp"
 #include "cpp_symbols.hpp"
+#include "definition_shadowing.hpp"
 #include "interpreter_undo.hpp"
 #include "library_manager.hpp"
 #include "llvm/Config/llvm-config.h"
@@ -43,6 +44,7 @@
 #include "llvm/Support/CrashRecoveryContext.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/SaveAndRestore.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
 #include "loaded_symbols.hpp"
@@ -50,6 +52,7 @@
 #include "project_compilation_database.hpp"
 #include "runtime_inspection.hpp"
 #include "source_compile_options.hpp"
+#include "source_reload.hpp"
 
 // Set by CMake from the LLVM package that was linked.
 #ifndef CPP_REPL_LLVM_PREFIX
@@ -65,12 +68,15 @@ namespace {
 
 void print_value(const clang::Value& value, llvm::raw_ostream& out) {
 #if LLVM_VERSION_MAJOR >= 22
-  value.print(out);
+  std::string printed;
+  llvm::raw_string_ostream stream(printed);
+  value.print(stream);
+  out << unversioned_name(std::move(printed));
 #else
   // Clang 21 captures values but its Value::print() is still a placeholder.
   if (!value.hasValue()) return;
   const auto type = value.getType().getCanonicalType();
-  out << "(" << type.getAsString(value.getASTContext().getPrintingPolicy()) << ") ";
+  out << "(" << unversioned_name(type.getAsString(value.getASTContext().getPrintingPolicy())) << ") ";
   auto floating = [&](auto number) {
     std::ostringstream text;
     text.precision(std::numeric_limits<decltype(number)>::max_digits10);
@@ -193,7 +199,9 @@ llvm::Expected<std::unique_ptr<clang::CompilerInstance>> make_compiler(
 
   clang::IncrementalCompilerBuilder builder;
   builder.SetCompilerArgs(argv);
-  return builder.CreateCpp();
+  auto compiler = builder.CreateCpp();
+  if (compiler) enable_definition_shadowing(**compiler);
+  return compiler;
 }
 
 std::string compile_file_path(const std::string& path, std::string& error) {
@@ -267,7 +275,9 @@ CppInterpreter::CppInterpreter(std::unique_ptr<clang::Interpreter> interp,
                                std::unique_ptr<ProjectCompilationDatabase> database)
     : native_exports_(std::make_unique<NativeSymbolExports>()),
       interp_(std::move(interp)), hooks_(*interp_), args_(std::move(args)),
-      database_(std::move(database)) {}
+      database_(std::move(database)) {
+  source_reload_ = std::make_unique<SourceReload>(*interp_->getCompilerInstance());
+}
 
 CppInterpreter::~CppInterpreter() = default;
 
@@ -310,6 +320,7 @@ std::unique_ptr<CppInterpreter> CppInterpreter::create(
 
 // ParseAndExecute(), split up so a failed Execute can be undone.
 bool CppInterpreter::run(const std::string& code, clang::Value& value) {
+  if (source_input_.empty()) reload_changed_sources();
   if (!global_options_changed_ || compile_scope_active_)
     return run_raw(code, value);
   SourceCompileOptions options;
@@ -331,6 +342,14 @@ bool CppInterpreter::run(const std::string& code, clang::Value& value) {
 bool CppInterpreter::run_raw(const std::string& code, clang::Value& value) {
   if (has_top_level_return(code)) {  // would crash the parser
     llvm::errs() << "error: 'return' is only allowed inside a function\n";
+    return false;
+  }
+  DefinitionTransaction definitions(*interp_->getCompilerInstance());
+  bool source_committed = false;
+  auto source_scope = llvm::scope_exit([&] { source_reload_->finish(source_committed); });
+  std::string source_error;
+  if (!source_reload_->begin(source_input_, reloading_source_, source_error)) {
+    llvm::errs() << "error: " << source_error << '\n';
     return false;
   }
   llvm::Expected<clang::PartialTranslationUnit&> ptu = interp_->Parse(code);
@@ -361,6 +380,8 @@ bool CppInterpreter::run_raw(const std::string& code, clang::Value& value) {
       return false;
     }
   }
+  definitions.commit();
+  source_committed = true;
   if (!value_pending(*ptu)) return true;
   // The value waits in the interpreter; ParseAndExecute() hands it to a
   // Value*. An empty input does that without running anything, and Undo()
@@ -531,7 +552,7 @@ std::optional<std::string> CppInterpreter::symbol_list(
   if (std::regex_search(std::string("<session>"), library)) {
     for (const auto& decl : declarations) {
       if (decl.defined == undefined_only) continue;
-      const auto readable = readable_symbol_name(decl.mangled);
+      const auto readable = unversioned_name(readable_symbol_name(decl.mangled));
       if (!std::regex_search(readable, name)) continue;
       auto address = interp_->getSymbolAddress(decl.mangled);
       if (undefined_only) {
@@ -593,6 +614,12 @@ CppInterpreter::Completions CppInterpreter::complete(const std::string& code) {
   out.prefix = std::string(trailing_identifier(code));
   std::set<std::string> names;
 
+  // The stock completion importer omits declarations relocated into our
+  // version namespaces. Expose their current public names as well.
+  if (!trailing_member_access(code))
+    for (const auto& name : user_symbol_names(interp_->getASTContext()))
+      if (name.find("::") == std::string::npos) names.insert(name);
+
   // As clang-repl does: Clang's code completion runs in a fresh compiler
   // (it parses `code` up to the cursor and stops there) and imports the
   // session's declarations from the main interpreter's AST.
@@ -650,6 +677,21 @@ CppInterpreter::Completions CppInterpreter::complete(const std::string& code) {
 }
 
 CppInterpreter::AddResult CppInterpreter::add_source(const std::string& path) {
+  return load_source(path, false);
+}
+
+CppInterpreter::AddResult CppInterpreter::reload_source(const std::string& path) {
+  return load_source(path, true);
+}
+
+void CppInterpreter::reload_changed_sources() {
+  for (const auto& path : source_reload_->changed_sources()) {
+    auto result = reload_source(path);
+    if (!result.ok) llvm::errs() << "error: " << result.message << '\n';
+  }
+}
+
+CppInterpreter::AddResult CppInterpreter::load_source(const std::string& path, bool reload) {
   namespace fs = std::filesystem;
   std::error_code ec;
   const fs::path file = fs::canonical(expand_home(path), ec);
@@ -659,9 +701,11 @@ CppInterpreter::AddResult CppInterpreter::add_source(const std::string& path) {
   if (name.find_first_of("\"\n") != std::string::npos) {
     return {false, "cannot #include a file name with '\"' or a newline: " + name};
   }
-  if (std::find(sources_.begin(), sources_.end(), name) != sources_.end()) {
-    return {false, "already added: " + name};
-  }
+  const bool added = std::find(sources_.begin(), sources_.end(), name) != sources_.end();
+  if (added && !reload) return {false, "already added: " + name};
+  if (!added && reload) return {false, "source has not been added: " + name};
+  llvm::SaveAndRestore<std::string> source_scope(source_input_, name);
+  llvm::SaveAndRestore<bool> reload_scope(reloading_source_, reload);
   const auto options = source_compile_options(name);
   const auto include = "#include \"" + name + "\"\n";
   if (!options.source.empty() || file_options_.count(name) ||
@@ -672,8 +716,8 @@ CppInterpreter::AddResult CppInterpreter::add_source(const std::string& path) {
               "could not add " + name + (error.empty() ? "" : ": " + error)};
   } else if (!execute(include))
     return {false, "could not add " + name};
-  sources_.push_back(name);
-  return {true, "added: " + name +
+  if (!reload) sources_.push_back(name);
+  return {true, std::string(reload ? "reloaded: " : "added: ") + name +
                     (options.source.empty()
                          ? ""
                          : " (compile options: " + options.source + ")")};

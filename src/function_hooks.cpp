@@ -17,6 +17,7 @@
 #include "clang/Interpreter/Interpreter.h"
 #include "clang/Interpreter/PartialTranslationUnit.h"
 #include "cpp_lexer.hpp"
+#include "definition_shadowing.hpp"
 #include "interpreter_undo.hpp"
 #include "native_call_patch.hpp"
 #include "llvm/Config/llvm-config.h"
@@ -56,7 +57,8 @@ void functions(clang::DeclContext& context, std::vector<clang::FunctionDecl*>& o
     if (auto* function = llvm::dyn_cast<clang::FunctionDecl>(decl)) {
       if (!function->isImplicit() && !llvm::isa<clang::CXXConstructorDecl>(function) &&
           !llvm::isa<clang::CXXDestructorDecl>(function) &&
-          function->getNameAsString().rfind("__cpp_repl_", 0) != 0)
+          function->getNameAsString().rfind("__cpp_repl_", 0) != 0 &&
+          is_current_definition(*function))
         out.push_back(function);
     } else if (auto* space = llvm::dyn_cast<clang::NamespaceDecl>(decl)) {
       functions(*space, out, sources);
@@ -248,7 +250,7 @@ struct FunctionHooks::Impl {
     std::set<const clang::FunctionDecl*> seen;
     if (probe)
       for (auto* function : declarations) {
-        if (function->getQualifiedNameAsString() != signature.name ||
+        if (unversioned_name(function->getQualifiedNameAsString()) != signature.name ||
             function->getNumParams() != probe->getNumParams() ||
             function->isVariadic() != probe->isVariadic() ||
             (signature.has_return_type &&
@@ -486,7 +488,7 @@ std::optional<CallableDefinition> FunctionHooks::definition(const std::string& s
   auto qualified = [&](clang::QualType type) {
     return clang::TypeName::getFullyQualifiedType(type, context, true);
   };
-  std::string declaration = function->getQualifiedNameAsString() + "(";
+  std::string declaration = unversioned_name(function->getQualifiedNameAsString()) + "(";
   for (unsigned i = 0; i < function->getNumParams(); ++i) {
     if (i) {
       declaration += ", ";

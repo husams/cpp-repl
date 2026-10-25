@@ -15,7 +15,7 @@ namespace example {
 // else is C++. Command grammar (blanks separate words):
 //
 // clang-format off
-//   command   := lib | libs | libinfo | paths | add-path | add | class | info
+//   command   := lib | libs | libinfo | paths | add-path | add | reload | class | info
 //              | symbols | demangle | define | hook | hooks | restore | compile-opts
 //              | add-compile-opt | set-compile-opts | use-compile-opts | clear | help | quit
 //   lib       := "%lib" { path }                 zero or more paths
@@ -24,6 +24,7 @@ namespace example {
 //   libinfo   := "%libinfo" library              name, path or regex
 //   add-path  := "%add-path" path { ":" path }   blanks around ':' allowed
 //   add       := "%add" { path }                 zero or more source files
+//   reload    := "%reload" { path }              no argument: reload all
 //   compile-opts := "%compile-opts" [ file ]
 //   add-compile-opt := "%add-compile-opt" [ file ] flag { flag-or-value }
 //   set-compile-opts := "%set-compile-opts" [ file ] { flag-or-value }
@@ -55,6 +56,7 @@ enum class CommandKind {
   Paths,
   AddPath,
   Add,
+  Reload,
   CompileOpts,
   AddCompileOpt,
   SetCompileOpts,

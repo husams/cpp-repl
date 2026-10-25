@@ -107,6 +107,19 @@ CommandResult execute_command(LibraryManager& libs, CppInterpreter& cpp,
   if (cmd.kind == CommandKind::Add && cmd.error.empty()) {
     return {true, add_sources(cpp, cmd, out)};
   }
+  if (cmd.kind == CommandKind::Reload && cmd.error.empty()) {
+    std::vector<std::string> paths;
+    for (const auto& path : cmd.paths) paths.push_back(path.value);
+    if (paths.empty()) paths = cpp.sources();
+    if (paths.empty()) out << "no source files added\n";
+    bool ok = true;
+    for (const auto& path : paths) {
+      auto result = cpp.reload_source(path);
+      out << (result.ok ? "" : "error: ") << result.message << '\n';
+      ok = ok && result.ok;
+    }
+    return {true, ok};
+  }
   if (cmd.kind == CommandKind::Class && cmd.error.empty()) {
     return {true, show_class(cpp, cmd, out)};
   }

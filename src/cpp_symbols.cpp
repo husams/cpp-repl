@@ -1,4 +1,5 @@
 #include "cpp_symbols.hpp"
+#include "definition_shadowing.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -39,7 +40,8 @@ std::string one_line(const std::string& text) {
 void collect(const clang::DeclContext& context, std::vector<const clang::NamedDecl*>& result) {
   for (const auto* decl : context.decls()) {
     if (const auto* named = llvm::dyn_cast<clang::NamedDecl>(decl)) {
-      if (!named->isImplicit() && !named->getDeclName().isEmpty()) result.push_back(named);
+      if (!named->isImplicit() && !named->getDeclName().isEmpty() &&
+          is_current_definition(*named)) result.push_back(named);
     }
     if (const auto* space = llvm::dyn_cast<clang::NamespaceDecl>(decl))
       collect(*space, result);
@@ -115,9 +117,9 @@ std::string linkage_name(const clang::NamedDecl& decl) {
 SymbolDescription describe(clang::ASTContext& context, const clang::NamedDecl* decl) {
   decl = definition(decl);
   SymbolDescription result;
-  result.name = decl->getQualifiedNameAsString();
+  result.name = unversioned_name(decl->getQualifiedNameAsString());
   auto add = [&](const std::string& label, const std::string& value) {
-    result.fields.emplace_back(label, one_line(value));
+    result.fields.emplace_back(label, one_line(unversioned_name(value)));
   };
   clang::PrintingPolicy policy = context.getPrintingPolicy();
   policy.TerseOutput = true;
@@ -218,7 +220,7 @@ std::optional<VariableDefinition> variable_definition(
   if (query.substr(0, 3) == "__Z") query.remove_prefix(1);
   for (const auto* decl : declarations(context)) {
     if (decl->isInvalidDecl()) continue;
-    if (decl->getQualifiedNameAsString() != query &&
+    if (unversioned_name(decl->getQualifiedNameAsString()) != query &&
         mangled_name(context, decl) != query)
       continue;
     const auto* variable = llvm::dyn_cast<clang::VarDecl>(decl);
@@ -236,7 +238,7 @@ std::optional<VariableDefinition> variable_definition(
     result.mangled = mangled_name(context, variable);
     const auto* definition = variable->getDefinition();
     result.defined = definition && !definition->isInvalidDecl();
-    result.declaration = variable->getQualifiedNameAsString();
+    result.declaration = unversioned_name(variable->getQualifiedNameAsString());
     auto policy = context.getPrintingPolicy();
     policy.FullyQualifiedName = true;
     variable->getType().getAsStringInternal(result.declaration, policy);
@@ -255,7 +257,7 @@ void discard_failed_variable_definition(clang::ASTContext& context,
   if (query.substr(0, 3) == "__Z") query.remove_prefix(1);
   for (const auto* decl : declarations(context)) {
     const auto* variable = llvm::dyn_cast<clang::VarDecl>(decl);
-    if (!variable || (variable->getQualifiedNameAsString() != query &&
+    if (!variable || (unversioned_name(variable->getQualifiedNameAsString()) != query &&
                       mangled_name(context, variable) != query))
       continue;
     if (auto* definition =
@@ -301,7 +303,7 @@ std::vector<SymbolDescription> describe_symbols(clang::ASTContext& context,
   const bool mangled_query =
       query.substr(0, 2) == "_Z" || query.substr(0, 3) == "__Z";
   for (const auto* decl : all) {
-    bool match = decl->getQualifiedNameAsString() == query;
+    bool match = unversioned_name(decl->getQualifiedNameAsString()) == query;
     if (!match && mangled_query) {
       const auto symbol = mangled_name(context, decl);
       match = !symbol.empty() && (symbol == query
@@ -323,7 +325,7 @@ std::vector<std::string> user_symbol_names(clang::ASTContext& context) {
   const auto& sources = context.getSourceManager();
   for (const auto* decl : declarations(context)) {
     if (decl->getLocation().isInvalid() || sources.isInSystemHeader(decl->getLocation())) continue;
-    const auto name = decl->getQualifiedNameAsString();
+    const auto name = unversioned_name(decl->getQualifiedNameAsString());
     if (!name.empty() && name.rfind("__", 0) != 0) names.insert(name);
   }
   return {names.begin(), names.end()};
@@ -387,7 +389,7 @@ std::vector<std::string> symbol_reference_sites(clang::ASTContext& context, cons
     bool TraverseDecl(clang::Decl* decl) {
       if (!decl || context.getSourceManager().isInSystemHeader(decl->getLocation())) return true;
       const auto previous = caller;
-      if (const auto* function = llvm::dyn_cast<clang::FunctionDecl>(decl)) caller = function->getQualifiedNameAsString();
+      if (const auto* function = llvm::dyn_cast<clang::FunctionDecl>(decl)) caller = unversioned_name(function->getQualifiedNameAsString());
       const bool ok = clang::RecursiveASTVisitor<Visitor>::TraverseDecl(decl);
       caller = previous;
       return ok;
