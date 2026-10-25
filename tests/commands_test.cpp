@@ -409,6 +409,18 @@ TEST(Grammar, DefineVariableUsesAnInitializerBlockAndSupportsMultilineInput) {
     EXPECT_FALSE(parse_command(input).error.empty()) << input;
 }
 
+TEST(Grammar, DefineCallableAcceptsSignaturesAndMultilineBodies) {
+  const auto cmd =
+      parse_command("%define int demo::Worker::run(int x) const & noexcept cpp`\nreturn x + 1;\n`");
+  EXPECT_TRUE(cmd.error.empty()) << cmd.error;
+  ASSERT_TRUE(cmd.signature);
+  EXPECT_EQ(cmd.signature->value, "int demo::Worker::run(int x) const & noexcept");
+  ASSERT_TRUE(cmd.code);
+  EXPECT_EQ(cmd.code->value, "\nreturn x + 1;\n");
+  EXPECT_TRUE(wants_more_input("%define f(int x) cpp`\nreturn x;"));
+  EXPECT_TRUE(parse_command("%define f() cpp``").error.empty());
+}
+
 TEST(Grammar, LibraryAndSymbolInspectionAcceptsQuotedNames) {
   EXPECT_EQ(parse_command("%libs").kind, CommandKind::Libs);
   EXPECT_TRUE(parse_command("%libs").error.empty());

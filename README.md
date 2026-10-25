@@ -337,6 +337,51 @@ then compiled and run by the interpreter.
   resolved by `%define` before loading that single supplied library.
   See [the configured static-member example](examples/static-members/README.md)
   for numbered startup scripts, a native library, and recorded Mac/Linux runs.
+- ``%define <signature> cpp`body` `` - define a missing free function or static/
+  non-static method and publish its actual JIT address before `%lib` loads a
+  library which imports it. Supply the qualified name, parameter types and
+  names, and member `const`/`volatile`/reference qualifiers; the return type is
+  optional. Clang derives the return type, parameter declarators, exception
+  specification and mangled name from the existing declaration. For example:
+
+  ```text
+  %add include/api.hpp
+  %define app::adjust(int x) cpp`return x + 7;`
+  %define app::adjust(double x) cpp`return x * 2.5;`
+  %define app::Worker::hidden(int x) const & noexcept cpp`
+  return this->value_ + x;
+  `
+  %define app::Worker::scale(int x) cpp`return x * 3;`
+  %lib supplied_consumer
+  ```
+
+  Bodies contain ordinary C++ statements, with `this` and direct access to
+  private members inside real member definitions. Clang compiles the actual
+  function/method, preserving native C++ argument and return conventions,
+  including references, function pointers, aggregate and `std::string` values.
+  Overloads are selected by canonical parameter types and member qualifiers.
+  Unnamed parameters get `arg0`, `arg1`, etc.; use qualified, accessible type
+  names in signatures. The declaration determines `noexcept`, even if omitted
+  from the command. Empty bodies are allowed for `void` functions.
+
+  As with variables, the user supplies no shim and never rebuilds or relinks
+  the supplied library: generated temporary native metadata exports the JIT
+  address, while imports in the original file remain undefined. Define
+  dependencies first; unresolved bodies fail without poisoning later inputs.
+  Existing definitions and resolved native implementations are rejected.
+  Constructors, destructors, operators, templates, constexpr functions,
+  variadic functions, virtual methods (including vtables/thunks), internal
+  linkage, and non-default calling conventions are unsupported and report
+  errors. Signature parsing supports simple qualified identifiers, ordinary
+  parameter declarators and optional `const`, `volatile`, `&`, `&&`, `noexcept`;
+  computed exception specifications and other suffixes are rejected.
+  If publication fails after compilation, the error states that the callable
+  remains defined in the session. Native consumers must stay within the
+  interpreter session's lifetime and use compatible headers, target and C++
+  standard-library ABI.
+  See [the configured callable example](examples/unresolved-callables/README.md)
+  for one supplied library, numbered startup scripts, loader-failure checks,
+  native-call verification and unchanged-file hashes on Mac and Linux.
 - `%symbols [all] [undefined] [lib <regex>] [name <regex>]` - list loaded native exports
   and emitted session functions/globals as demangled, fully qualified C++ names
   only, one per line, with no columns or counts.
@@ -374,7 +419,7 @@ hooks     := "%hooks"
 info      := "%info" symbol
 syminfo   := "%syminfo" symbol
 demangle  := "%demangle" symbol
-define    := "%define" symbol "cpp`" initializer "`"
+define    := "%define" (symbol | signature) "cpp`" (initializer | body) "`"
 symbols   := "%symbols" [ "all" ] [ "undefined" ] [ "lib" regex ] [ "name" regex ]
 add-path  := "%add-path" path { ":" path }     blanks around ':' are allowed
 help      := "%help"

@@ -1,0 +1,4 @@
+std::cout << (callable_demo::native_probe() == 1 ? "NATIVE_CALLABLES_PASS" : "NATIVE_CALLABLES_FAIL") << '\n';
+std::cout << (callable_demo::adjust(5) == 12 && callable_demo::adjust(2.0) == 5.0 ? "JIT_OVERLOADS_PASS" : "JIT_OVERLOADS_FAIL") << '\n';
+std::cout << (callable_demo::Worker(40).run(2) == 42 && callable_demo::Worker::run_static(7) == 21 ? "PRIVATE_METHODS_PASS" : "PRIVATE_METHODS_FAIL") << '\n';
+%quit

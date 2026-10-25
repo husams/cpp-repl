@@ -1,0 +1,10 @@
+%define callable_demo::adjust(int x) cpp`return x + 7;`
+%define callable_demo::adjust(double x) cpp`return x * 2.5;`
+%define callable_demo::transform(callable_demo::Value v, double factor) cpp`
+return {v.a * factor, v.b * factor, v.c * factor, v.d * factor};
+`
+%define callable_demo::decorate(const std::string& text) cpp`return "[" + text + "]";`
+%define callable_demo::Worker::hidden(int x) const & noexcept cpp`
+return this->value_ + x;
+`
+%define callable_demo::Worker::scale(int x) cpp`return x * 3;`

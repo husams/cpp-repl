@@ -100,6 +100,7 @@ class CppInterpreter {
   // Existing session/library definitions are never replaced.
   bool define_variable(const std::string& name, const std::string& initializer,
                         std::string& error);
+  bool define_callable(const std::string& signature, const std::string& body, std::string& error);
   // Defined native exports and emitted session functions/globals. Regex filters
   // search full library paths (or <session>) and demangled qualified names.
   // System libraries are hidden unless include_system is true.

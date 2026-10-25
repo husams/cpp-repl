@@ -276,6 +276,22 @@ void discard_failed_variable_definition(clang::ASTContext& context,
   }
 }
 
+void discard_failed_callable_definition(clang::ASTContext& context, const std::string& mangled) {
+  for (const auto* decl : declarations(context)) {
+    const auto* function = llvm::dyn_cast<clang::FunctionDecl>(decl);
+    if (!function || mangled_name(context, function) != mangled) {
+      continue;
+    }
+    // Parse failure retains the redeclaration chain. Keep a valid prototype:
+    // leaving an invalid redeclaration poisons later calls after a retry.
+    const_cast<clang::FunctionDecl*>(function)->setInvalidDecl(false);
+    if (auto* body = const_cast<clang::FunctionDecl*>(function->getDefinition())) {
+      body->setBody(nullptr);
+      body->setInvalidDecl(false);
+    }
+  }
+}
+
 std::vector<SymbolDescription> describe_symbols(clang::ASTContext& context,
                                                 std::string_view query) {
   if (query.substr(0, 2) == "::") query.remove_prefix(2);

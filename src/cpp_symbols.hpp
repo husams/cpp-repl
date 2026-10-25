@@ -39,6 +39,7 @@ std::optional<VariableDefinition> variable_definition(
 // Called only after a failed definition of a previously declaration-only name.
 void discard_failed_variable_definition(clang::ASTContext& context,
                                         std::string_view name);
+void discard_failed_callable_definition(clang::ASTContext& context, const std::string& mangled);
 
 // User function/global declarations for native kind refinement and JIT listing.
 std::vector<RuntimeDeclaration> runtime_symbol_declarations(

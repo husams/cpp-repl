@@ -335,10 +335,16 @@ void parse_hook(std::string_view text, ParsedCommand& cmd) {
         "missing variable name" : "missing function signature", {cmd.arg_begin, marker});
     return;
   }
-  if (cmd.kind == CommandKind::DefineVariable)
-    parse_inspection_operand(text.substr(0, end + 1), cmd, true, cmd.arg_begin);
-  else
+  if (cmd.kind == CommandKind::DefineVariable) {
+    const auto operand = text.substr(cmd.arg_begin, end + 1 - cmd.arg_begin);
+    if (operand.find('(') != std::string_view::npos) {
+      cmd.signature = Operand{std::string(operand), {cmd.arg_begin, end + 1}};
+    } else {
+      parse_inspection_operand(text.substr(0, end + 1), cmd, true, cmd.arg_begin);
+    }
+  } else {
     parse_signature(text, cmd.arg_begin, end + 1, cmd);
+  }
   if (!cmd.error.empty()) return;
   const std::size_t begin = marker + 4;
   // Backticks inside C++ strings, raw strings, chars and comments are data.
@@ -360,9 +366,10 @@ void parse_hook(std::string_view text, ParsedCommand& cmd) {
     return;
   }
   cmd.code = Operand{std::string(text.substr(begin, close - begin)), {begin, close}};
-  if (cmd.kind == CommandKind::DefineVariable &&
-      cmd.code->value.find_first_not_of(kBlank) == std::string::npos)
+  if (cmd.kind == CommandKind::DefineVariable && !cmd.signature &&
+      cmd.code->value.find_first_not_of(kBlank) == std::string::npos) {
     set_error(cmd, "missing C++ initializer", {begin, close});
+  }
   const std::size_t next = skip_blank(text, close + 1);
   if (next < text.size()) set_error(cmd, "unexpected text after cpp` block", {next, text.size()});
 }
@@ -400,8 +407,8 @@ const std::vector<CommandInfo>& command_table() {
        "show symbol definitions, imports and reference sites"},
       {"%demangle", CommandKind::Demangle, " <symbol>",
        "print a readable C++ symbol name without loading its library"},
-      {"%define", CommandKind::DefineVariable, " <symbol> cpp`<initializer>`",
-       "define missing variable storage using its declared C++ type"},
+      {"%define", CommandKind::DefineVariable, " <symbol or signature> cpp`<initializer or body>`",
+       "define missing variable storage or a callable before loading a library"},
       {"%symbols", CommandKind::Symbols, " [all] [undefined] [lib <regex>] [name <regex>]",
        "list loaded symbol names (all includes system libraries)"},
       {"%mock", CommandKind::Mock, " <signature> [in <caller>] cpp`<body>`",

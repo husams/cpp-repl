@@ -73,6 +73,113 @@ TEST_F(CppInterpreterTest,
   EXPECT_EQ(cpp_->evaluate("tls_publication::effects"), "(int) 0\n");
 }
 
+TEST_F(CppInterpreterTest, DefinesCallablesBeforeLoadingOneUnchangedNativeLibrary) {
+  EXPECT_EQ(dlopen(UNRESOLVED_CALLABLES_LIBRARY, RTLD_NOW | RTLD_GLOBAL), nullptr);
+  ASSERT_TRUE(cpp_->add_source(UNRESOLVED_CALLABLES_HEADER).ok);
+  std::string error;
+  for (const auto& item : std::vector<std::pair<std::string, std::string>>{
+           {"unresolved_callables::adjust(int x)", "return x + 7;"},
+           {"unresolved_callables::adjust(double x)", "return x * 2.5;"},
+           {"unresolved_callables::transform(unresolved_callables::Value v, double factor)",
+            "return {v.a * factor, v.b * factor, v.c * factor, v.d * factor};"},
+           {"unresolved_callables::decorate(const std::string& s)", "return \"[\" + s + \"]\";"},
+           {"unresolved_callables::Worker::hidden(int x) const & noexcept",
+            "return this->value_ + x;"},
+           {"unresolved_callables::Worker::scale(int x)", "return x * 3;"}}) {
+    ASSERT_TRUE(cpp_->define_callable(item.first, item.second, error)) << error;
+  }
+  void* handle = dlopen(UNRESOLVED_CALLABLES_LIBRARY, RTLD_NOW | RTLD_GLOBAL);
+  ASSERT_NE(handle, nullptr) << dlerror();
+  auto probe = reinterpret_cast<int (*)()>(dlsym(handle, "callable_native_probe"));
+  ASSERT_NE(probe, nullptr);
+  EXPECT_EQ(probe(), 1); // Executes precompiled native callers, not JIT callers.
+  EXPECT_EQ(cpp_->load_library(UNRESOLVED_CALLABLES_LIBRARY), "");
+  EXPECT_EQ(cpp_->evaluate("unresolved_callables::callable_native_probe()"), "(int) 1\n");
+  EXPECT_EQ(cpp_->evaluate("unresolved_callables::adjust(5)"), "(int) 12\n");
+  EXPECT_EQ(cpp_->evaluate(
+                "unresolved_callables::transform(unresolved_callables::Value{1,2,3,4}, 2.5).d"),
+            "(double) 10.0\n");
+  ASSERT_TRUE(cpp_->set_hook(
+      HookKind::Mock,
+      "unresolved_callables::transform(unresolved_callables::Value v, double factor)",
+      "return {v.a * factor, v.b * factor, v.c * factor, 99};", error))
+      << error;
+  EXPECT_EQ(probe(), 0);
+  EXPECT_EQ(cpp_->evaluate(
+                "unresolved_callables::transform(unresolved_callables::Value{1,2,3,4}, 2.5).d"),
+            "(double) 99.0\n");
+  ASSERT_TRUE(cpp_->restore(
+      "unresolved_callables::transform(unresolved_callables::Value v, double factor)", error))
+      << error;
+  EXPECT_EQ(probe(), 1);
+  EXPECT_FALSE(cpp_->define_callable("unresolved_callables::adjust(int x)", "return 0;", error));
+  EXPECT_NE(error.find("already"), std::string::npos);
+  EXPECT_FALSE(
+      cpp_->define_callable("unresolved_callables::Worker::run(int x) const", "return 0;", error));
+  EXPECT_NE(error.find("existing implementation"), std::string::npos);
+  // Handles stay loaded while native exports refer to session code.
+}
+
+TEST_F(CppInterpreterTest, CallableDefinitionsRecoverAndRejectUnsupportedTargets) {
+  ASSERT_TRUE(cpp_->execute(
+      "namespace callable_recovery { int pending(int); int dependency(int); int absent(int); "
+      "int existing(int x) { return x; } static int local(int); "
+      "int variadic(int, ...); struct A { virtual int virtual_method(int); }; }"));
+  std::string error;
+  EXPECT_FALSE(
+      cpp_->define_callable("callable_recovery::pending(int x)", "return no_such_name;", error));
+  ASSERT_TRUE(cpp_->define_callable("callable_recovery::pending(int x)", "return x * 2;", error))
+      << error;
+  EXPECT_EQ(cpp_->evaluate("callable_recovery::pending(21)"), "(int) 42\n");
+  EXPECT_FALSE(
+      cpp_->define_callable("callable_recovery::dependency(int x)", "return absent(x);", error));
+  ASSERT_TRUE(cpp_->define_callable("callable_recovery::dependency(int x)", "return x;", error))
+      << error;
+  for (const char* signature :
+       {"callable_recovery::existing(int x)", "callable_recovery::local(int x)",
+        "callable_recovery::variadic(int x, ...)", "callable_recovery::A::virtual_method(int x)",
+        "callable_recovery::unknown(int x)", "callable_recovery::A::A()",
+        "callable_recovery::A::operator()(int x)"}) {
+    EXPECT_FALSE(cpp_->define_callable(signature, "return 0;", error)) << signature;
+    EXPECT_FALSE(error.empty()) << signature;
+  }
+}
+
+TEST_F(CppInterpreterTest, CallableDefinitionsPreserveReferencesPointersAndCLinkage) {
+  ASSERT_TRUE(cpp_->execute("#include <string>\n"));
+  ASSERT_TRUE(cpp_->execute("namespace callable_types { int storage = 42; int& reference(); "
+                            "int (*callback())(int); int identity(int x) { return x; } "
+                            "int invoke(int (*)(int), int); struct Ref { int get() &&; }; "
+                            "extern \"C\" int supplied_c_function(int); "
+                            "extern \"C\" std::string supplied_string_value(std::string); }"));
+  std::string error;
+  ASSERT_TRUE(cpp_->define_callable("callable_types::reference()", "return storage;", error))
+      << error;
+  ASSERT_TRUE(cpp_->define_callable("callable_types::callback()", "return identity;", error))
+      << error;
+  ASSERT_TRUE(cpp_->define_callable("callable_types::invoke(int (*f)(int), int result)",
+                                    "return f(result);", error))
+      << error;
+  ASSERT_TRUE(cpp_->define_callable("callable_types::Ref::get() &&", "return 9;", error)) << error;
+  ASSERT_TRUE(
+      cpp_->define_callable("callable_types::supplied_c_function(int x)", "return x + 1;", error))
+      << error;
+  EXPECT_EQ(cpp_->evaluate("&callable_types::reference() == &callable_types::storage"),
+            "(bool) true\n");
+  EXPECT_EQ(cpp_->evaluate("callable_types::invoke(callable_types::callback(), 17)"), "(int) 17\n");
+  EXPECT_EQ(cpp_->evaluate("callable_types::Ref{}.get()"), "(int) 9\n");
+  auto native = reinterpret_cast<int (*)(int)>(dlsym(RTLD_DEFAULT, "supplied_c_function"));
+  ASSERT_NE(native, nullptr);
+  EXPECT_EQ(native(41), 42);
+  ASSERT_TRUE(cpp_->define_callable("callable_types::supplied_string_value(std::string s)",
+                                    "return s + \"!\";", error))
+      << error;
+  auto native_string =
+      reinterpret_cast<std::string (*)(std::string)>(dlsym(RTLD_DEFAULT, "supplied_string_value"));
+  ASSERT_NE(native_string, nullptr);
+  EXPECT_EQ(native_string("native"), "native!");
+}
+
 TEST_F(CppInterpreterTest,
        DefinesStorageBeforeLoadingASingleUndefinedLibrary) {
   LibraryManager libs;
@@ -199,6 +306,25 @@ TEST_F(CppInterpreterTest,
   EXPECT_NE(error.find("existing storage"), std::string::npos) << error;
   EXPECT_EQ(cpp_->evaluate("int(hook_library::StaticStorage::total)"),
             "(int) 37\n");
+}
+
+TEST(CppCallables, DefinitionsAndRecoveryHonorSessionCompilerFlags) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->set_compile_options({"-DCALLABLE_VALUE=42"}, error)) << error;
+  ASSERT_TRUE(
+      cpp->execute("namespace scoped_callables { int answer(); void notify(); int effects = 0; }"));
+  EXPECT_FALSE(cpp->define_callable("scoped_callables::answer()", "return unknown_value;", error));
+  ASSERT_TRUE(cpp->define_callable("scoped_callables::answer()", "return CALLABLE_VALUE;", error))
+      << error;
+  ASSERT_TRUE(
+      cpp->define_callable("scoped_callables::notify()", "effects = CALLABLE_VALUE;", error))
+      << error;
+  EXPECT_EQ(cpp->evaluate("scoped_callables::effects"), "(int) 0\n");
+  ASSERT_TRUE(cpp->execute("scoped_callables::notify();"));
+  EXPECT_EQ(cpp->evaluate("scoped_callables::effects"), "(int) 42\n");
+  EXPECT_EQ(cpp->evaluate("scoped_callables::answer()"), "(int) 42\n");
 }
 
 TEST(CppVariables, FailedStaticDefinitionsRecoverWithSessionCompilerFlags) {

@@ -6,8 +6,8 @@
 
 namespace example {
 
-// Publish existing JIT storage to dlopen's symbol namespace. Each generated
-// image contains an absolute export, not a second allocation or initializer.
+// Publish JIT data or code addresses to dlopen's symbol namespace. Each
+// generated image contains only an absolute export to the existing address.
 class NativeSymbolExports {
  public:
   NativeSymbolExports() = default;

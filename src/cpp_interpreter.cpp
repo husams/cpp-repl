@@ -405,6 +405,48 @@ std::vector<ActiveHook> CppInterpreter::active_hooks() const {
   return hooks_.active();
 }
 
+bool CppInterpreter::define_callable(const std::string& signature, const std::string& body,
+                                     std::string& error) {
+  error.clear();
+  if (global_options_changed_ && !compile_scope_active_) {
+    return with_compile_options(
+        source_compile_options(""), [&] { return define_callable(signature, body, error); }, error);
+  }
+  const auto callable = hooks_.definition(signature, error);
+  if (!callable) {
+    return false;
+  }
+  auto address = interp_->getSymbolAddress(callable->mangled);
+  if (address && address->getValue()) {
+    error = "function already resolves to an existing implementation: " + signature;
+    return false;
+  }
+  if (!address) {
+    llvm::consumeError(address.takeError());
+  }
+  if (!native_exports_->prepare(error)) {
+    return false;
+  }
+  if (!execute("__attribute__((used)) " + callable->declaration + " {\n" + body + "\n}\n")) {
+    discard_failed_callable_definition(interp_->getASTContext(), callable->mangled);
+    error = "could not define callable: " + signature;
+    return false;
+  }
+  auto implementation = interp_->getSymbolAddress(callable->mangled);
+  if (!implementation || !implementation->getValue()) {
+    if (!implementation) {
+      llvm::consumeError(implementation.takeError());
+    }
+    error = "callable is defined, but its address is unavailable: " + signature;
+    return false;
+  }
+  if (!native_exports_->publish(callable->mangled, implementation->getValue(), error)) {
+    error = "callable is defined in the session, but native publication failed: " + error;
+    return false;
+  }
+  return true;
+}
+
 bool CppInterpreter::define_variable(const std::string& name,
                                      const std::string& initializer,
                                      std::string& error) {

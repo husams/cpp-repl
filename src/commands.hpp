@@ -33,7 +33,7 @@ namespace example {
 //   class     := "%class" [ name ]               name := ident { "::" ident }
 //   info      := "%info" symbol                  qualified or mangled name
 //   demangle  := "%demangle" symbol              mangled or plain name
-//   define    := "%define" symbol "cpp`" initializer "`"
+//   define    := "%define" (symbol | signature) "cpp`" (initializer | body) "`"
 //   symbols   := "%symbols" [ "all" ] [ "undefined" ] [ "lib" regex ] [ "name" regex ]
 //   hook      := ("%mock" | "%pre" | "%post") signature [ "in" signature ] "cpp`" body "`"
 //   restore   := "%restore" [ signature [ "in" signature ] ]

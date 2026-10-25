@@ -1,0 +1,42 @@
+Darwin arm64
+Verified: 2026-10-25T14:17:38Z
+SUPPLIED_LIBRARY_COUNT_PASS: 1
+UNDEFINED IN FINAL CONSUMER LIBRARY:
+callable_demo::Worker::scale(int) U 0 0
+callable_demo::adjust(double) U 0 0
+callable_demo::adjust(int) U 0 0
+callable_demo::decorate(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&) U 0 0
+callable_demo::transform(callable_demo::Value, double) U 0 0
+callable_demo::Worker::hidden(int) const & U 0 0
+
+LOADING WITHOUT DEFINITIONS:
+EXPECTED_LOAD_FAILURE: dlopen(/Users/husam/workspace/replxx-example/examples/unresolved-callables/build/libcallable_consumer.dylib, 0x000A): symbol not found in flat namespace '__ZN13callable_demo6Worker5scaleEi'
+
+LOADING WITH REPL DEFINITIONS:
+cpp-repl (LLVM 22.1.8). Type %help for commands.
+Compile options: /Users/husam/workspace/replxx-example/examples/unresolved-callables/build/compile_commands.json
+added: /Users/husam/workspace/replxx-example/examples/unresolved-callables/build
+added: /Users/husam/workspace/replxx-example/examples/unresolved-callables/include/api.hpp
+callable_demo::Worker::hidden(int) const &
+callable_demo::Worker::run(int) const
+callable_demo::Worker::run_static(int)
+callable_demo::Worker::scale(int)
+callable_demo::adjust(double)
+callable_demo::adjust(int)
+callable_demo::decorate(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)
+callable_demo::transform(callable_demo::Value, double)
+preloaded: /Users/husam/workspace/replxx-example/examples/unresolved-callables/.cpp-repl/01-header.repl
+defined: callable_demo::adjust(int x)
+defined: callable_demo::adjust(double x)
+defined: callable_demo::transform(callable_demo::Value v, double factor)
+defined: callable_demo::decorate(const std::string& text)
+defined: callable_demo::Worker::hidden(int x) const & noexcept
+defined: callable_demo::Worker::scale(int x)
+preloaded: /Users/husam/workspace/replxx-example/examples/unresolved-callables/.cpp-repl/02-definitions.repl
+loaded: /Users/husam/workspace/replxx-example/examples/unresolved-callables/build/libcallable_consumer.dylib
+preloaded: /Users/husam/workspace/replxx-example/examples/unresolved-callables/.cpp-repl/03-library.repl
+NATIVE_CALLABLES_PASS
+JIT_OVERLOADS_PASS
+PRIVATE_METHODS_PASS
+
+CONSUMER_UNCHANGED_PASS: d79176061ec7afd9bafc3fdae1408adf3a8a7f597e7f29f0698ee1d4392868e1  build/libcallable_consumer.dylib

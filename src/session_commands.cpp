@@ -57,11 +57,11 @@ CommandResult execute_command(LibraryManager& libs, CppInterpreter& cpp,
   }
   if (cmd.kind == CommandKind::DefineVariable && cmd.error.empty()) {
     std::string error;
-    const bool ok =
-        cpp.define_variable(cmd.symbol->value, cmd.code->value, error);
-    out << color_inspection(
-        ok ? "defined: " + cmd.symbol->value + '\n' : "error: " + error + '\n',
-        inspection_colors_enabled());
+    const auto& name = cmd.signature ? cmd.signature->value : cmd.symbol->value;
+    const bool ok = cmd.signature ? cpp.define_callable(name, cmd.code->value, error)
+                                  : cpp.define_variable(name, cmd.code->value, error);
+    out << color_inspection(ok ? "defined: " + name + '\n' : "error: " + error + '\n',
+                            inspection_colors_enabled());
     return {true, ok};
   }
   if ((cmd.kind == CommandKind::CompileOpts ||

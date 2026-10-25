@@ -1,0 +1,42 @@
+Linux x86_64
+Verified: 2026-10-25T14:17:38Z
+SUPPLIED_LIBRARY_COUNT_PASS: 1
+UNDEFINED IN FINAL CONSUMER LIBRARY:
+callable_demo::adjust(double) U
+callable_demo::adjust(int) U
+callable_demo::Worker::scale(int) U
+callable_demo::decorate(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > const&) U
+callable_demo::transform(callable_demo::Value, double) U
+callable_demo::Worker::hidden(int) const & U
+
+LOADING WITHOUT DEFINITIONS:
+EXPECTED_LOAD_FAILURE: /home/husam/cpp-repl-examples/unresolved-callables/build/libcallable_consumer.so: undefined symbol: _ZN13callable_demo6adjustEd
+
+LOADING WITH REPL DEFINITIONS:
+cpp-repl (LLVM 21.1.8). Type %help for commands.
+Compile options: /home/husam/cpp-repl-examples/unresolved-callables/build/compile_commands.json
+added: /home/husam/cpp-repl-examples/unresolved-callables/build
+added: /home/husam/cpp-repl-examples/unresolved-callables/include/api.hpp
+callable_demo::Worker::hidden(int) const &
+callable_demo::Worker::run(int) const
+callable_demo::Worker::run_static(int)
+callable_demo::Worker::scale(int)
+callable_demo::adjust(double)
+callable_demo::adjust(int)
+callable_demo::decorate(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char>> const&)
+callable_demo::transform(callable_demo::Value, double)
+preloaded: /home/husam/cpp-repl-examples/unresolved-callables/.cpp-repl/01-header.repl
+defined: callable_demo::adjust(int x)
+defined: callable_demo::adjust(double x)
+defined: callable_demo::transform(callable_demo::Value v, double factor)
+defined: callable_demo::decorate(const std::string& text)
+defined: callable_demo::Worker::hidden(int x) const & noexcept
+defined: callable_demo::Worker::scale(int x)
+preloaded: /home/husam/cpp-repl-examples/unresolved-callables/.cpp-repl/02-definitions.repl
+loaded: /home/husam/cpp-repl-examples/unresolved-callables/build/libcallable_consumer.so
+preloaded: /home/husam/cpp-repl-examples/unresolved-callables/.cpp-repl/03-library.repl
+NATIVE_CALLABLES_PASS
+JIT_OVERLOADS_PASS
+PRIVATE_METHODS_PASS
+
+CONSUMER_UNCHANGED_PASS: 449ed4db9d344b4875725107370f865b7f39dbcd625f03fa32f8615f9248b2ae  build/libcallable_consumer.so
