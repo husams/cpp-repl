@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "cpp_inspect.hpp"
 #include "function_hooks.hpp"
 
 namespace clang {
@@ -95,6 +96,8 @@ class CppInterpreter {
   // and sets `error` if `name` is not a class.
   std::vector<std::string> class_names();
   std::optional<std::string> describe_class(const std::string& name, std::string& error);
+  std::optional<std::string> describe_members(const std::string& name, MemberKind kind,
+                                              MemberOptions options, std::string& error);
   // Symbol metadata (all overloads for a name) and available JIT addresses.
   // Does not parse/evaluate user expressions or call the inspected symbol.
   std::optional<std::string> symbol_info(const std::string& name, std::string& error);
