@@ -447,6 +447,39 @@ def main():
                       status == 0 and "error:" not in plain(out["start"])
                       and "(int) 1" in plain(out["probe"]))
 
+        if len(sys.argv) > 5:
+            with tempfile.TemporaryDirectory(dir=cwd) as virtual_home:
+                project = os.path.join(virtual_home, "project")
+                scripts = os.path.join(project, ".cpp-repl")
+                nested = os.path.join(project, "nested")
+                os.makedirs(scripts)
+                os.makedirs(nested)
+                with open(os.path.join(scripts, "1-header.repl"), "w", encoding="utf8") as f:
+                    f.write(f'%add "{sys.argv[5]}"\n')
+                with open(os.path.join(scripts, "2-definitions.repl"), "w", encoding="utf8") as f:
+                    f.write('%define virtual_fixture::Service::compute(int x) const cpp`\nreturn seed_ + x;\n`\n'
+                            '%define virtual_fixture::Implementation::compute(int x) const cpp`return bias_ + x*2;`\n'
+                            '%define virtual_fixture::NativeTable::compute(int x) const cpp`return bias_ + x*3;`\n'
+                            '%define virtual_fixture::VirtualBase::compute(int x) const cpp`return bias_ + x*4;`\n'
+                            '%define virtual_fixture::Covariant::self() cpp`return this;`\n')
+                with open(os.path.join(scripts, "10-library.repl"), "w", encoding="utf8") as f:
+                    f.write(f'%lib "{sys.argv[4]}"\n')
+                out, status = session(binary, nested, [
+                    ("non_pure", b"virtual_fixture::virtual_non_pure_probe(2)\r", True),
+                    ("override", b"virtual_fixture::virtual_override_probe(3)\r", True),
+                    ("rtti", b"virtual_fixture::virtual_rtti_probe()\r", True),
+                    ("virtual_base", b"virtual_fixture::virtual_base_probe(2)\r", True),
+                    ("covariant", b"virtual_fixture::virtual_covariant_probe()\r", True),
+                    ("quit", b"%quit\r"),
+                ], home=virtual_home)
+                check("startup supplies non-pure virtual methods, overrides, tables and thunks before native loading",
+                      status == 0 and "error:" not in plain(out["start"])
+                      and "(int) 42" in plain(out["non_pure"])
+                      and "(int) 106" in plain(out["override"])
+                      and "(int) 1" in plain(out["rtti"])
+                      and "(int) 308" in plain(out["virtual_base"])
+                      and "(int) 1" in plain(out["covariant"]))
+
         with tempfile.TemporaryDirectory(dir=cwd) as preload_home:
             with open(os.path.join(preload_home, "first header.hpp"), "w", encoding="utf8") as f:
                 f.write("int startup_input_value = STARTUP_VALUE;\n")

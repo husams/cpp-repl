@@ -1,0 +1,36 @@
+Linux x86_64
+Verified: 2026-10-25T15:50:33Z
+SUPPLIED_LIBRARY_COUNT_PASS: 1
+UNDEFINED IN FINAL LIBRARY:
+virtual_demo::Implementation::compute(int) const U
+virtual_demo::Service::compute(int) const U
+typeinfo for virtual_demo::Implementation U
+vtable for virtual_demo::Implementation U
+vtable for virtual_demo::Service U
+
+LOADING WITHOUT DEFINITIONS:
+EXPECTED_LOAD_FAILURE: /tmp/cpp-repl-virtual-definitions.nTJj67/source/examples/unresolved-virtuals/build/libvirtual_consumer.so: undefined symbol: _ZTVN12virtual_demo7ServiceE
+
+LOADING WITH REPL DEFINITIONS:
+cpp-repl (LLVM 21.1.8). Type %help for commands.
+Compile options: /tmp/cpp-repl-virtual-definitions.nTJj67/source/examples/unresolved-virtuals/build/compile_commands.json
+added: /tmp/cpp-repl-virtual-definitions.nTJj67/source/examples/unresolved-virtuals/build
+added: /tmp/cpp-repl-virtual-definitions.nTJj67/source/examples/unresolved-virtuals/include/api.hpp
+virtual_demo::API::compute(int) const
+virtual_demo::Implementation::compute(int) const
+virtual_demo::Service::compute(int) const
+virtual_demo::call_api(virtual_demo::API const&, int)
+virtual_demo::call_service(virtual_demo::Service const&, int)
+preloaded: /tmp/cpp-repl-virtual-definitions.nTJj67/source/examples/unresolved-virtuals/.cpp-repl/01-header.repl
+defined: virtual_demo::Service::compute(int x) const
+preloaded: /tmp/cpp-repl-virtual-definitions.nTJj67/source/examples/unresolved-virtuals/.cpp-repl/02-non-pure.repl
+defined: virtual_demo::Implementation::compute(int x) const
+preloaded: /tmp/cpp-repl-virtual-definitions.nTJj67/source/examples/unresolved-virtuals/.cpp-repl/03-override.repl
+loaded: /tmp/cpp-repl-virtual-definitions.nTJj67/source/examples/unresolved-virtuals/build/libvirtual_consumer.so
+preloaded: /tmp/cpp-repl-virtual-definitions.nTJj67/source/examples/unresolved-virtuals/.cpp-repl/04-library.repl
+NON_PURE_VIRTUAL_PASS
+VIRTUAL_OVERRIDE_PASS
+RTTI_PASS
+DIRECT_CALLS_PASS
+
+CONSUMER_UNCHANGED_PASS: 600068f6516d1e649ca6f0b13abcf95bdc21da48511d6aef27517f7c12be68f0  build/libvirtual_consumer.so

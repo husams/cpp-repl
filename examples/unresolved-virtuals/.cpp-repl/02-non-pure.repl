@@ -1,0 +1,4 @@
+// Ordinary non-pure virtual method; its vtable is also emitted by Clang.
+%define virtual_demo::Service::compute(int x) const cpp`
+return this->seed_ + x;
+`

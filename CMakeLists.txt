@@ -163,6 +163,15 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
   gtest_discover_tests(library_dependency_test)
 
   add_executable(cpp_interpreter_test tests/cpp_interpreter_test.cpp)
+  add_library(unresolved_virtuals_test_library SHARED tests/fixtures/unresolved_virtuals.cpp)
+  target_compile_options(unresolved_virtuals_test_library PRIVATE -fno-inline)
+  if(APPLE)
+    target_link_options(unresolved_virtuals_test_library PRIVATE "LINKER:-undefined,dynamic_lookup")
+  endif()
+  target_compile_definitions(cpp_interpreter_test PRIVATE
+    UNRESOLVED_VIRTUALS_LIBRARY="$<TARGET_FILE:unresolved_virtuals_test_library>"
+    UNRESOLVED_VIRTUALS_HEADER="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/unresolved_virtuals.hpp")
+  add_dependencies(cpp_interpreter_test unresolved_virtuals_test_library)
   add_library(unresolved_callables_test_library SHARED tests/fixtures/unresolved_callables.cpp)
   if(APPLE)
     target_link_options(unresolved_callables_test_library PRIVATE "LINKER:-undefined,dynamic_lookup")
@@ -207,7 +216,9 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/pty_smoke.py
                      $<TARGET_FILE:cpp-repl>
                      $<TARGET_FILE:unresolved_callables_test_library>
-                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/unresolved_callables.hpp)
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/unresolved_callables.hpp
+                     $<TARGET_FILE:unresolved_virtuals_test_library>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/unresolved_virtuals.hpp)
   endif()
 endif()
 

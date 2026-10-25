@@ -64,26 +64,42 @@ bool NativeSymbolExports::prepare(std::string& error) {
 
 bool NativeSymbolExports::publish(const std::string& mangled,
                                   std::uintptr_t address, std::string& error) {
+  return publish({{mangled, address}}, error);
+}
+
+bool NativeSymbolExports::publish(
+    const std::vector<std::pair<std::string, std::uintptr_t>>& symbols, std::string& error) {
   if (!prepare(error)) return false;
-  if (mangled.empty() ||
-      mangled.find_first_of("\n\r\0", 0, 3) != std::string::npos) {
-    error = "unsupported native symbol spelling";
-    return false;
+  for (const auto& [mangled, address] : symbols) {
+    if (mangled.empty() || mangled.find_first_of("\n\r\0", 0, 3) != std::string::npos) {
+      error = "unsupported native symbol spelling";
+      return false;
+    }
+    if (auto* existing = dlsym(RTLD_DEFAULT, mangled.c_str());
+        existing && reinterpret_cast<std::uintptr_t>(existing) != address) {
+      error = "native symbol already resolves to a different address: " + mangled;
+      return false;
+    }
   }
   const auto stem = directory_ + "/storage-" + std::to_string(next_++);
   const auto assembly = stem + ".s";
   const auto diagnostics = stem + ".log";
 #ifdef __APPLE__
   const auto image = stem + ".dylib";
-  const auto native_name = "_" + mangled;
 #else
   const auto image = stem + ".so";
-  const auto& native_name = mangled;
 #endif
   {
     std::ofstream out(assembly);
-    out << ".globl " << std::quoted(native_name) << "\n.set "
-        << std::quoted(native_name) << ", 0x" << std::hex << address << '\n';
+    for (const auto& [mangled, address] : symbols) {
+#ifdef __APPLE__
+      const auto native_name = "_" + mangled;
+#else
+      const auto& native_name = mangled;
+#endif
+      out << ".globl " << std::quoted(native_name) << "\n.set " << std::quoted(native_name)
+          << ", 0x" << std::hex << address << '\n';
+    }
 #ifdef __linux__
     out << ".section .note.GNU-stack,\"\",@progbits\n";
 #endif
@@ -93,7 +109,7 @@ bool NativeSymbolExports::publish(const std::string& mangled,
       return false;
     }
   }
-  // No shell: symbol spelling and temporary paths are data, not commands.
+  // No shell: symbol spellings and temporary paths are data, not commands.
   const llvm::StringRef arguments[] = {compiler_,
 #ifdef __APPLE__
                                        "-dynamiclib",
@@ -119,11 +135,12 @@ bool NativeSymbolExports::publish(const std::string& mangled,
     error = "cannot publish native symbol: " + std::string(message ? message : "dlopen failed");
     return false;
   }
-  if (reinterpret_cast<std::uintptr_t>(dlsym(RTLD_DEFAULT, mangled.c_str())) !=
-      address) {
-    dlclose(handle);
-    error = "native loader did not publish the JIT symbol address";
-    return false;
+  for (const auto& [mangled, address] : symbols) {
+    if (reinterpret_cast<std::uintptr_t>(dlsym(RTLD_DEFAULT, mangled.c_str())) != address) {
+      dlclose(handle);
+      error = "native loader did not publish the JIT symbol address: " + mangled;
+      return false;
+    }
   }
   handles_.push_back(handle);
   return true;
