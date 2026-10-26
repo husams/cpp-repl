@@ -10,7 +10,7 @@ The primary checkout and unrelated changes remain untouched.
 - [x] Capture top-level scalar expression values through Clang, including semicolons.
 - [x] Verify both runtime options, completion, independent defaults and errors.
 - [x] Run complete macOS regression tests and review the final implementation.
-- [ ] Build, verify and redeploy on `linux-dev`.
+- [x] Build, verify and redeploy on `linux-dev`.
 
 `print_values=true` prints values for non-void expressions, with or without a
 semicolon. `print_values=false` mutes automatic value output; expressions still
@@ -29,3 +29,10 @@ independent review approved the final implementation. Regression tests cover
 recovery after invalid expressions and exact destructor counts for class results,
 scalar member calls and function arguments containing nontrivial temporaries.
 The terminal latency harness drains pending output while awaiting shutdown.
+
+Linux LLVM 21 suite: 310/310 passed. Source revision `fc076f1` is installed in
+`~/.local/bin/cpp-repl`, with release files and the previous executable retained
+under `~/.local/share/cpp-repl/releases/20261026-session-options`. The installed
+binary matches the tested staged executable; option and committed-hint terminal
+suites also passed against that installed binary. The primary checkout retains
+its five unrelated modified files.
