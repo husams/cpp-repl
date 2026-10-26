@@ -108,6 +108,13 @@ def main():
             ("clear_decl", b"int clear_preserved = 42;\r", True),
             ("clear", b"%clear\r", True),
             ("clear_value", b"clear_preserved\r", True),
+            ("type_value", b"%type clear_preserved\r", True),
+            ("type_function", b"int bang_identity(int x) { return x; }\r", True),
+            ("type_signature", b"%type bang_identity\r", True),
+            ("bang", b"! printf x >> bang-once; printf 'bang out\\n'; printf 'bang err\\n' >&2\r", True),
+            ("bang_cancel", b"! printf x > bang-cancelled"),
+            ("bang_cancel_key", b"\x03", True),
+            ("bang_pwd", b"!pwd\r", True),
             ("quit", b"%quit\r"),
         ])
         check("shell script output loads a library", "loaded:" in plain(out["shell_lib"]))
@@ -124,6 +131,16 @@ def main():
               "exit status 7" in plain(out["shell_fail"]) and status == 0)
         check("%clear clears the terminal and preserves C++ state",
               b"\x1b[2J\x1b[H" in out["clear"] and "(int) 42" in plain(out["clear_value"]))
+        check("%type prints variable and function types",
+              "(int)" in plain(out["type_value"]) and
+              "(int) -> int" in plain(out["type_signature"]))
+        with open(os.path.join(shell_cwd, "bang-once"), encoding="utf8") as f:
+            check("bang runs once on submission and streams stdout and stderr",
+                  f.read() == "x" and "bang out" in plain(out["bang"]) and
+                  "bang err" in plain(out["bang"]))
+        check("bang supports no space and Ctrl+C cancels before execution",
+              shell_cwd in plain(out["bang_pwd"]) and
+              not os.path.exists(os.path.join(shell_cwd, "bang-cancelled")))
 
         os.mkdir(os.path.join(shell_cwd, "sources dir"))
         with open(os.path.join(shell_cwd, "sources dir", "value.cpp"), "w", encoding="utf8") as f:
@@ -137,6 +154,7 @@ def main():
                 '%help ``cat``\n'
                 '%demangle ``printf SHELL_STDERR >&2; printf _Z3addii``\n'
                 '%quit ``exit 7``\n'
+                '! cat; printf BANG_STDOUT; printf BANG_STDERR >&2; exit 9\n'
                 '6 * 7\n%quit\n', timeout=30)
         check("piped commands preserve multiline shell output and quoted paths",
               pipe.returncode == 0 and "(int) 42" in pipe.stdout and
@@ -144,6 +162,9 @@ def main():
         check("shell stdin cannot consume later REPL commands and stderr stays separate",
               "Commands:" in pipe.stdout and "SHELL_STDERR" in pipe.stderr and
               "SHELL_STDERR" not in pipe.stdout and "exit status 7" in pipe.stdout)
+        check("piped bang preserves following input and output on failure",
+              "BANG_STDOUTBANG_STDERR" in pipe.stdout and "exit status 9" in pipe.stdout and
+              "(int) 42" in pipe.stdout)
 
         os.mkdir(os.path.join(shell_cwd, ".cpp-repl"))
         startup = os.path.join(shell_cwd, ".cpp-repl", "0-shell.repl")

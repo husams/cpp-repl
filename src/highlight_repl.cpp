@@ -56,10 +56,13 @@ void highlight_input(const std::string& input, Replxx::colors_t& colors) {
     paint(input, cmd.parents_filter->span, kClassNameColor, colors);
   }
   if (cmd.symbol) paint(input, cmd.symbol->span, kClassNameColor, colors);
+  if (cmd.kind == CommandKind::Shell && cmd.code)
+    paint(input, cmd.code->span, kPathColor, colors);
   if (cmd.undefined_symbols) paint(input, *cmd.undefined_symbols, kCommandColor, colors);
   if (cmd.library_regex) paint(input, cmd.library_regex->span, kPathColor, colors);
   if (cmd.name_regex) paint(input, cmd.name_regex->span, kClassNameColor, colors);
   for (const auto* operand : {&cmd.signature, &cmd.caller, &cmd.code}) {
+    if (cmd.kind == CommandKind::Shell) break;
     if (!*operand) continue;
     Replxx::colors_t part(utf8_length((*operand)->value), Replxx::Color::DEFAULT);
     highlight_cpp((*operand)->value, part);

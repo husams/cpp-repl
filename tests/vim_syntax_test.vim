@@ -43,6 +43,10 @@ call s:Check(3, '%missing', 'cppReplUnknownCommand')
 call s:Check(4, '%syminfo', 'cppReplUnknownCommand')
 call assert_notequal('cppReplKeyword', s:Group(5, 'lib/public.cpp'))
 call assert_notequal('cppReplCommand', s:Group(5, '%help'))
+call s:Load(['%type value', '! printf "hello"', 'int after_shell = 1;'])
+call s:Check(1, '%type', 'cppReplCommand')
+call s:Check(2, '!', 'cppReplCommand')
+call s:Check(3, 'int', 'cType')
 for s:mode in ['gui', 'cterm']
   let s:colours = map(['cppReplCommand', 'cppReplKeyword', 'cppReplValue', 'cppReplString'],
         \ 'synIDattr(synIDtrans(hlID(v:val)), "fg", s:mode)')

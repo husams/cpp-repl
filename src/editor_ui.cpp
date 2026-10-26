@@ -44,7 +44,7 @@ void highlight_editor_input(CppInterpreter& cpp, const std::string& input,
   std::size_t offset = 0;
   if (is_command_line(input)) {
     const auto command = parse_command(input);
-    if (!command.code) {
+    if (!command.code || command.kind == CommandKind::Shell) {
       return; // Shell, paths, regex and commands keep their grammar colors.
     }
     code = command.code->value;

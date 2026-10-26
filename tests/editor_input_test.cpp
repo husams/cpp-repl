@@ -27,6 +27,14 @@ TEST(EditorInputTest, DelimiterPairBackspaceIsRecognized) {
   EXPECT_EQ(delimiter_decision("\"\"", 1, 127).action, DelimiterAction::DeletePair);
 }
 
+TEST(EditorInputTest, ShellInputUsesLiteralTypingAndSingleLineSubmission) {
+  const std::string shell = "! printf ";
+  EXPECT_FALSE(is_cpp_editor_payload(shell, shell.size()));
+  EXPECT_EQ(delimiter_decision(shell, shell.size(), '\"').action, DelimiterAction::None);
+  EXPECT_EQ(delimiter_decision(shell, shell.size(), '(').action, DelimiterAction::None);
+  EXPECT_FALSE(editor_wants_more_input("! echo '", 8));
+}
+
 TEST(EditorInputTest, ExistingQuoteIsSkipped) {
   EXPECT_EQ(delimiter_decision("\"value\"", 6, '\"').action, DelimiterAction::SkipClosing);
   EXPECT_EQ(delimiter_decision("#include \"header\"", 16, '\"').action,

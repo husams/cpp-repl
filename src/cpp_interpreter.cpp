@@ -1058,6 +1058,20 @@ std::vector<std::string> CppInterpreter::symbol_names() {
   return user_symbol_names(interp_->getASTContext());
 }
 
+std::optional<std::string> CppInterpreter::symbol_type(const std::string& name,
+                                                      std::string& error) {
+  error.clear();
+  std::string output;
+  for (const auto& symbol : describe_symbols(interp_->getASTContext(), name)) {
+    if (!symbol.type_summary.empty()) output += symbol.type_summary + '\n';
+  }
+  if (output.empty()) {
+    error = "no typed symbol named '" + name + "'";
+    return std::nullopt;
+  }
+  return output;
+}
+
 std::optional<std::string> CppInterpreter::symbol_info(const std::string& name,
                                                        std::string& error) {
   error.clear();

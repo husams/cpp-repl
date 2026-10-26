@@ -13,12 +13,12 @@
 
 namespace example {
 
-// A line whose first non-blank character is '%' is a REPL command; everything
-// else is C++. Command grammar (blanks separate words):
+// Leading '%' or '!' selects a REPL command; '$' queries a session option.
+// Everything else is C++. Command grammar (blanks separate words):
 //
 // clang-format off
 //   command   := lib | libs | libinfo | paths | add-path | add | reload | class | methods | fields | info
-//              | symbols | demangle | define | hook | hooks | restore | compile-opts
+//              | type | shell | symbols | demangle | define | hook | hooks | restore | compile-opts
 //              | add-compile-opt | set-compile-opts | use-compile-opts | set | clear | help | quit
 //   set       := "%set" option "=" ("true" | "false")
 //   option    := "print_values" | "keep_hints"
@@ -41,6 +41,8 @@ namespace example {
 //                [ "include-parents" ("true" | "false") ]
 //   access    := "public" | "private" | "protected" | "all"
 //   info      := "%info" symbol                  qualified or mangled name
+//   type      := "%type" symbol                  print the declared type
+//   shell     := "!" shell-command               one physical line, /bin/sh -c
 //   demangle  := "%demangle" symbol              mangled or plain name
 //   define    := "%define" (symbol | signature) "cpp`" (initializer | body) "`"
 //   symbols   := "%symbols" [ "all" ] [ "undefined" ] [ "lib" regex ] [ "name" regex ]
@@ -75,6 +77,8 @@ enum class CommandKind {
   Methods,
   Fields,
   Info,
+  Type,
+  Shell,
   Demangle,
   DefineVariable,
   Symbols,
@@ -152,7 +156,11 @@ ParsedCommand parse_command(std::string_view text, bool allow_shell = true);
 // highlighting and completion never launch a process. Failure carries an error.
 ParsedCommand expand_shell_substitutions(const ParsedCommand& command);
 
-// True if the first non-blank character is '%'.
+// Execute one submitted shell line, streaming stdout/stderr to out. Child
+// stdin is /dev/null so it cannot consume subsequent piped REPL input.
+bool execute_shell(const std::string& script, std::ostream& out, std::string& error);
+
+// True for '%'/'!' commands and '$' session-option queries.
 bool is_command_line(std::string_view text);
 
 // True if Enter should continue the input instead of submitting it. Commands

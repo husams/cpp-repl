@@ -243,6 +243,7 @@ Replxx::completions_t complete(CppInterpreter& cpp, const std::string& input, in
       }
     }
   } else if (cmd.kind == CommandKind::Class || cmd.kind == CommandKind::Info ||
+             cmd.kind == CommandKind::Type ||
              cmd.kind == CommandKind::DefineVariable) {
     const std::string typed = input.substr(cmd.arg_begin);
     context_len = static_cast<int>(utf8_length(typed));
