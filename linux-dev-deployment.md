@@ -1,11 +1,11 @@
 # Linux dev deployment
 
 Host: `linux-dev`, user `husam`, x86-64, LLVM/Clang 21.1.8.
-Source: `b155db3` on `codex/editor-committed-hints`, including overload selection,
+Source: `4b21a9dd19bc044cc2bd6e9b213406beb0a1b8de` on `codex/editor-committed-hints`, including overload selection,
 session options, large-session performance fix and LLVM 21 compatibility guards.
 
 Release directory:
-`/home/husam/.local/share/cpp-repl/releases/20261026-overload-menu`.
+`/home/husam/.local/share/cpp-repl/releases/20261026-editor-verified`.
 Installed command: `/home/husam/.local/bin/cpp-repl`.
 The previous installed executable is retained as `previous-cpp-repl` in the
 release directory. Remote source and build files are isolated from existing
@@ -13,9 +13,12 @@ checkouts; unrelated changes in the primary macOS checkout remain untouched.
 
 Validation:
 
-- Linux full suite: 311/311 passed in 143.77 seconds, including real-terminal
+- Linux full suite: 311/311 passed in 177.98 seconds, including real-terminal
   large-header completion, semantic coloring, inline hints and argument navigation.
-- macOS full suite: 313/313 passed in 163.78 seconds.
+- macOS full suite: 313/313 passed in 163.19 seconds.
+- Paired large-context benchmarks passed all four macOS/Linux comparisons at
+  30,000 and 100,000 declarations with native libraries and standard headers loaded;
+  see [measurements and tolerances](editor-large-session-performance.md).
 - Installed-release smoke: LLVM 21.1.8 banner, both options defaulting to true,
   a semicolon-terminated call printing 30, and a muted call still executing once.
 - Option, committed-hint and overload-menu terminal suites passed against the installed

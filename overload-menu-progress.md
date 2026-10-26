@@ -18,9 +18,21 @@ overload metadata path, display callback, command-context guard and absence of
 direct execution calls in the frontend's editor paths. Independent review approved
 the implementation and the template/command-context regression fixes.
 
-Final full suites passed: macOS 313/313 (163.78 seconds), Linux 311/311
-(143.77 seconds). The Linux release is isolated under
-`~/.local/share/cpp-repl/releases/20261026-overload-menu`; its committed source
+Final full suites passed: macOS 313/313 (163.19 seconds), Linux 311/311
+(177.98 seconds). The Linux release is isolated under
+`~/.local/share/cpp-repl/releases/20261026-editor-verified`; its committed source
 was verified before installation, and the installed executable matches the staged
 binary. Option, committed-hint and overload-menu terminal tests all passed against
 `~/.local/bin/cpp-repl`. The previous executable remains in the release directory.
+
+Final runtime revision: `4b21a9dd19bc044cc2bd6e9b213406beb0a1b8de`.
+Follow-up review fixed empty argument gaps across embedded calls, shared signature
+metadata across rendering and Enter validation, and made accepted overload hints
+visible immediately. Complete manually typed expressions avoid redundant Clang
+analysis while editable gaps retain their validation.
+
+All four paired macOS/Linux performance comparisons passed at 30,000 and 100,000
+declarations with native libraries and standard headers loaded. Measurements,
+fixed regression tolerances, fixture hashes and reproduction commands are recorded
+in [the performance report](editor-large-session-performance.md). The final CTK
+grounding, independent full-branch review and installed Linux terminal checks passed.
