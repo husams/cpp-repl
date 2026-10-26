@@ -804,7 +804,9 @@ session's global scope and accesses members using ordinary C++ access rules.
   to the previous slot, and Tab after the last argument moves past `)`.
   These hints are display-only: they never enter executed C++ or history.
   Enter keeps the annotations on a completed call's terminal line by default,
-  including when the cursor has moved past `)` or `;`.
+  including when the cursor has moved past `)` or `;`. Parameter names and types
+  also remain on calls inside expressions, such as `add(1, 2) + 20`; a return
+  annotation appears only when no expression code follows that call.
   Required empty arguments keep the call editable on Enter; default arguments
   may be omitted. Ordinary comma-separated typing also works. Existing call
   parentheses are reused, and completing in the middle of a name replaces its

@@ -36,3 +36,17 @@ under `~/.local/share/cpp-repl/releases/20261026-session-options`. The installed
 binary matches the tested staged executable; option and committed-hint terminal
 suites also passed against that installed binary. The primary checkout retains
 its five unrelated modified files.
+
+## Calls inside expressions
+
+- [x] Reproduce missing parameter annotations in `add(1, 2) + 20;`.
+- [x] Retain parameter names and types for embedded, nested and multiple calls.
+- [x] Omit return annotations when more code follows the call.
+- [x] Verify idle caching, cursor movement and the `keep_hints` option.
+- [ ] Review and deploy the verified fix to `linux-dev`.
+
+The enhanced terminal regression is green, as are option, snippet, interaction
+and typing-latency checks. CTK traces call enumeration back to the lexical slot
+model and signature lookup to embedded Clang. Independent review approved the
+implementation and checked 1, 10 and 30 calls without errors or repeated execution.
+The complete macOS suite passed 312/312 in 162.52 seconds on the final source.
