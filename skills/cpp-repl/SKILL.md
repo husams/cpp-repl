@@ -71,12 +71,15 @@ project history when the project's launch directory is needed.
 Current builds support typed symbol queries for session declarations, including
 `%add`-ed functions. Use parameter types without parameter names, return types
 or argument expressions; include method cv/ref qualifiers to select an overload.
-Declared aliases and canonical type spellings are accepted, including ordinary
-prefix/postfix const-reference spellings. This compares AST type spellings;
-it is not arbitrary C++ type-equivalence parsing and never evaluates a call.
-For an older binary that rejects a typed query, retry the bare qualified name
-or its reported mangled name and check the installed revision before concluding
-that the function is absent. Hook/restore signatures are a separate command grammar.
+Declared aliases in the AST's printed spelling and canonical parameter type
+spellings are accepted. Canonical const-reference types support ordinary prefix
+and postfix const forms; a postfix const spelling of a declared alias may miss.
+On a typed-query miss, inspect the bare qualified name and use its printed alias
+spelling, canonical types or reported mangled name. Do not infer an absent
+function from a spelling mismatch. This compares AST spellings, never evaluates
+a call, and is not arbitrary type-equivalence parsing. Check the installed
+revision if even simple typed queries fail. Hook/restore signatures are a
+separate command grammar.
 
 Load library declarations with a header (`#include` or `%add`) as well as loading
 the binary with `%lib`. Include paths (`-I`) and native library search paths

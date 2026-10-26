@@ -54,10 +54,11 @@ are hidden by default even with a `lib` filter; add `all` when appropriate.
 Filters are case-sensitive ECMAScript regex searches over full paths/readable
 names. No matches is an empty list. Bare qualified names show the declaration or
 overload set; typed signatures select an overload in current builds, including
-session functions. Demangle exact failing import names. For an older executable
-that rejects a typed query, fall back to the bare qualified name or the actual
-mangled name shown in metadata and verify its revision. A query mismatch alone
-is not evidence of an undefined function. Hook/restore signatures remain a
+session functions. Demangle exact failing import names. If a typed query misses,
+inspect the bare qualified name, then use the printed alias spelling, canonical
+parameter types or actual mangled name shown in metadata. Check for an older
+executable if simple typed queries also fail. A query mismatch alone is not
+evidence of an undefined function. Hook/restore signatures remain a
 separate grammar; do not assume their parameter-name syntax works in `%syminfo`.
 
 If the intended experiment needs a missing definition, load its declarations,
@@ -97,9 +98,16 @@ rollback; fix the environment and use a fresh process.
 
 Both `%syminfo` and `%info` accept a bare name, a typed signature or a mangled
 name. Typed queries use parameter types without names or return types, plus
-method `const`/`volatile` and `&`/`&&` qualifiers where needed. They accept
-declared alias and canonical type spellings, ordinary parameter whitespace and
-prefix/postfix const-reference forms. Supported `noexcept` queries must match
+method `const`/`volatile` and `&`/`&&` qualifiers where needed. They accept the
+declaration's printed alias spelling, canonical parameter types and ordinary
+parameter whitespace. Canonical const-reference types accept prefix/postfix
+const forms; those transformations do not apply to every alias spelling.
+For example, given aliases `ns::Count = int` and `ns::Ratio = double` in a
+declaration `ns::take(ns::Count, const ns::Ratio&)`, query that printed signature
+or `ns::take(int, double const&)`. `ns::take(ns::Count, ns::Ratio const&)` can
+report no symbol despite denoting the same C++ types. Retry the bare name and
+use one of the supported spellings or its actual mangled name; do not call the
+function to establish its existence. Supported `noexcept` queries must match
 a nonthrowing declaration. This is AST spelling comparison, not arbitrary
 semantic normalization of every possible alias or template spelling.
 
