@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -7,10 +9,13 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <dlfcn.h>
 #include <gtest/gtest.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "commands.hpp"
@@ -2239,5 +2244,43 @@ TEST(EditorRuntimeTest, NamespaceSuggestionsFollowUsingDirectives) {
   const auto result = cpp->complete("editor_using_");
   EXPECT_TRUE(has(result.names, "editor_using_visible"));
   EXPECT_FALSE(has(result.names, "editor_using_hidden"));
+}
+
+TEST(EditorRuntimeTest, CompletionInsideIncompleteMemberInitializerReturns) {
+  const pid_t child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    std::string error;
+    auto cpp = CppInterpreter::create({}, error);
+    if (!cpp) {
+      _exit(2);
+    }
+    for (const auto* partial : {"struct C { int x =", "struct C { int x = 1; int y =",
+                                "void editor_partial() { int value =",
+                                "namespace editor_partial_ns { struct C { int x ="}) {
+      cpp->complete(partial);
+    }
+    _exit(cpp->evaluate("21 * 2") == std::optional<std::string>("(int) 42\n") ? 0 : 3);
+  }
+  int status = 0;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  pid_t waited = 0;
+  while (std::chrono::steady_clock::now() < deadline) {
+    waited = waitpid(child, &status, WNOHANG);
+    if (waited != 0) {
+      if (waited < 0 && errno == EINTR) {
+        continue;
+      }
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  if (waited != child) {
+    kill(child, SIGKILL);
+    waitpid(child, &status, 0);
+    FAIL() << "editor completion exceeded its 10 second deadline";
+  }
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(WEXITSTATUS(status), 0);
 }
 } // namespace example

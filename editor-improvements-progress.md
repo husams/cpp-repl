@@ -102,3 +102,31 @@ types and variables to a preprocessor request.
 Full build passed without warnings; **258/258 tests passed** in 125.20 seconds,
 including the enhanced editor PTY test. Evidence: `build/editor-directive-build.log`
 and `build/editor-directive-tests.log`.
+
+## 2026-10-26 — Tab after moving into a field initializer
+
+Reproduced the reported hang using `struct C { int x = 1; int y = 0;  };`
+with the cursor immediately after the first `=`. Replxx correctly passes only
+the text before the cursor, so Clang analyzes the incomplete prefix
+`struct C { int x =`. Before the fix, that request exceeded a 10-second deadline.
+
+The disposable editor compiler now converts the REPL input-end annotation to
+ordinary EOF for completion requests as well as semantic coloring. Clang's
+code-completion token is preserved. This prevents parser recovery from looping
+after an unfinished initializer; it does not affect execution in the persistent
+interpreter.
+
+- A child-process regression bounds completion to 10 seconds, covers two field
+  initializers, a function-body initializer and a nested-namespace initializer,
+  and verifies subsequent arithmetic. The fixed request completes in milliseconds.
+- The editor PTY test types the supplied complete struct, moves the cursor back
+  after `=`, presses Tab, cancels editing and evaluates arithmetic successfully.
+- Empty-prefix completion can still show replxx's `--More--` pager. Space/Enter
+  continue it, `q` dismisses it, and Ctrl+C dismisses the menu; a second Ctrl+C
+  cancels the edited line. This is distinct from the fixed parser loop.
+- Final core/editor regression run: **258/258 passed** in 20.96 seconds;
+  `build/editor-cursor-tests.log`. The original terminal smoke regression also
+  passed in 122.71 seconds, alongside a fresh pass of the bounded initializer
+  test (`build/editor-cursor-final.log`): **all 259 distinct tests passed**.
+- CTK grounding rerun against the corrected analysis path; evidence in
+  `build/editor-cursor-grounding.log`.

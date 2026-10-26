@@ -686,15 +686,12 @@ class EditorAction : public clang::SyntaxOnlyAction {
   clang::CompilerInstance& parent_;
   EditorAnalysis& result_;
   std::size_t size_;
-  bool completion_;
 
 public:
-  EditorAction(clang::CompilerInstance& parent, EditorAnalysis& result, std::size_t size,
-               bool completion)
+  EditorAction(clang::CompilerInstance& parent, EditorAnalysis& result, std::size_t size)
       : parent_(parent)
       , result_(result)
-      , size_(size)
-      , completion_(completion) {}
+      , size_(size) {}
 
   std::unique_ptr<clang::ASTConsumer> CreateASTConsumer(clang::CompilerInstance&,
                                                         llvm::StringRef) override {
@@ -712,11 +709,11 @@ public:
     // Keep REPL top-level statements, but terminate this finite buffer with EOF.
     // LLVM 21/22's lexer emits annot_repl_input_end whenever the language's REPL
     // extensions are enabled, independently of IncrementalProcessing. Parser
-    // recovery inside an unfinished body does not recognize that annotation.
+    // recovery inside unfinished bodies or initializers can loop at this token.
     // Preprocessor::Lex passes its mutable result token to this observer through
     // a const reference; normalize only that token in our disposable compiler.
-    child.getPreprocessor().setTokenWatcher([completion = completion_](const clang::Token& token) {
-      if (!completion && token.is(clang::tok::annot_repl_input_end)) {
+    child.getPreprocessor().setTokenWatcher([](const clang::Token& token) {
+      if (token.is(clang::tok::annot_repl_input_end)) {
         const_cast<clang::Token&>(token).setKind(clang::tok::eof);
       }
     });
@@ -805,7 +802,7 @@ EditorAnalysis analyze_editor(std::unique_ptr<clang::CompilerInstance> compiler,
     compiler->setCodeCompletionConsumer(
         std::make_unique<CompletionConsumer>(result, session, code).release());
   }
-  auto action = std::make_unique<EditorAction>(session, result, code.size(), completion);
+  auto action = std::make_unique<EditorAction>(session, result, code.size());
   llvm::CrashRecoveryContext::Enable();
   llvm::CrashRecoveryContext recovery;
   const bool completed = recovery.RunSafely([&] { compiler->ExecuteAction(*action); });

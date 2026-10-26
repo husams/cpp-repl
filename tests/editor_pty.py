@@ -9,6 +9,8 @@ import tempfile
 helpers = runpy.run_path(str(Path(__file__).with_name("pty_smoke.py")))
 session, plain, check = (helpers[key] for key in ("session", "plain", "check"))
 binary = os.path.abspath(sys.argv[1])
+struct_line = b"struct C { int x = 1; int y = 0;  };"
+initializer_cursor = b"\x1b[D" * (len(struct_line) - struct_line.index(b"=") - 1)
 with tempfile.TemporaryDirectory() as cwd:
     out, status = session(
         binary, cwd,
@@ -32,6 +34,9 @@ with tempfile.TemporaryDirectory() as cwd:
             ("directive_value", b"EDITOR_PTY_DIRECTIVE\r", True),
             ("include_prefix", b"#i\t\t"),
             ("cancel_include", b"\x03", True),
+            ("middle_initializer", struct_line + initializer_cursor + b"\t"),
+            ("cancel_middle_initializer", b"\x03\x03", True),
+            ("after_middle_initializer", b"21 * 2\r", True),
             ("quit", b"%quit\r"),
         ],
     )
@@ -57,6 +62,8 @@ with tempfile.TemporaryDirectory() as cwd:
     check("hash-i filters directive choices by prefix",
           "include [keyword]" in plain(out["include_prefix"]) and
           "define [keyword]" not in plain(out["include_prefix"]))
+    check("Tab inside a field initializer leaves the editor responsive",
+          "(int) 42" in plain(out["after_middle_initializer"]) and status == 0)
     if helpers["failures"]:
         for key, value in out.items():
             print(f"{key}: {plain(value)}")
