@@ -2045,6 +2045,48 @@ TEST_F(CppInterpreterTest, EditorSupportsStandardLibraryAndNamespaceMembers) {
   EXPECT_TRUE(has(cpp_->complete("editor_vector.si").names, "size"));
   EXPECT_TRUE(has(cpp_->complete("editor_ns::num").names, "number"));
 }
+
+TEST_F(CppInterpreterTest, EditorCompletionRespectsPreprocessorContexts) {
+  ASSERT_TRUE(cpp_->execute("struct EditorDirectiveType {}; int editor_directive_value;\n"
+                            "struct EDITOR_DIRECTIVE_MACRO_TYPE {}; "
+                            "int EDITOR_DIRECTIVE_MACRO_VALUE;\n"));
+  ASSERT_TRUE(cpp_->execute("#define EDITOR_DIRECTIVE_MACRO 1\n"));
+
+  const auto directive = cpp_->complete("#");
+  EXPECT_TRUE(has(directive.names, "include"));
+  EXPECT_FALSE(has(directive.names, "EditorDirectiveType"));
+  EXPECT_FALSE(has(directive.names, "editor_directive_value"));
+
+  const auto include = cpp_->complete("#i");
+  EXPECT_TRUE(has(include.names, "include"));
+  EXPECT_FALSE(has(include.names, "EditorDirectiveType"));
+
+  const auto indented = cpp_->complete("int editor_before_directive;\n  #i");
+  EXPECT_TRUE(has(indented.names, "include"));
+  EXPECT_FALSE(has(indented.names, "EditorDirectiveType"));
+
+  const auto macro_name = cpp_->complete("#ifdef EDITOR_DIRECTIVE_MAC");
+  EXPECT_TRUE(has(macro_name.names, "EDITOR_DIRECTIVE_MACRO"));
+  EXPECT_FALSE(has(macro_name.names, "EditorDirectiveType"));
+  EXPECT_FALSE(has(macro_name.names, "editor_directive_value"));
+  EXPECT_FALSE(has(macro_name.names, "EDITOR_DIRECTIVE_MACRO_TYPE"));
+  EXPECT_FALSE(has(macro_name.names, "EDITOR_DIRECTIVE_MACRO_VALUE"));
+
+  const auto macro_definition = cpp_->complete("#define EDITOR_NEW_MAC");
+  EXPECT_FALSE(has(macro_definition.names, "EDITOR_DIRECTIVE_MACRO_TYPE"));
+  EXPECT_FALSE(has(macro_definition.names, "EDITOR_DIRECTIVE_MACRO_VALUE"));
+
+  const auto expression = cpp_->complete("#if EDITOR_DIRECTIVE_MAC");
+  EXPECT_TRUE(has(expression.names, "EDITOR_DIRECTIVE_MACRO"));
+  EXPECT_FALSE(has(expression.names, "EditorDirectiveType"));
+  EXPECT_FALSE(has(expression.names, "editor_directive_value"));
+  EXPECT_FALSE(has(expression.names, "EDITOR_DIRECTIVE_MACRO_TYPE"));
+  EXPECT_FALSE(has(expression.names, "EDITOR_DIRECTIVE_MACRO_VALUE"));
+
+  const auto builtin_macro = cpp_->complete("#ifdef __c");
+  EXPECT_TRUE(has(builtin_macro.names, "__cplusplus"));
+  EXPECT_FALSE(has(builtin_macro.names, "EDITOR_DIRECTIVE_MACRO_TYPE"));
+}
 } // namespace
 } // namespace example
 

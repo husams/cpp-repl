@@ -74,3 +74,31 @@ Validation (macOS ARM64, Homebrew LLVM 22.1.8):
 Current limits: analysis is synchronous, so header-heavy buffers or large sessions
 can delay a repaint; only macOS/LLVM 22 has been exercised here. Documentation is
 updated in README.md. No LSP, commits to the primary checkout, or remote publishing.
+
+## 2026-10-26 — contextual preprocessor completion correction
+
+The reported `#`/Tab bug was reproduced with a failing regression: directive
+patterns were discarded, then the ordinary session-symbol supplement added C++
+types and variables to a preprocessor request.
+
+- Retain Clang's typed directive-pattern text without inserting placeholders.
+- Respect directive, macro-name, conditional-expression and include-file contexts;
+  do not add ordinary session declarations to preprocessor choices.
+- Complete active macro operands from the disposable compiler's preprocessor,
+  including compiler macros such as `__cplusplus`.
+- Keep generic C++ pattern handling unchanged to avoid misclassifying template
+  snippets as keyword suggestions.
+- Clang's observed `#i` choices are `if`, `ifdef`, `ifndef`, `include` and
+  `include_next`; it is not a unique prefix. A unique prefix such as `#def`
+  inserts `define` immediately.
+- Added coverage for `#`, `#i`, indentation/multiline input, macro definitions,
+  `#ifdef`/`#if` operands, compiler macros and colliding C++ symbol prefixes.
+- The enhanced editor PTY regression passed: directive-only menu, prefix
+  filtering and execution of a macro defined through a completed `#def`.
+- CTK grounding rerun confirms the completion path reads Clang's context and
+  typed pattern text before Sema lookup; evidence in
+  `build/editor-directive-grounding.log`.
+
+Full build passed without warnings; **258/258 tests passed** in 125.20 seconds,
+including the enhanced editor PTY test. Evidence: `build/editor-directive-build.log`
+and `build/editor-directive-tests.log`.

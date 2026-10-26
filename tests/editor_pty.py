@@ -25,6 +25,13 @@ with tempfile.TemporaryDirectory() as cwd:
             ("hint_select", b"editor_menu(\x1b[1;5B\t"),
             ("cancel_hint_menu", b"\x03\x03", True),
             ("after_hint", b"21 * 2\r", True),
+            ("directive_menu", b"#\t\t"),
+            ("cancel_directive_menu", b"\x03", True),
+            ("directive_prefix", b"#def\t"),
+            ("define_completed", b" EDITOR_PTY_DIRECTIVE 11\r", True),
+            ("directive_value", b"EDITOR_PTY_DIRECTIVE\r", True),
+            ("include_prefix", b"#i\t\t"),
+            ("cancel_include", b"\x03", True),
             ("quit", b"%quit\r"),
         ],
     )
@@ -41,6 +48,15 @@ with tempfile.TemporaryDirectory() as cwd:
     check("semantic editing preserves execution", "(int) 7" in plain(out["field_value"]))
     check("hint cycling and completion leave the REPL usable",
           "(int) 42" in plain(out["after_hint"]) and status == 0)
+    directives = plain(out["directive_menu"])
+    check("hash offers directives instead of C++ symbols",
+          "include [keyword]" in directives and "define [keyword]" in directives and
+          "EditorPty" not in directives and "editor_menu" not in directives)
+    check("a unique directive prefix inserts only its keyword",
+          "(int) 11" in plain(out["directive_value"]))
+    check("hash-i filters directive choices by prefix",
+          "include [keyword]" in plain(out["include_prefix"]) and
+          "define [keyword]" not in plain(out["include_prefix"]))
     if helpers["failures"]:
         for key, value in out.items():
             print(f"{key}: {plain(value)}")

@@ -137,6 +137,7 @@ public:
         clang::CodeCompleteOptions options;
         options.IncludeGlobals = true;
         options.IncludeMacros = true;
+        options.IncludeCodePatterns = true;
         options.IncludeBriefComments = true;
         return options;
       }())
@@ -151,10 +152,23 @@ public:
   void ProcessCodeCompleteResults(clang::Sema& sema, clang::CodeCompletionContext context,
                                   clang::CodeCompletionResult* results, unsigned count) override {
     const auto prefix = sema.getPreprocessor().getCodeCompletionFilter();
+    const auto kind = context.getKind();
+    const bool preprocessor_context =
+        kind == clang::CodeCompletionContext::CCC_MacroName ||
+        kind == clang::CodeCompletionContext::CCC_MacroNameUse ||
+        kind == clang::CodeCompletionContext::CCC_PreprocessorExpression ||
+        kind == clang::CodeCompletionContext::CCC_PreprocessorDirective ||
+        kind == clang::CodeCompletionContext::CCC_IncludedFile;
+    const bool macro_context = kind == clang::CodeCompletionContext::CCC_MacroName ||
+                               kind == clang::CodeCompletionContext::CCC_MacroNameUse ||
+                               kind == clang::CodeCompletionContext::CCC_PreprocessorExpression;
     for (unsigned i = 0; i < count; ++i) {
       auto& candidate = results[i];
       if (candidate.Hidden || candidate.Availability == CXAvailability_NotAvailable ||
           candidate.Availability == CXAvailability_NotAccessible) {
+        continue;
+      }
+      if (preprocessor_context && candidate.Kind == clang::CodeCompletionResult::RK_Declaration) {
         continue;
       }
       CompletionItem item;
@@ -179,17 +193,52 @@ public:
         item.text = item.label = candidate.Macro->getName().str();
         item.kind = SemanticKind::Macro;
         item.priority = candidate.Priority;
+      } else if (preprocessor_context &&
+                 candidate.Kind == clang::CodeCompletionResult::RK_Pattern) {
+        auto* completion =
+            candidate.CreateCodeCompletionString(sema, context, allocator_, info_, true);
+        if (!completion || !completion->getTypedText()) {
+          continue;
+        }
+        item.text = item.label = completion->getTypedText();
+        item.kind = SemanticKind::Keyword;
+        item.priority = completion->getPriority();
       } else {
         continue;
       }
-      if (!llvm::StringRef(item.text).starts_with(prefix) || item.text.rfind("__", 0) == 0) {
+      if (!llvm::StringRef(item.text).starts_with(prefix) ||
+          (item.text.rfind("__", 0) == 0 &&
+           !(macro_context && candidate.Kind == clang::CodeCompletionResult::RK_Macro))) {
         continue;
       }
       result_.items.push_back(std::move(item));
     }
+    if (macro_context) {
+      auto& preprocessor = sema.getPreprocessor();
+      for (const auto& entry : preprocessor.macros()) {
+        const auto* identifier = entry.first;
+        const auto name = identifier->getName();
+        if (!llvm::StringRef(name).starts_with(prefix) ||
+            !preprocessor.getMacroDefinition(identifier).getMacroInfo()) {
+          continue;
+        }
+        const auto duplicate =
+            std::find_if(result_.items.begin(), result_.items.end(),
+                         [&](const auto& existing) { return existing.text == name; });
+        if (duplicate == result_.items.end()) {
+          CompletionItem item;
+          item.text = item.label = name.str();
+          item.kind = SemanticKind::Macro;
+          result_.items.push_back(std::move(item));
+        }
+      }
+    }
     // Clang's ordinary-name enumeration can omit declarations relocated into
     // our version namespaces. Resolve their public names through Sema so local
     // shadowing still applies, and keep the full overload metadata.
+    if (preprocessor_context) {
+      return;
+    }
     const auto before = llvm::StringRef(code_).drop_back(prefix.size()).rtrim();
     if (!context.getBaseType().isNull() || before.ends_with(".") || before.ends_with("->") ||
         before.ends_with("::")) {

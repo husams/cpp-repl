@@ -792,6 +792,10 @@ session's global scope and accesses members using ordinary C++ access rules.
   members. Completion handles locals in unfinished multiline input, inheritance,
   `const` receivers, namespaces and member access after calls. While entering a
   function call, gray hints show its signatures and the current argument number.
+  After `#`, suggestions follow Clang's preprocessor context: directive keywords,
+  macro operands or conditional-expression macros, rather than unrelated C++
+  symbols. Unique prefixes such as `#def` complete immediately; `#i` has several
+  valid matches, including `if` and `include`.
   Tab also completes `%` commands, filesystem paths after `%lib `,
   `%add-path `, `%add ` and `%reload `, and class names after `%class `,
   `%methods ` and `%fields `. The member commands also complete their option
