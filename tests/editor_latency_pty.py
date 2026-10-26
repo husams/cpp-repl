@@ -45,7 +45,7 @@ with tempfile.TemporaryDirectory() as cwd:
         read_until(fd, PROMPT)
         os.write(fd, b"editor_latency_probe(")
         # Let the previous idle analysis finish before measuring a typing burst.
-        read_until(fd, b"<placeholder>")
+        read_until(fd, b"value: ")
         while select.select([fd], [], [], 0)[0]:
             os.read(fd, 65536)
         # Drain any pending terminal output before timing. Every character
@@ -82,6 +82,13 @@ with tempfile.TemporaryDirectory() as cwd:
         deadline = time.monotonic() + 5
         status = None
         while time.monotonic() < deadline:
+            # Terminal mode restoration can wait for pending output on macOS.
+            # Keep draining the PTY while waiting for the process to exit.
+            if select.select([fd], [], [], 0.02)[0]:
+                try:
+                    os.read(fd, 65536)
+                except OSError:
+                    pass
             done, status = os.waitpid(pid, os.WNOHANG)
             if done:
                 break

@@ -321,6 +321,49 @@ void parse_symbol_filters(std::string_view text, ParsedCommand& cmd) {
   }
 }
 
+void parse_session_option(std::string_view text, ParsedCommand& cmd) {
+  std::size_t pos = cmd.arg_begin;
+  if (pos == text.size()) {
+    set_error(cmd, "missing option assignment", {pos, pos});
+    return;
+  }
+  const auto name_begin = pos;
+  while (pos < text.size() && !is_blank(text[pos]) && text[pos] != '=') {
+    ++pos;
+  }
+  cmd.option_name = std::string(text.substr(name_begin, pos - name_begin));
+  if (std::find(repl_option_names.begin(), repl_option_names.end(), cmd.option_name) ==
+      repl_option_names.end()) {
+    set_error(cmd, "unknown option '" + cmd.option_name + "'", {name_begin, pos});
+    return;
+  }
+  pos = skip_blank(text, pos);
+  if (pos == text.size() || text[pos] != '=') {
+    set_error(cmd, "expected '=' after option name", {pos, pos});
+    return;
+  }
+  cmd.option_equals = Span{pos, pos + 1};
+  pos = skip_blank(text, pos + 1);
+  if (pos == text.size()) {
+    set_error(cmd, "missing boolean value", {pos, pos});
+    return;
+  }
+  const auto value_begin = pos;
+  while (pos < text.size() && !is_blank(text[pos])) {
+    ++pos;
+  }
+  cmd.option_value =
+      Operand{std::string(text.substr(value_begin, pos - value_begin)), {value_begin, pos}};
+  if (cmd.option_value->value != "true" && cmd.option_value->value != "false") {
+    set_error(cmd, "expected true or false", cmd.option_value->span);
+    return;
+  }
+  pos = skip_blank(text, pos);
+  if (pos < text.size()) {
+    set_error(cmd, "%set takes one option assignment", {pos, text.size()});
+  }
+}
+
 void parse_inspection_operand(std::string_view text, ParsedCommand& cmd, bool required,
                               std::size_t begin) {
   if (begin == text.size()) {
@@ -443,8 +486,7 @@ const std::vector<CommandInfo>& command_table() {
        "list loaded library names (all includes system libraries)"},
       {"%libinfo", CommandKind::LibInfo, " <library>",
        "show library path, versions, ABI requirements and dependencies"},
-      {"%paths", CommandKind::Paths, "",
-       "show library search paths and loader settings"},
+      {"%paths", CommandKind::Paths, "", "show library search paths and loader settings"},
       {"%add-path", CommandKind::AddPath, " <path[:path...]>",
        "add library search directories, separated by ':'"},
       {"%add", CommandKind::Add, " [path ...]",
@@ -460,6 +502,8 @@ const std::vector<CommandInfo>& command_table() {
        "replace global or file compile flags (no flags: clear)"},
       {"%use-compile-opts", CommandKind::UseCompileOpts, " <file>",
        "use a file's effective compile options as the session defaults"},
+      {"%set", CommandKind::Set, " <option> = <true|false>",
+       "set a session option (print_values or keep_hints)"},
       {"%class", CommandKind::Class, " [name]",
        "show a class's members and layout (no argument: list classes)"},
       {"%methods", CommandKind::Methods,
@@ -511,7 +555,28 @@ std::vector<std::string> command_names() {
 ParsedCommand parse_command(std::string_view text, bool allow_shell) {
   ParsedCommand cmd;
   const std::size_t start = text.find_first_not_of(kBlank);
-  if (start == std::string_view::npos || text[start] != '%') return cmd;
+  if (start == std::string_view::npos) {
+    return cmd;
+  }
+  if (text[start] == '$') {
+    cmd.kind = CommandKind::OptionValue;
+    cmd.name_begin = start;
+    cmd.arg_begin = start + 1;
+    std::size_t end = text.find_first_of(kBlank, cmd.arg_begin);
+    if (end == std::string_view::npos) {
+      end = text.size();
+    }
+    cmd.option_name = std::string(text.substr(cmd.arg_begin, end - cmd.arg_begin));
+    cmd.name = "$" + cmd.option_name;
+    cmd.name_end = end;
+    if (skip_blank(text, end) < text.size()) {
+      set_error(cmd, "option query takes one name", {skip_blank(text, end), text.size()});
+    }
+    return cmd;
+  }
+  if (text[start] != '%') {
+    return cmd;
+  }
 
   std::size_t end = text.find_first_of(kBlank, start);
   if (end == std::string_view::npos) end = text.size();
@@ -523,7 +588,7 @@ ParsedCommand parse_command(std::string_view text, bool allow_shell) {
 
   const CommandInfo* info = find_command(cmd.name);
   cmd.kind = info != nullptr ? info->kind : CommandKind::Unknown;
-  if (info && allow_shell) {
+  if (info && allow_shell && cmd.kind != CommandKind::Set) {
     auto pos = cmd.arg_begin;
     while (true) {
       const auto begin = text.find("``", pos);
@@ -562,6 +627,7 @@ ParsedCommand parse_command(std::string_view text, bool allow_shell) {
   }
   switch (cmd.kind) {
     case CommandKind::Cpp:
+    case CommandKind::OptionValue:
       break;
     case CommandKind::Unknown:
       set_error(cmd, "unknown command '" + cmd.name + "' (try %help)", {start, end});
@@ -581,6 +647,9 @@ ParsedCommand parse_command(std::string_view text, bool allow_shell) {
     case CommandKind::SetCompileOpts:
     case CommandKind::UseCompileOpts:
       parse_compile_options(text, cmd);
+      break;
+    case CommandKind::Set:
+      parse_session_option(text, cmd);
       break;
     case CommandKind::Class:
       parse_class(text, cmd);
@@ -638,7 +707,7 @@ ParsedCommand parse_command(std::string_view text, bool allow_shell) {
 
 bool is_command_line(std::string_view text) {
   const std::size_t start = text.find_first_not_of(kBlank);
-  return start != std::string_view::npos && text[start] == '%';
+  return start != std::string_view::npos && (text[start] == '%' || text[start] == '$');
 }
 
 bool wants_more_input(std::string_view text) {
@@ -660,6 +729,8 @@ bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out,
     return dispatch(expand_shell_substitutions(cmd), libs, out, ok);
   switch (cmd.kind) {
     case CommandKind::Cpp:
+    case CommandKind::Set:
+    case CommandKind::OptionValue:
       break;
     case CommandKind::Quit:
       return false;
@@ -691,8 +762,9 @@ bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out,
              "Incomplete C++ continues on the next line, including blank lines; "
              "Ctrl+C cancels it.\n"
              "Hooks accept multiline cpp`...` blocks; an empty body clears a hook.\n"
-             "Command arguments accept multiline ``shell script`` blocks; "
-             "stdout replaces each block before the command runs.\n"
+             "Most command arguments accept multiline ``shell script`` blocks; "
+             "stdout replaces each block before the command runs. %set and "
+             "$option never run shell substitutions.\n"
              "Order: pre, mock/original, post; arguments are named in the signature, "
              "methods use self/this, post uses result.\n"
              "Keys: Tab complete, Ctrl+J newline, Ctrl+L clear screen, "

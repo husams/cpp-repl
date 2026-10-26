@@ -9,6 +9,7 @@
 
 #include "cpp_inspect.hpp"
 #include "library_manager.hpp"
+#include "repl_options.hpp"
 
 namespace example {
 
@@ -18,7 +19,10 @@ namespace example {
 // clang-format off
 //   command   := lib | libs | libinfo | paths | add-path | add | reload | class | methods | fields | info
 //              | symbols | demangle | define | hook | hooks | restore | compile-opts
-//              | add-compile-opt | set-compile-opts | use-compile-opts | clear | help | quit
+//              | add-compile-opt | set-compile-opts | use-compile-opts | set | clear | help | quit
+//   set       := "%set" option "=" ("true" | "false")
+//   option    := "print_values" | "keep_hints"
+//   query     := "$" option
 //   lib       := "%lib" { path }                 zero or more paths
 //   libs      := "%libs" [ "all" ] [ regex ]     loaded library names only
 //   paths     := "%paths"                       current library search paths
@@ -46,8 +50,8 @@ namespace example {
 //   help      := "%help"
 //   clear     := "%clear"
 //   quit      := "%quit"
-//   Command arguments may contain ``shell script`` substitutions, including
-//   newlines. They are executed only when submitted, before argument parsing.
+//   Most command arguments may contain ``shell script`` substitutions, including
+//   newlines. They run only when submitted; %set and $option never expand them.
 //   path      := '"' { any char but '"' } '"'    quoted, may contain blanks
 //              | word                            no blanks (and no ':' in
 //                                                %add-path)
@@ -65,6 +69,8 @@ enum class CommandKind {
   AddCompileOpt,
   SetCompileOpts,
   UseCompileOpts,
+  Set,
+  OptionValue,
   Class,
   Methods,
   Fields,
@@ -129,6 +135,9 @@ struct ParsedCommand {
   std::optional<Operand> signature;   // %mock / %pre / %post / %restore target
   std::optional<Operand> caller;      // optional direct caller after "in"
   std::optional<Operand> code;        // contents of cpp`...`
+  std::string option_name;            // %set target or $query name
+  std::optional<Operand> option_value;  // boolean value for %set
+  std::optional<Span> option_equals;    // '=' in a %set assignment
   std::vector<Operand> shell_commands;  // deferred ``...`` blocks; spans include delimiters
   std::string original_text;           // retained only for shell substitution
   bool incomplete = false;            // an open cpp` or `` block

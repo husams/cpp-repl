@@ -167,7 +167,8 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
   gtest_discover_tests(library_dependency_test)
 
   add_executable(cpp_interpreter_test tests/cpp_interpreter_test.cpp tests/template_callables_test.cpp
-    tests/editor_context_test.cpp tests/editor_input_test.cpp tests/editor_call_test.cpp)
+    tests/editor_context_test.cpp tests/editor_input_test.cpp tests/editor_call_test.cpp
+    tests/expression_values_test.cpp tests/repl_options_session_test.cpp)
   add_executable(iterative_development_test tests/iterative_development_test.cpp)
   target_link_libraries(iterative_development_test PRIVATE cpp_interp GTest::gtest_main)
   gtest_discover_tests(iterative_development_test)
@@ -232,6 +233,12 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
 
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_FOUND AND NOT WIN32)
+    add_test(NAME repl_options_pty
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/repl_options_pty.py
+                     $<TARGET_FILE:cpp-repl>)
+    add_test(NAME editor_committed_hints_pty
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/editor_committed_hints_pty.py
+                     $<TARGET_FILE:cpp-repl>)
     add_test(NAME editor_large_session_pty
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/editor_large_session_pty.py
                      $<TARGET_FILE:cpp-repl> $<TARGET_FILE:hook_test_library>)

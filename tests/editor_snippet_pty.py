@@ -56,7 +56,8 @@ with tempfile.TemporaryDirectory() as cwd:
               "x:" in text and "y:" in text and "(int)" in text and "-> int" in text)
         check(key + " uses the existing gray hint color", b"\x1b[0;90m" in out[key])
         check(key + " puts parameters inside and the return type outside parentheses",
-              re.search(r"snippet_add\(x:\s*<[^>]+>\s*\(int\),\s*y:\s*<[^>]+>\s*\(int\)\)\s*-> int", text) is not None)
+              re.search(r"snippet_add\(x:\s+\(int\),\s*y:\s+\(int\)\)\s*-> int", text) is not None)
+        check(key + " leaves argument slots blank", "<placeholder>" not in text)
     check("method hints retain parameter names and types",
           "amount:" in plain(out["method_hint"]) and "multiplier:" in plain(out["method_hint"]))
     check("selected overload retains both parameter slots",

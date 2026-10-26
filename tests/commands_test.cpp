@@ -101,6 +101,53 @@ TEST(Grammar, AddPathErrors) {
   EXPECT_EQ(error_text(extra, cmd), "/b /c");
 }
 
+TEST(Grammar, SessionOptionsRequireOneKnownBooleanAssignment) {
+  for (const char* input : {"%set print_values = true", "%set print_values=true",
+                            "%set keep_hints = false", "%set keep_hints=false"}) {
+    const auto cmd = parse_command(input);
+    ASSERT_EQ(cmd.kind, CommandKind::Set) << input;
+    ASSERT_TRUE(cmd.error.empty()) << input << ": " << cmd.error;
+    ASSERT_TRUE(cmd.option_value);
+    EXPECT_EQ(cmd.option_name, input[5] == 'p' ? "print_values" : "keep_hints");
+    EXPECT_EQ(cmd.option_value->value,
+              std::string(input).find("false") != std::string::npos ? "false" : "true");
+    ASSERT_TRUE(cmd.option_equals);
+    EXPECT_EQ(input[cmd.option_equals->begin], '=');
+  }
+  for (const char* input : {"%set", "%set print_values", "%set = true", "%set print_values =",
+                            "%set print_values = yes", "%set print_values = true extra",
+                            "%set unknown = true", "%set keep_hints = 1"}) {
+    const auto cmd = parse_command(input);
+    EXPECT_EQ(cmd.kind, CommandKind::Set) << input;
+    EXPECT_FALSE(cmd.error.empty()) << input;
+  }
+}
+
+TEST(ParseCommand, RuntimeOptionQueriesAreRecognizedWithoutExpansion) {
+  for (const auto* input : {"$print_values", "  $keep_hints", "$pr"}) {
+    const auto cmd = parse_command(input);
+    EXPECT_EQ(cmd.kind, CommandKind::OptionValue) << input;
+    EXPECT_TRUE(cmd.error.empty()) << input << ": " << cmd.error;
+    EXPECT_TRUE(is_command_line(input));
+    EXPECT_TRUE(cmd.shell_commands.empty());
+  }
+  EXPECT_EQ(parse_command("int $value = 2;").kind, CommandKind::Cpp);
+  EXPECT_TRUE(parse_command("%set print_values = ``touch /tmp/not-run``").shell_commands.empty());
+}
+
+TEST(ReplOptions, DefaultsAndNamedAccess) {
+  ReplOptions options;
+  EXPECT_TRUE(options.print_values);
+  EXPECT_TRUE(options.keep_hints);
+  EXPECT_EQ(get_repl_option(options, "print_values"), std::optional<bool>(true));
+  EXPECT_EQ(get_repl_option(options, "keep_hints"), std::optional<bool>(true));
+  EXPECT_FALSE(get_repl_option(options, "unknown"));
+  EXPECT_TRUE(set_repl_option(options, "print_values", false));
+  EXPECT_FALSE(options.print_values);
+  EXPECT_FALSE(set_repl_option(options, "unknown", false));
+  EXPECT_TRUE(options.keep_hints);
+}
+
 TEST(Grammar, AddTakesBlankSeparatedSourceFiles) {
   ParsedCommand cmd = parse_command(R"(%add  a.cpp "my dir/b.cpp" ~/c.hpp)");
   EXPECT_EQ(cmd.kind, CommandKind::Add);
@@ -677,7 +724,7 @@ TEST(Dispatch, QuitStopsAndHelpListsCommands) {
   for (const std::string& name : command_names()) {
     EXPECT_NE(out.str().find(name), std::string::npos) << name;
   }
-  EXPECT_EQ(command_names().size(), 27u);
+  EXPECT_EQ(command_names().size(), 28u);
 }
 
 TEST(Dispatch, PathsShowsConfiguredDirectoriesAndLoaderSettings) {

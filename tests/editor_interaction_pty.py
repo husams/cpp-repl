@@ -71,12 +71,12 @@ with tempfile.TemporaryDirectory() as cwd:
     ]
     out, status = session(binary, cwd, steps, args=("-I" + str(headers),))
     check("function completion opens a call with its signature hint",
-          "editor_sum(first: <placeholder> (int), second: <placeholder> (int)) -> int" in plain(out["function_pair"]) and
+          "editor_sum(first:  (int), second:  (int)) -> int" in plain(out["function_pair"]) and
           "(int) 42" in plain(out["function_value"]))
     check("cycling after a unique completion preserves the argument cursor",
           "(int) 42" in plain(out["unique_cycle_value"]))
     check("method completion shows its signature and leaves the cursor inside",
-          "method(delta: <placeholder> (int))" in plain(out["method_pair"]) and
+          "method(delta:  (int))" in plain(out["method_pair"]) and
           "-> int" in plain(out["method_pair"]) and
           "(int) 12" in plain(out["method_value"]))
     check("completed zero-argument methods execute with Enter",

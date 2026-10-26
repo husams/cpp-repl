@@ -57,6 +57,19 @@ CommandResult execute_command(LibraryManager& libs, CppInterpreter& cpp,
   if (cmd.kind == CommandKind::Cpp) {
     return {true, false};  // C++ input is handled by the interactive REPL.
   }
+  if ((cmd.kind == CommandKind::Set || cmd.kind == CommandKind::OptionValue) && cmd.error.empty()) {
+    const auto value = get_repl_option(cpp.options(), cmd.option_name);
+    if (!value) {
+      out << "error: unknown option '" << cmd.option_name << "'\n";
+      return {true, false};
+    }
+    if (cmd.kind == CommandKind::Set) {
+      set_repl_option(cpp.options(), cmd.option_name, cmd.option_value->value == "true");
+    }
+    out << cmd.option_name << " = "
+        << (*get_repl_option(cpp.options(), cmd.option_name) ? "true" : "false") << '\n';
+    return {true, true};
+  }
   if (cmd.kind == CommandKind::DefineVariable && cmd.error.empty()) {
     std::string error;
     const auto& name = cmd.signature ? cmd.signature->value : cmd.symbol->value;

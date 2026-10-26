@@ -33,6 +33,15 @@ void highlight_input(const std::string& input, Replxx::colors_t& colors) {
   }
   const ParsedCommand cmd = parse_command(input);
   paint(input, {cmd.name_begin, cmd.name_end}, kCommandColor, colors);
+  if (cmd.kind == CommandKind::Set && !cmd.option_name.empty()) {
+    paint(input, {cmd.arg_begin, cmd.arg_begin + cmd.option_name.size()}, kClassNameColor, colors);
+  }
+  if (cmd.option_equals) {
+    paint(input, *cmd.option_equals, kSeparatorColor, colors);
+  }
+  if (cmd.option_value) {
+    paint(input, cmd.option_value->span, kClassNameColor, colors);
+  }
   for (const Operand& shell : cmd.shell_commands)
     paint(input, shell.span, kPathColor, colors);
   for (const Operand& p : cmd.paths) paint(input, p.span, kPathColor, colors);

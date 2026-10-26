@@ -69,7 +69,7 @@ with tempfile.TemporaryDirectory() as cwd:
         read_until(fd, prompt)
 
         os.write(fd, b"editor_large::su\t")
-        read_until(fd, b"<placeholder>")
+        read_until(fd, b"lhs: ")
         # Typing after an idle pause used to queue behind synchronous analysis.
         started = time.monotonic()
         os.write(fd, b"2")

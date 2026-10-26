@@ -104,6 +104,40 @@ Replxx::completions_t complete(CppInterpreter& cpp, const std::string& input, in
   }
   const ParsedCommand cmd = parse_command(input);
 
+  if (cmd.kind == CommandKind::OptionValue) {
+    const auto typed = input.substr(cmd.name_begin);
+    context_len = static_cast<int>(utf8_length(typed));
+    for (const auto name : repl_option_names) {
+      const auto candidate = "$" + std::string(name);
+      if (starts_with(candidate, typed)) {
+        out.emplace_back(candidate);
+      }
+    }
+    return out;
+  }
+  if (cmd.kind == CommandKind::Set && cmd.name_end < input.size()) {
+    const auto equal = input.find('=', cmd.arg_begin);
+    if (equal == std::string::npos) {
+      const auto typed = input.substr(cmd.arg_begin);
+      context_len = static_cast<int>(utf8_length(typed));
+      for (const auto name : repl_option_names) {
+        if (starts_with(std::string(name), typed)) {
+          out.emplace_back(std::string(name));
+        }
+      }
+    } else {
+      const auto begin = input.find_first_not_of(" \t", equal + 1);
+      const auto typed = begin == std::string::npos ? std::string() : input.substr(begin);
+      context_len = static_cast<int>(utf8_length(typed));
+      for (const auto* value : {"true", "false"}) {
+        if (starts_with(value, typed)) {
+          out.emplace_back(value);
+        }
+      }
+    }
+    return out;
+  }
+
   if (cmd.code && cmd.incomplete) {
     return cpp_completions(cpp, rx, cmd.code->value, context_len, identities);
   }
@@ -425,6 +459,31 @@ std::string parameter_label(const CompletionParameter& parameter, std::size_t in
   return parameter.name.empty() ? "arg" + std::to_string(index + 1) : parameter.name;
 }
 
+std::optional<EditorCall> displayed_call(const std::string& text, std::size_t cursor) {
+  if (auto call = editor_call_at_cursor(text, cursor)) {
+    return call;
+  }
+  // Keep a completed trailing call annotated when the caret moves past ')' or
+  // ';'. The semantic request must still end inside the call, before its ')'.
+  const auto prefix = std::string_view(text).substr(0, cursor);
+  const auto tokens = lex_cpp(prefix).tokens;
+  auto last = tokens.rbegin();
+  auto skip_comments = [&] {
+    while (last != tokens.rend() && last->kind == TokenKind::Comment) {
+      ++last;
+    }
+  };
+  skip_comments();
+  if (last != tokens.rend() && prefix.substr(last->begin, last->end - last->begin) == ";") {
+    ++last;
+    skip_comments();
+  }
+  if (last == tokens.rend() || prefix.substr(last->begin, last->end - last->begin) != ")") {
+    return std::nullopt;
+  }
+  return editor_call_at_cursor(text, last->begin);
+}
+
 // Enter: submit commands and complete C++; otherwise keep editing in the same
 // buffer, including blank lines. Ctrl+C cancels an incomplete block.
 Replxx::ACTION_RESULT on_enter(Replxx& rx, CppInterpreter& cpp,
@@ -433,14 +492,8 @@ Replxx::ACTION_RESULT on_enter(Replxx& rx, CppInterpreter& cpp,
   std::string text = state.text();
   std::size_t cursor = utf8_byte_offset(text, state.cursor_position());
   if (is_cpp_editor_payload(text, cursor) && !is_command_line(text)) {
-    std::size_t call_cursor = cursor;
-    auto call = editor_call_at_cursor(text, call_cursor);
-    if (!call && call_cursor > 0) {
-      call = editor_call_at_cursor(text, call_cursor - 1);
-      if (call && call->has_close && call->close + 1 == call_cursor) {
-        call_cursor = call->close;
-      }
-    }
+    auto call = displayed_call(text, cursor);
+    const std::size_t call_cursor = call ? std::min(cursor, call->close) : cursor;
     if (call && call->has_close) {
       const auto completion = completions_at_cursor(cpp, text, call_cursor);
       const auto* signature =
@@ -574,29 +627,36 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
   auto last_edit =
       std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
   auto last_input = std::make_shared<std::string>();
+  auto committing = std::make_shared<bool>(false);
   rx.set_inline_display_callback([&cpp, &rx, selected_identity, selected_text, last_edit,
-                                  last_input](const std::string&) {
+                                  last_input, committing](const std::string&) {
     Replxx::inline_displays_t displays;
     const auto state = rx.get_state();
     const std::string full_input = state.text();
+    if (*committing && !cpp.options().keep_hints) {
+      return displays;
+    }
     sync_selected_signatures(selected_identity, selected_text, full_input);
     if (*last_input != full_input) {
       *last_input = full_input;
       *last_edit = std::chrono::steady_clock::now();
-      return displays;
+      if (!*committing) {
+        return displays;
+      }
     }
-    if (std::chrono::steady_clock::now() - *last_edit < std::chrono::milliseconds(160)) {
+    if (!*committing &&
+        std::chrono::steady_clock::now() - *last_edit < std::chrono::milliseconds(160)) {
       return displays;
     }
     if (is_command_line(full_input)) {
       return displays;
     }
     const auto cursor = utf8_byte_offset(full_input, state.cursor_position());
-    const auto frame = editor_call_at_cursor(full_input, cursor);
+    const auto frame = displayed_call(full_input, cursor);
     if (!frame) {
       return displays;
     }
-    const auto result = completions_at_cursor(cpp, full_input, cursor);
+    const auto result = completions_at_cursor(cpp, full_input, std::min(cursor, frame->close));
     const auto* signature =
         selected_signature(result, selected_identity_for(*frame, *selected_identity));
     if (signature == nullptr) {
@@ -628,7 +688,7 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
             label_position =
                 static_cast<int>(utf8_length(std::string_view(full_input).substr(0, cursor)));
           }
-          std::string ghost = prefix + "<placeholder>";
+          std::string ghost = prefix;
           if (!parameter.type.empty()) {
             ghost += " (" + parameter.type + ")";
           }
@@ -646,7 +706,7 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
           }
         }
       } else {
-        std::string ghost = ", " + prefix + "<placeholder>";
+        std::string ghost = ", " + prefix;
         if (!parameter.type.empty()) {
           ghost += " (" + parameter.type + ")";
         }
@@ -700,16 +760,25 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
               [&rx](char32_t code) { return rx.invoke(Replxx::ACTION::CLEAR_SCREEN, code); });
 
   // Custom binding: Enter inserts a newline while the C++ input is incomplete.
-  rx.bind_key(Replxx::KEY::ENTER, [&rx, &cpp, selected_identity, selected_text](char32_t code) {
-    const auto result = on_enter(rx, cpp, selected_identity, code);
-    const auto state = rx.get_state();
-    const std::string current_text = state.text();
-    if (current_text.empty() || result != Replxx::ACTION_RESULT::CONTINUE) {
-      selected_identity->clear();
-      *selected_text = current_text;
-    }
-    return result;
-  });
+  rx.bind_key(Replxx::KEY::ENTER,
+              [&rx, &cpp, selected_identity, selected_text, committing](char32_t code) {
+                struct CommitDisplayScope {
+                  bool& flag;
+                  explicit CommitDisplayScope(bool& value)
+                      : flag(value) {
+                    flag = true;
+                  }
+                  ~CommitDisplayScope() { flag = false; }
+                } commit_display(*committing);
+                const auto result = on_enter(rx, cpp, selected_identity, code);
+                const auto state = rx.get_state();
+                const std::string current_text = state.text();
+                if (current_text.empty() || result != Replxx::ACTION_RESULT::CONTINUE) {
+                  selected_identity->clear();
+                  *selected_text = current_text;
+                }
+                return result;
+              });
 
   rx.bind_key(Replxx::KEY::control('C'), [&rx, selected_identity, selected_text](char32_t code) {
     selected_identity->clear();

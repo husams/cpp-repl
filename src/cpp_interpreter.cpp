@@ -373,10 +373,11 @@ std::unique_ptr<CppInterpreter> CppInterpreter::create(
 }
 
 // ParseAndExecute(), split up so a failed Execute can be undone.
-bool CppInterpreter::run(const std::string& code, clang::Value& value) {
+bool CppInterpreter::run(const std::string& code, clang::Value& value,
+                         bool capture_semicolon_expression) {
   if (source_input_.empty()) reload_changed_sources();
   if (!global_options_changed_ || compile_scope_active_)
-    return run_raw(code, value);
+    return run_raw(code, value, nullptr, capture_semicolon_expression);
   SourceCompileOptions options;
   options.arguments = args_;
   std::error_code ec;
@@ -388,13 +389,14 @@ bool CppInterpreter::run(const std::string& code, clang::Value& value) {
   std::string error;
   if (!reference_directory_.empty()) options.directory = reference_directory_;
   const bool result = with_compile_options(
-      options, [&] { return run_raw(code, value); }, error);
+      options, [&] { return run_raw(code, value, nullptr, capture_semicolon_expression); }, error);
   if (!error.empty()) llvm::errs() << "error: " << error << '\n';
   return result;
 }
 
 bool CppInterpreter::run_raw(const std::string& code, clang::Value& value,
-                             std::vector<std::string>* abi_exports) {
+                             std::vector<std::string>* abi_exports,
+                             bool capture_semicolon_expression) {
   if (has_top_level_return(code)) {  // would crash the parser
     llvm::errs() << "error: 'return' is only allowed inside a function\n";
     return false;
@@ -411,6 +413,14 @@ bool CppInterpreter::run_raw(const std::string& code, clang::Value& value,
     llvm::errs() << "error: " << source_error << '\n';
     return false;
   }
+  capture_semicolon_expressions(*interp_->getCompilerInstance(), capture_semicolon_expression);
+#if LLVM_VERSION_MAJOR >= 22
+  auto capture_scope = llvm::scope_exit(
+      [&] { capture_semicolon_expressions(*interp_->getCompilerInstance(), false); });
+#else
+  auto capture_scope = llvm::make_scope_exit(
+      [&] { capture_semicolon_expressions(*interp_->getCompilerInstance(), false); });
+#endif
   llvm::Expected<clang::PartialTranslationUnit&> ptu = parse_input(*interp_, code);
   if (!ptu) return report(ptu.takeError());
   if (ptu->TheModule) {
@@ -472,8 +482,12 @@ bool CppInterpreter::run_raw(const std::string& code, clang::Value& value,
 
 bool CppInterpreter::execute(const std::string& code) {
   clang::Value value;
-  if (!run(code, value)) return false;
-  if (value.isValid() && !value.isVoid()) print_value(value, llvm::outs());
+  if (!run(code, value, options_.print_values)) {
+    return false;
+  }
+  if (options_.print_values && value.isValid() && !value.isVoid()) {
+    print_value(value, llvm::outs());
+  }
   // An object value runs its destructor here, while its code is still loaded.
   value.clear();
   return true;

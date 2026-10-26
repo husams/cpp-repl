@@ -10,6 +10,7 @@ class NamedDecl;
 
 namespace example {
 void enable_definition_shadowing(clang::CompilerInstance &compiler);
+void capture_semicolon_expressions(clang::CompilerInstance& compiler, bool capture);
 std::string unversioned_name(std::string name);
 bool is_current_definition(const clang::NamedDecl &declaration);
 void version_source_files(clang::CompilerInstance &compiler,
