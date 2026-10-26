@@ -233,6 +233,9 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
 
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_FOUND AND NOT WIN32)
+    add_test(NAME editor_overload_menu_pty
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/editor_overload_menu_pty.py
+                     $<TARGET_FILE:cpp-repl>)
     add_test(NAME repl_options_pty
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/repl_options_pty.py
                      $<TARGET_FILE:cpp-repl>)

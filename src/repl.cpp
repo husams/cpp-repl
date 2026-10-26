@@ -7,6 +7,7 @@
 #include <memory>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "commands.hpp"
@@ -379,6 +380,10 @@ void remap_selected_signatures(SelectedSignatures& selected, const std::string& 
   for (const auto& [offset, identity] : selected) {
     if (offset < prefix) {
       remapped[offset] = identity;
+    } else if (offset == prefix && before_suffix == prefix && after_suffix > prefix) {
+      // An overload choice made on a bare function name is anchored at the
+      // point where the user will type its opening parenthesis.
+      remapped[offset] = identity;
     } else if (offset >= before_suffix) {
       const auto adjusted = static_cast<std::ptrdiff_t>(offset) + delta;
       if (adjusted >= 0) {
@@ -458,6 +463,164 @@ std::vector<EditorCall> completed_calls(const std::string& text) {
     }
   }
   return calls;
+}
+
+struct OverloadMenu {
+  std::string source;
+  std::size_t call_open = 0;
+  std::size_t cursor = 0;
+  std::size_t prefix_begin = 0;
+  bool from_prefix = false;
+  std::vector<CompletionItem> items;
+  std::size_t selected = 0;
+};
+
+struct StaleOverloadMenu {
+  bool pending = false;
+  std::string source;
+};
+
+using ActiveOverloadMenu = std::optional<OverloadMenu>;
+
+std::string overload_menu_label(const CompletionItem& item) {
+  std::string label = item.label;
+  if (!item.detail.empty()) {
+    label += " -> " + item.detail;
+  }
+  return label;
+}
+
+bool open_overload_menu(CppInterpreter& cpp, const std::string& text, std::size_t cursor,
+                        const SelectedSignatures& selected, ActiveOverloadMenu& menu) {
+  std::size_t context = cursor;
+  std::size_t anchor = 0;
+  std::size_t prefix_begin = cursor;
+  std::string typed_prefix;
+  auto call = editor_call_at_cursor(text, cursor);
+  if (!call) {
+    std::size_t after_name = cursor;
+    while (after_name < text.size() && (text[after_name] == ' ' || text[after_name] == '\t' ||
+                                        text[after_name] == '\r' || text[after_name] == '\n')) {
+      ++after_name;
+    }
+    if (after_name < text.size() && text[after_name] == '(') {
+      call = editor_call_at_cursor(text, after_name + 1);
+    }
+  }
+  const bool in_call = static_cast<bool>(call);
+  if (call) {
+    anchor = call->open;
+    if (!call->arguments.empty() &&
+        (call->arguments.size() > 1 ||
+         call->arguments.front().begin != call->arguments.front().end)) {
+      return false;
+    }
+    context = std::min(cursor, call->close);
+  } else {
+    std::size_t begin = cursor;
+    while (begin > 0 && is_identifier_byte(static_cast<unsigned char>(text[begin - 1]))) {
+      --begin;
+    }
+    if (begin == cursor) {
+      return false;
+    }
+    prefix_begin = begin;
+    typed_prefix = text.substr(begin, cursor - begin);
+    if (cursor < text.size() && is_identifier_byte(static_cast<unsigned char>(text[cursor]))) {
+      return false;
+    }
+    auto before = std::string_view(text).substr(0, begin);
+    const auto nonblank = before.find_last_not_of(" \t\r\n");
+    if (nonblank != std::string_view::npos) {
+      const auto word_begin = before.find_last_of(" \t\r\n", nonblank);
+      const auto previous_word =
+          before.substr(word_begin == std::string_view::npos ? 0 : word_begin + 1,
+                        nonblank - (word_begin == std::string_view::npos ? 0 : word_begin + 1) + 1);
+      if (before[nonblank] == '&' || previous_word == "using" || before[nonblank] == '<') {
+        return false;
+      }
+    }
+    anchor = cursor;
+  }
+
+  const auto result = cpp.complete(text.substr(0, context));
+  const auto& source_items =
+      result.signature_items.size() >= 2 ? result.signature_items : result.items;
+  std::vector<CompletionItem> items;
+  std::unordered_set<std::string> callable_names;
+  for (const auto& item : source_items) {
+    if ((item.kind != SemanticKind::Function && item.kind != SemanticKind::Method) ||
+        (!in_call && !item.insert_call)) {
+      continue;
+    }
+    callable_names.insert(item.text);
+  }
+  std::string callable_name;
+  if (in_call && call) {
+    // Clang's signature list is already scoped to the callable being edited.
+    // Trust it when it resolves to one family; lexical callee extraction below
+    // handles ordinary calls and remains the safer fallback for mixed results.
+    if (result.signature_items.size() >= 2 && callable_names.size() == 1) {
+      callable_name = *callable_names.begin();
+    } else {
+      std::size_t end = call->open;
+      while (end > 0 && std::isspace(static_cast<unsigned char>(text[end - 1]))) {
+        --end;
+      }
+      std::size_t begin = end;
+      while (begin > 0 && is_identifier_byte(static_cast<unsigned char>(text[begin - 1]))) {
+        --begin;
+      }
+      if (begin == end) {
+        return false;
+      }
+      const std::string callee = text.substr(begin, end - begin);
+      for (const auto& item : source_items) {
+        if ((item.kind == SemanticKind::Function || item.kind == SemanticKind::Method) &&
+            (in_call || item.insert_call) &&
+            (item.text == callee ||
+             (item.text.size() > callee.size() + 2 &&
+              item.text.compare(item.text.size() - callee.size(), callee.size(), callee) == 0 &&
+              item.text.compare(item.text.size() - callee.size() - 2, 2, "::") == 0))) {
+          callable_name = item.text;
+          break;
+        }
+      }
+    }
+  } else if (callable_names.size() == 1) {
+    callable_name = *callable_names.begin();
+  } else if (callable_names.size() > 1 && callable_names.count(typed_prefix)) {
+    callable_name = typed_prefix;
+  }
+  if (callable_name.empty()) {
+    return false;
+  }
+  for (const auto& item : source_items) {
+    if (item.text == callable_name &&
+        (item.kind == SemanticKind::Function || item.kind == SemanticKind::Method) &&
+        (in_call || item.insert_call)) {
+      items.push_back(item);
+    }
+  }
+  if (items.size() < 2) {
+    return false;
+  }
+  if (call) {
+    const std::string identity = selected_identity_for(*call, selected);
+    if (std::any_of(items.begin(), items.end(),
+                    [&](const auto& item) { return item.identity == identity; })) {
+      return false;
+    }
+  }
+  OverloadMenu opened;
+  opened.source = text;
+  opened.call_open = anchor;
+  opened.cursor = cursor;
+  opened.prefix_begin = prefix_begin;
+  opened.from_prefix = !in_call;
+  opened.items = std::move(items);
+  menu = std::move(opened);
+  return true;
 }
 
 bool is_trailing_call(const std::string& text, const EditorCall& call) {
@@ -664,6 +827,17 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
   auto selected_text = std::make_shared<std::string>();
   auto signature_cache = std::make_shared<SignatureCache>();
   auto signature_cache_text = std::make_shared<std::string>();
+  auto overload_menu = std::make_shared<ActiveOverloadMenu>();
+  auto stale_overload_menu = std::make_shared<StaleOverloadMenu>();
+  auto force_menu_repaint = [&rx](char32_t) {
+    const auto state = rx.get_state();
+    rx.set_state(Replxx::State(state.text(), state.cursor_position()));
+  };
+  auto menu_matches_current = [&rx](const OverloadMenu& menu) {
+    const auto state = rx.get_state();
+    const std::string text = state.text();
+    return menu.source == text && menu.cursor == utf8_byte_offset(text, state.cursor_position());
+  };
   auto identities = std::make_shared<std::unordered_map<std::string, std::string>>();
   rx.set_completion_callback([&cpp, &rx, identities](const std::string& input, int& context_len) {
     return complete(cpp, input, context_len, rx, *identities);
@@ -689,6 +863,27 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
     }
     signature_cache->erase(call->open);
   });
+  rx.set_selection_menu_callback(
+      [overload_menu, stale_overload_menu, &rx](const std::string& input) {
+        std::vector<Replxx::SelectionMenuItem> rows;
+        if (!*overload_menu) {
+          return rows;
+        }
+        const auto state = rx.get_state();
+        if ((*overload_menu)->source != input ||
+            (*overload_menu)->cursor != utf8_byte_offset(input, state.cursor_position())) {
+          stale_overload_menu->pending = ((*overload_menu)->source == input);
+          stale_overload_menu->source = input;
+          overload_menu->reset();
+          return rows;
+        }
+        for (std::size_t i = 0; i < (*overload_menu)->items.size(); ++i) {
+          rows.push_back({std::string(i == (*overload_menu)->selected ? "> " : "  ") +
+                              overload_menu_label((*overload_menu)->items[i]),
+                          i == (*overload_menu)->selected});
+        }
+        return rows;
+      });
   rx.set_hint_callback([&cpp](const std::string& input, int& length, Replxx::Color& color) {
     return hint(cpp, input, length, color);
   });
@@ -814,10 +1009,16 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
     });
     return displays;
   });
-  rx.set_highlighter_callback([last_edit, last_input, selected_identity,
+  rx.set_highlighter_callback([last_edit, last_input, selected_identity, overload_menu,
+                               stale_overload_menu,
                                selected_text](const std::string& input, Replxx::colors_t& colors) {
     sync_selected_signatures(selected_identity, selected_text, input);
+    if (*overload_menu && (*overload_menu)->source != input) {
+      overload_menu->reset();
+      stale_overload_menu->pending = false;
+    }
     if (*last_input != input) {
+      stale_overload_menu->pending = false;
       *last_input = input;
       *last_edit = std::chrono::steady_clock::now();
     }
@@ -846,8 +1047,51 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
               [&rx](char32_t code) { return rx.invoke(Replxx::ACTION::CLEAR_SCREEN, code); });
 
   // Custom binding: Enter inserts a newline while the C++ input is incomplete.
-  rx.bind_key(Replxx::KEY::ENTER, [&rx, &cpp, selected_identity, selected_text, signature_cache,
-                                   signature_cache_text, committing](char32_t code) {
+  rx.bind_key(Replxx::KEY::ENTER, [&rx, &cpp, force_menu_repaint, menu_matches_current,
+                                   stale_overload_menu, selected_identity, selected_text,
+                                   signature_cache, signature_cache_text, overload_menu,
+                                   committing](char32_t code) {
+    if (stale_overload_menu->pending && rx.get_state().text() == stale_overload_menu->source) {
+      stale_overload_menu->pending = false;
+      overload_menu->reset();
+      force_menu_repaint(code);
+      return Replxx::ACTION_RESULT::CONTINUE;
+    }
+    // Input can change before the highlighter gets a chance to clear a stale
+    // cursor-dismissed menu. Compare against the captured source here so a
+    // rapid edit followed by Enter is handled as ordinary input.
+    stale_overload_menu->pending = false;
+    if (*overload_menu) {
+      if (!menu_matches_current(**overload_menu)) {
+        overload_menu->reset();
+        force_menu_repaint(code);
+        return Replxx::ACTION_RESULT::CONTINUE;
+      }
+      const auto& menu = **overload_menu;
+      const auto state = rx.get_state();
+      std::string source = state.text();
+      sync_selected_signatures(selected_identity, selected_text, source);
+      if (menu.selected < menu.items.size()) {
+        if (menu.from_prefix) {
+          const auto& item = menu.items[menu.selected];
+          source.replace(menu.prefix_begin, menu.cursor - menu.prefix_begin, item.text + "()");
+          const std::size_t call_open = menu.prefix_begin + item.text.size();
+          rx.set_state(Replxx::State(
+              source.c_str(),
+              static_cast<int>(utf8_length(std::string_view(source).substr(0, call_open + 1)))));
+          sync_selected_signatures(selected_identity, selected_text, source);
+          (*selected_identity)[call_open] = item.identity;
+          signature_cache->erase(call_open);
+        } else {
+          (*selected_identity)[menu.call_open] = menu.items[menu.selected].identity;
+          signature_cache->erase(menu.call_open);
+        }
+      }
+      *selected_text = rx.get_state().text();
+      overload_menu->reset();
+      force_menu_repaint(code);
+      return Replxx::ACTION_RESULT::CONTINUE;
+    }
     struct CommitDisplayScope {
       bool& flag;
       explicit CommitDisplayScope(bool& value)
@@ -856,6 +1100,7 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
       }
       ~CommitDisplayScope() { flag = false; }
     } commit_display(*committing);
+    overload_menu->reset();
     const auto result = on_enter(rx, cpp, selected_identity, code);
     const auto state = rx.get_state();
     const std::string current_text = state.text();
@@ -868,14 +1113,17 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
     return result;
   });
 
-  rx.bind_key(Replxx::KEY::control('C'), [&rx, selected_identity, selected_text, signature_cache,
-                                          signature_cache_text](char32_t code) {
-    selected_identity->clear();
-    *selected_text = {};
-    signature_cache->clear();
-    signature_cache_text->clear();
-    return rx.invoke(Replxx::ACTION::ABORT_LINE, code);
-  });
+  rx.bind_key(Replxx::KEY::control('C'),
+              [&rx, selected_identity, selected_text, signature_cache, signature_cache_text,
+               overload_menu, stale_overload_menu](char32_t code) {
+                overload_menu->reset();
+                stale_overload_menu->pending = false;
+                selected_identity->clear();
+                *selected_text = {};
+                signature_cache->clear();
+                signature_cache_text->clear();
+                return rx.invoke(Replxx::ACTION::ABORT_LINE, code);
+              });
 
   auto advance_snippet = [&cpp, &rx, selected_identity](bool backwards) {
     const auto state = rx.get_state();
@@ -918,7 +1166,68 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
         text.c_str(), static_cast<int>(utf8_length(std::string_view(text).substr(0, target)))));
     return true;
   };
-  rx.bind_key(Replxx::KEY::TAB, [&cpp, &rx, advance_snippet](char32_t code) {
+  auto accept_overload = [&rx, force_menu_repaint, menu_matches_current, overload_menu,
+                          selected_identity, signature_cache, selected_text](char32_t code) {
+    if (!*overload_menu) {
+      return false;
+    }
+    if (!menu_matches_current(**overload_menu)) {
+      overload_menu->reset();
+      force_menu_repaint(code);
+      return false;
+    }
+    const auto& menu = **overload_menu;
+    const auto state = rx.get_state();
+    std::string source = state.text();
+    sync_selected_signatures(selected_identity, selected_text, source);
+    if (menu.selected < menu.items.size()) {
+      if (menu.from_prefix) {
+        const auto& item = menu.items[menu.selected];
+        const std::string inserted = item.text + "()";
+        source.replace(menu.prefix_begin, menu.cursor - menu.prefix_begin, inserted);
+        const std::size_t call_open = menu.prefix_begin + item.text.size();
+        const std::size_t caret = call_open + 1;
+        rx.set_state(Replxx::State(
+            source.c_str(),
+            static_cast<int>(utf8_length(std::string_view(source).substr(0, caret)))));
+        sync_selected_signatures(selected_identity, selected_text, source);
+        (*selected_identity)[call_open] = item.identity;
+        signature_cache->erase(call_open);
+      } else {
+        (*selected_identity)[menu.call_open] = menu.items[menu.selected].identity;
+        signature_cache->erase(menu.call_open);
+      }
+    }
+    *selected_text = rx.get_state().text();
+    overload_menu->reset();
+    force_menu_repaint(code);
+    return true;
+  };
+  auto move_overload = [force_menu_repaint, menu_matches_current, overload_menu](int direction,
+                                                                                 char32_t code) {
+    if (!*overload_menu || (*overload_menu)->items.empty()) {
+      return false;
+    }
+    if (!menu_matches_current(**overload_menu)) {
+      overload_menu->reset();
+      force_menu_repaint(code);
+      return false;
+    }
+    const std::size_t count = (*overload_menu)->items.size();
+    if (direction > 0) {
+      (*overload_menu)->selected = ((*overload_menu)->selected + 1) % count;
+    } else {
+      (*overload_menu)->selected = ((*overload_menu)->selected + count - 1) % count;
+    }
+    force_menu_repaint(code);
+    return true;
+  };
+  rx.bind_key(Replxx::KEY::TAB, [&cpp, &rx, advance_snippet, force_menu_repaint, overload_menu,
+                                 accept_overload, selected_identity,
+                                 stale_overload_menu](char32_t code) {
+    if (accept_overload(code)) {
+      return Replxx::ACTION_RESULT::CONTINUE;
+    }
     const auto state = rx.get_state();
     const std::string text = state.text();
     const auto cursor = utf8_byte_offset(text, state.cursor_position());
@@ -926,9 +1235,47 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
     if (frame && should_complete_argument_prefix(cpp, text, *frame, cursor)) {
       return rx.invoke(Replxx::ACTION::COMPLETE_LINE, code);
     }
+    if (open_overload_menu(cpp, text, cursor, *selected_identity, *overload_menu)) {
+      stale_overload_menu->pending = false;
+      force_menu_repaint(code);
+      return Replxx::ACTION_RESULT::CONTINUE;
+    }
     return advance_snippet(false) ? Replxx::ACTION_RESULT::CONTINUE
                                   : rx.invoke(Replxx::ACTION::COMPLETE_LINE, code);
   });
+  rx.bind_key(Replxx::KEY::UP, [&rx, move_overload](char32_t code) {
+    return move_overload(-1, code) ? Replxx::ACTION_RESULT::CONTINUE
+                                   : rx.invoke(Replxx::ACTION::HISTORY_PREVIOUS, code);
+  });
+  rx.bind_key(Replxx::KEY::DOWN, [&rx, move_overload](char32_t code) {
+    return move_overload(1, code) ? Replxx::ACTION_RESULT::CONTINUE
+                                  : rx.invoke(Replxx::ACTION::HISTORY_NEXT, code);
+  });
+  rx.bind_key(Replxx::KEY::LEFT, [&rx, overload_menu, stale_overload_menu](char32_t code) {
+    if (*overload_menu) {
+      stale_overload_menu->pending = true;
+      stale_overload_menu->source = rx.get_state().text();
+    }
+    overload_menu->reset();
+    return rx.invoke(Replxx::ACTION::MOVE_CURSOR_LEFT, code);
+  });
+  rx.bind_key(Replxx::KEY::RIGHT, [&rx, overload_menu, stale_overload_menu](char32_t code) {
+    if (*overload_menu) {
+      stale_overload_menu->pending = true;
+      stale_overload_menu->source = rx.get_state().text();
+    }
+    overload_menu->reset();
+    return rx.invoke(Replxx::ACTION::MOVE_CURSOR_RIGHT, code);
+  });
+  rx.bind_key(Replxx::KEY::ESCAPE,
+              [force_menu_repaint, overload_menu, stale_overload_menu](char32_t code) {
+                if (*overload_menu) {
+                  overload_menu->reset();
+                  stale_overload_menu->pending = false;
+                  force_menu_repaint(code);
+                }
+                return Replxx::ACTION_RESULT::CONTINUE;
+              });
   rx.bind_key(Replxx::KEY::BASE_SHIFT | Replxx::KEY::TAB, [&rx, advance_snippet](char32_t code) {
     return advance_snippet(true) ? Replxx::ACTION_RESULT::CONTINUE
                                  : rx.invoke(Replxx::ACTION::COMPLETE_PREVIOUS, code);

@@ -1,5 +1,5 @@
 diff --git a/include/replxx.hxx b/include/replxx.hxx
-index ab3c5e5..c2887a7 100644
+index ab3c5e5..47b218f 100644
 --- a/include/replxx.hxx
 +++ b/include/replxx.hxx
 @@ -211,7 +211,10 @@ public:
@@ -35,15 +35,20 @@ index ab3c5e5..c2887a7 100644
  		std::string const& text( void ) const {
  			return ( _text );
  		}
-@@ -306,6 +324,7 @@ public:
+@@ -306,6 +324,12 @@ public:
  	 * \return A list of user completions.
  	 */
  	typedef std::function<completions_t ( std::string const& input, int& contextLen )> completion_callback_t;
 +	typedef std::function<void ( std::string const& text, std::string const& display )> completion_accept_callback_t;
++	struct SelectionMenuItem {
++		std::string text;
++		bool selected = false;
++	};
++	typedef std::function<std::vector<SelectionMenuItem> ( std::string const& input )> selection_menu_callback_t;
  
  	/*! \brief Highlighter callback type definition.
  	 *
-@@ -321,6 +340,10 @@ public:
+@@ -321,6 +345,10 @@ public:
  	 * \param colors - output buffer for color information.
  	 */
  	typedef std::function<void ( std::string const& input, colors_t& colors )> highlighter_callback_t;
@@ -54,7 +59,7 @@ index ab3c5e5..c2887a7 100644
  
  	/*! \brief Hints callback type definition.
  	 *
-@@ -395,12 +418,15 @@ public:
+@@ -395,12 +423,16 @@ public:
  	 * \param fn - user defined callback function.
  	 */
  	void set_completion_callback( completion_callback_t const& fn );
@@ -67,11 +72,12 @@ index ab3c5e5..c2887a7 100644
  	void set_highlighter_callback( highlighter_callback_t const& fn );
 +	void set_idle_highlighter_callback( idle_highlighter_callback_t const& fn );
 +	void set_inline_display_callback( inline_display_callback_t const& fn );
++	void set_selection_menu_callback( selection_menu_callback_t const& fn );
  
  	/*! \brief Register hints callback.
  	 *
 diff --git a/src/replxx.cxx b/src/replxx.cxx
-index d0db804..a829a40 100644
+index d0db804..4eca7f5 100644
 --- a/src/replxx.cxx
 +++ b/src/replxx.cxx
 @@ -134,6 +134,10 @@ void Replxx::set_completion_callback( completion_callback_t const& fn ) {
@@ -85,7 +91,7 @@ index d0db804..a829a40 100644
  void Replxx::set_modify_callback( modify_callback_t const& fn ) {
  	_impl->set_modify_callback( fn );
  }
-@@ -142,6 +146,14 @@ void Replxx::set_highlighter_callback( highlighter_callback_t const& fn ) {
+@@ -142,6 +146,18 @@ void Replxx::set_highlighter_callback( highlighter_callback_t const& fn ) {
  	_impl->set_highlighter_callback( fn );
  }
  
@@ -97,24 +103,38 @@ index d0db804..a829a40 100644
 +	_impl->set_inline_display_callback( fn );
 +}
 +
++void Replxx::set_selection_menu_callback( selection_menu_callback_t const& fn ) {
++	_impl->set_selection_menu_callback( fn );
++}
++
  void Replxx::set_hint_callback( hint_callback_t const& fn ) {
  	_impl->set_hint_callback( fn );
  }
 diff --git a/src/replxx_impl.cxx b/src/replxx_impl.cxx
-index 22ee748..9a7881d 100644
+index 22ee748..571c86f 100644
 --- a/src/replxx_impl.cxx
 +++ b/src/replxx_impl.cxx
-@@ -174,7 +174,9 @@ Replxx::ReplxxImpl::ReplxxImpl( FILE*, FILE*, FILE* )
+@@ -40,6 +40,8 @@ using namespace replxx::color;
+ 
+ namespace replxx {
+ 
++int mk_wcwidth( char32_t );
++
+ namespace {
+ 
+ namespace action_names {
+@@ -174,7 +176,10 @@ Replxx::ReplxxImpl::ReplxxImpl( FILE*, FILE*, FILE* )
  	, _currentThread()
  	, _prompt( _terminal )
  	, _completionCallback( nullptr )
 +	, _completionAcceptCallback( nullptr )
  	, _highlighterCallback( nullptr )
 +	, _inlineDisplayCallback( nullptr )
++	, _selectionMenuCallback( nullptr )
  	, _hintCallback( nullptr )
  	, _keyPresses()
  	, _messages()
-@@ -421,8 +423,12 @@ char32_t Replxx::ReplxxImpl::read_char( HINT_ACTION hintAction_ ) {
+@@ -421,8 +426,12 @@ char32_t Replxx::ReplxxImpl::read_char( HINT_ACTION hintAction_ ) {
  	while ( true ) {
  		Terminal::EVENT_TYPE eventType( _terminal.wait_for_input( hintDelay ) );
  		if ( eventType == Terminal::EVENT_TYPE::TIMEOUT ) {
@@ -129,16 +149,70 @@ index 22ee748..9a7881d 100644
  			_refreshSkipped = false;
  			continue;
  		}
-@@ -758,22 +764,48 @@ void Replxx::ReplxxImpl::render( HINT_ACTION hintAction_ ) {
+@@ -753,27 +762,101 @@ void Replxx::ReplxxImpl::render( HINT_ACTION hintAction_ ) {
+ 	}
+ 	_hasNewlines = false;
+ 	_display.clear();
++	_utf8Buffer.assign( _data );
++	auto appendMenu = [&]() {
++		if ( ! _selectionMenuCallback ) {
++			return;
++		}
++		std::vector<Replxx::SelectionMenuItem> const items( _selectionMenuCallback( _utf8Buffer.get() ) );
++		if ( items.empty() ) {
++			return;
++		}
++		_displayInputLength = static_cast<int>( _display.size() );
++		int selected( 0 );
++		for ( int i( 0 ); i < static_cast<int>( items.size() ); ++ i ) {
++			if ( items[i].selected ) { selected = i; break; }
++		}
++		int const maxRows( 8 );
++		int const first( max( 0, min( selected - maxRows / 2, static_cast<int>( items.size() ) - maxRows ) ) );
++		int const last( min( static_cast<int>( items.size() ), first + maxRows ) );
++		int const maxColumns( max( 1, _prompt.screen_columns() - 2 ) );
++		for ( int index( first ); index < last; ++ index ) {
++			Replxx::SelectionMenuItem const& item( items[index] );
++			_display.push_back( '\n' );
++			if ( ! _noColor ) {
++				set_color( item.selected ? Replxx::Color::BRIGHTGREEN : Replxx::Color::GRAY );
++			}
++			UnicodeString row;
++			row.assign( item.text.c_str() );
++			int columns( 0 );
++			bool truncated( false );
++			for ( char32_t ch : row ) {
++				if ( is_control_code( ch ) || ch == '\n' || ch == '\r' ) {
++					continue;
++				}
++				int const width( mk_wcwidth( ch ) );
++				if ( width < 0 ) continue;
++				if ( columns + width > max( 0, maxColumns - 1 ) ) {
++					truncated = true;
++					break;
++				}
++				_display.push_back( ch );
++				columns += width;
++			}
++			if ( truncated && maxColumns > 0 ) _display.push_back( 0x2026 );
++			if ( ! _noColor ) {
++				set_color( Replxx::Color::DEFAULT );
++			}
++		}
++		_hasNewlines = true;
++	};
+ 	if ( _noColor ) {
+ 		for ( char32_t ch : _data ) {
  			render( ch );
  		}
  		_displayInputLength = static_cast<int>( _display.size() );
 +		_displayCursorPosition = _pos;
++		appendMenu();
  		_modifiedState = false;
  		return;
  	}
  	Replxx::colors_t colors( _data.length(), Replxx::Color::DEFAULT );
- 	_utf8Buffer.assign( _data );
+-	_utf8Buffer.assign( _data );
 +	Replxx::inline_display_callback_t::result_type inlineDisplays;
 +	if ( !! _inlineDisplayCallback ) {
 +		IOModeGuard ioModeGuard( _terminal );
@@ -179,7 +253,15 @@ index 22ee748..9a7881d 100644
  		if ( colors[i] != c ) {
  			c = colors[i];
  			set_color( c );
-@@ -800,9 +832,6 @@ void Replxx::ReplxxImpl::handle_hints( HINT_ACTION hintAction_ ) {
+@@ -782,6 +865,7 @@ void Replxx::ReplxxImpl::render( HINT_ACTION hintAction_ ) {
+ 	}
+ 	set_color( Replxx::Color::DEFAULT );
+ 	_displayInputLength = static_cast<int>( _display.size() );
++	appendMenu();
+ 	_modifiedState = false;
+ 	return;
+ }
+@@ -800,9 +884,6 @@ void Replxx::ReplxxImpl::handle_hints( HINT_ACTION hintAction_ ) {
  	if ( ( hintAction_ == HINT_ACTION::SKIP ) || ( hintAction_ == HINT_ACTION::TRIM ) ) {
  		return;
  	}
@@ -189,7 +271,7 @@ index 22ee748..9a7881d 100644
  	_hint = UnicodeString();
  	if ( hintAction_ == HINT_ACTION::REGENERATE ) {
  		_hintSelection = -1;
-@@ -815,6 +844,11 @@ void Replxx::ReplxxImpl::handle_hints( HINT_ACTION hintAction_ ) {
+@@ -815,6 +896,11 @@ void Replxx::ReplxxImpl::handle_hints( HINT_ACTION hintAction_ ) {
  		IOModeGuard ioModeGuard( _terminal );
  		_hintsCache = call_hinter( _utf8Buffer.get(), _hintContextLenght, _hintColor );
  	}
@@ -201,7 +283,7 @@ index 22ee748..9a7881d 100644
  	int hintCount( static_cast<int>( _hintsCache.size() ) );
  	if ( hintCount == 1 ) {
  		_hint = _hintsCache.front();
-@@ -963,7 +997,7 @@ void Replxx::ReplxxImpl::refresh_line( HINT_ACTION hintAction_ ) {
+@@ -963,7 +1049,7 @@ void Replxx::ReplxxImpl::refresh_line( HINT_ACTION hintAction_ ) {
  	// calculate the desired position of the cursor
  	int xCursorPos( _prompt.indentation() );
  	int yCursorPos( 0 );
@@ -210,7 +292,7 @@ index 22ee748..9a7881d 100644
  
  	// calculate the position of the end of the input line
  	int xEndOfInput( _prompt.indentation() );
-@@ -1091,6 +1125,10 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+@@ -1091,6 +1177,10 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
  	// get a list of completions
  	_completionSelection = -1;
  	_completionContextLength = context_length();
@@ -221,7 +303,7 @@ index 22ee748..9a7881d 100644
  	/* IOModeGuard scope */ {
  		IOModeGuard ioModeGuard( _terminal );
  		_completions = call_completer( _utf8Buffer.get(), _completionContextLength );
-@@ -1101,12 +1139,21 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+@@ -1101,12 +1191,21 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
  		beep();
  		return 0;
  	}
@@ -244,7 +326,7 @@ index 22ee748..9a7881d 100644
  		selectedCompletion = _hintSelection;
  		completionsCount = 1;
  	}
-@@ -1121,10 +1168,34 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+@@ -1121,10 +1220,34 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
  
  	// if we can extend the item, extend it and return to main loop
  	if ( ( longestCommonPrefix > _completionContextLength ) || ( completionsCount == 1 ) ) {
@@ -279,7 +361,7 @@ index 22ee748..9a7881d 100644
  		_completionContextLength = longestCommonPrefix;
  		refresh_line();
  		return 0;
-@@ -1181,7 +1252,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+@@ -1181,7 +1304,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
  	if ( showCompletions ) {
  		int longestCompletion( 0 );
  		for ( size_t j( 0 ); j < _completions.size(); ++ j ) {
@@ -288,7 +370,7 @@ index 22ee748..9a7881d 100644
  			if ( itemLength > longestCompletion ) {
  				longestCompletion = itemLength;
  			}
-@@ -1253,7 +1324,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+@@ -1253,7 +1376,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
  				size_t index = (column * rowCount) + row;
  				if ( index < _completions.size() ) {
  					Completion const& c( _completions[index] );
@@ -297,7 +379,7 @@ index 22ee748..9a7881d 100644
  					fflush(stdout);
  
  					if ( longestCommonPrefix > 0 ) {
-@@ -1271,7 +1342,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+@@ -1271,7 +1394,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
  						UnicodeString ac( ansi_color( c.color() ) );
  						_terminal.write32( ac.get(), ac.length() );
  					}
@@ -306,7 +388,7 @@ index 22ee748..9a7881d 100644
  					if ( !_noColor && ( c.color() != Replxx::Color::DEFAULT ) ) {
  						_terminal.write32( res.get(), res.length() );
  					}
-@@ -1383,7 +1454,8 @@ Replxx::ACTION_RESULT Replxx::ReplxxImpl::action( action_trait_t actionTrait_, k
+@@ -1383,7 +1506,8 @@ Replxx::ACTION_RESULT Replxx::ReplxxImpl::action( action_trait_t actionTrait_, k
  	}
  	if ( actionTrait_ & MOVE_CURSOR ) {
  		_modifiedState = ( _pos != _oldPos ) && (
@@ -316,7 +398,7 @@ index 22ee748..9a7881d 100644
  			|| ( _oldPos == _data.length() )
  			|| ( ( _pos < _data.length() ) && strchr( "{}[]()", _data[_pos] ) )
  			|| ( ( _oldPos < _data.length() ) && strchr( "{}[]()", _data[_oldPos] ) )
-@@ -2020,23 +2092,48 @@ Replxx::ACTION_RESULT Replxx::ReplxxImpl::complete( bool previous_ ) {
+@@ -2020,23 +2144,48 @@ Replxx::ACTION_RESULT Replxx::ReplxxImpl::complete( bool previous_ ) {
  			return ( Replxx::ACTION_RESULT::CONTINUE );
  		}
  	}
@@ -365,7 +447,7 @@ index 22ee748..9a7881d 100644
  	refresh_line();  // Refresh the line
  	return ( Replxx::ACTION_RESULT::CONTINUE );
  }
-@@ -2363,10 +2460,22 @@ void Replxx::ReplxxImpl::set_completion_callback( Replxx::completion_callback_t
+@@ -2363,10 +2512,26 @@ void Replxx::ReplxxImpl::set_completion_callback( Replxx::completion_callback_t
  	_completionCallback = fn;
  }
  
@@ -385,11 +467,15 @@ index 22ee748..9a7881d 100644
 +	_inlineDisplayCallback = fn;
 +}
 +
++void Replxx::ReplxxImpl::set_selection_menu_callback( Replxx::selection_menu_callback_t const& fn ) {
++	_selectionMenuCallback = fn;
++}
++
  void Replxx::ReplxxImpl::set_hint_callback( Replxx::hint_callback_t const& fn ) {
  	_hintCallback = fn;
  }
 diff --git a/src/replxx_impl.hxx b/src/replxx_impl.hxx
-index 8f6357b..fc9ec50 100644
+index 8f6357b..0f4b8a8 100644
 --- a/src/replxx_impl.hxx
 +++ b/src/replxx_impl.hxx
 @@ -53,20 +53,38 @@ class Replxx::ReplxxImpl {
@@ -441,7 +527,7 @@ index 8f6357b..fc9ec50 100644
  	int _displayInputLength;
  	UnicodeString  _hint;
  	int _prefix; // prefix length used in common prefix search
-@@ -136,7 +155,10 @@ private:
+@@ -136,7 +155,11 @@ private:
  	Prompt _prompt;
  	Replxx::modify_callback_t _modifyCallback;
  	Replxx::completion_callback_t _completionCallback;
@@ -449,10 +535,11 @@ index 8f6357b..fc9ec50 100644
  	Replxx::highlighter_callback_t _highlighterCallback;
 +	Replxx::idle_highlighter_callback_t _idleHighlighterCallback;
 +	Replxx::inline_display_callback_t _inlineDisplayCallback;
++	Replxx::selection_menu_callback_t _selectionMenuCallback;
  	Replxx::hint_callback_t _hintCallback;
  	key_presses_t _keyPresses;
  	messages_t _messages;
-@@ -145,6 +167,10 @@ private:
+@@ -145,6 +168,10 @@ private:
  	completions_t _completions;
  	int _completionContextLength;
  	int _completionSelection;
@@ -463,7 +550,7 @@ index 8f6357b..fc9ec50 100644
  	std::string _preloadedBuffer; // used with set_preload_buffer
  	std::string _errorMessage;
  	UnicodeString _previousSearchText; // remembered across invocations of replxx_input()
-@@ -162,7 +188,10 @@ public:
+@@ -162,7 +189,11 @@ public:
  	virtual ~ReplxxImpl( void );
  	void set_modify_callback( Replxx::modify_callback_t const& fn );
  	void set_completion_callback( Replxx::completion_callback_t const& fn );
@@ -471,6 +558,7 @@ index 8f6357b..fc9ec50 100644
  	void set_highlighter_callback( Replxx::highlighter_callback_t const& fn );
 +	void set_idle_highlighter_callback( Replxx::idle_highlighter_callback_t const& fn );
 +	void set_inline_display_callback( Replxx::inline_display_callback_t const& fn );
++	void set_selection_menu_callback( Replxx::selection_menu_callback_t const& fn );
  	void set_hint_callback( Replxx::hint_callback_t const& fn );
  	char const* input( std::string const& prompt );
  	void history_add( std::string const& line );

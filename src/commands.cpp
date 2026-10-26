@@ -757,8 +757,8 @@ bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out,
         out << "  " << std::left << std::setw(static_cast<int>(width + 2))
             << (std::string(c.name) + c.usage) << c.description << '\n';
       }
-      out << "Anything else is C++, compiled and run by clang::Interpreter; an "
-             "expression without a final ';' prints its value.\n"
+      out << "Other input is C++; expression values print by default. "
+             "%set print_values = false disables automatic output.\n"
              "Incomplete C++ continues on the next line, including blank lines; "
              "Ctrl+C cancels it.\n"
              "Hooks accept multiline cpp`...` blocks; an empty body clears a hook.\n"
@@ -768,7 +768,8 @@ bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out,
              "Order: pre, mock/original, post; arguments are named in the signature, "
              "methods use self/this, post uses result.\n"
              "Keys: Tab complete, Ctrl+J newline, Ctrl+L clear screen, "
-             "Ctrl+C cancel, Ctrl+D exit\n";
+             "Ctrl+C cancel, Ctrl+D exit\n"
+             "Overload menu: Up/Down select, Tab accept, Escape close.\n";
       break;
     }
     case CommandKind::AddPath:

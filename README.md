@@ -796,7 +796,11 @@ session's global scope and accesses members using ordinary C++ access rules.
   compiler importing the session's current declarations; no LSP is required.
   Tab extends the common name prefix; another Tab lists colored suggestions
   with parameter names, return/data types and kind labels. Overloads appear as
-  separate rows; Ctrl+N/Ctrl+P cycle through them before typing arguments.
+  separate rows. Tab on an overloaded name or an unselected empty call opens
+  a signature menu; Up/Down selects a row and Tab accepts it. The chosen
+  signature supplies the gray parameter hints and argument stops. Escape closes
+  the menu, and ordinary editing dismisses it. Selection guides the editor;
+  C++ still resolves the call from the argument types.
   Completing a function or method inserts `()` and leaves the
   cursor at the first argument. Light-gray hints inside the parentheses show
   parameter names, blank argument slots and types, with the return type after `)`.
@@ -825,7 +829,7 @@ session's global scope and accesses members using ordinary C++ access rules.
   `%add-path `, `%add ` and `%reload `, and class names after `%class `,
   `%methods ` and `%fields `. The member commands also complete their option
   keywords, access values and parent traversal booleans.
-  The pinned replxx dependency carries a small local display-label extension;
+  The pinned replxx dependency carries local completion and display extensions;
   `cmake/replxx-display.patch` preserves its existing insertion and pagination
   behavior. `scripts/editor-grounding.ctk` traces the AST analysis and rendering
   paths using this build's compilation database.

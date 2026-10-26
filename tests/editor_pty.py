@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory() as cwd:
             ("definitions", b"int editor_menu(int first) { return first; } double editor_menu(double value) { return value; } struct EditorPty { int field = 7; int method() const { return field; } }; EditorPty editor_pty;\r", True),
             ("rich_menu", b"editor_\t"),
             ("cancel_rich_menu", b"\x03", True),
-            ("signature", b"editor_men\t"),
+            ("signature", b"editor_men\t\t"),
             ("cancel_signature", b"\x03", True),
             ("rich_call", b"editor_menu(2)\r", True),
             ("rich_members", b"editor_pty.\t"),
@@ -42,9 +42,9 @@ with tempfile.TemporaryDirectory() as cwd:
         ],
     )
     menu = plain(out["rich_menu"])
-    check("completion menu shows overload parameters and return types",
-          "editor_menu(int first) -> int [function]" in menu and
-          "editor_menu(double value) -> double [function]" in menu)
+    check("overload menu shows parameters and return types",
+          "editor_menu(int first) -> int" in menu and
+          "editor_menu(double value) -> double" in menu)
     check("signature hints show inline argument names and types",
           ":  (" in plain(out["signature"]) and "->" in plain(out["signature"]))
     check("completion labels are not inserted into C++", "(int) 2" in plain(out["rich_call"]))
