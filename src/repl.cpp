@@ -469,11 +469,12 @@ using SignatureCache = std::unordered_map<std::size_t, CachedSignature>;
 std::vector<CompletionItem> signatures_for_call(CppInterpreter& cpp, const std::string& text,
                                                 const EditorCall& call, std::size_t context,
                                                 const SelectedSignatures& selected,
-                                                SignatureCache& cache) {
+                                                SignatureCache& cache,
+                                                bool reuse_cached_context = false) {
   const std::string identity = selected_identity_for(call, selected);
   const auto cached = cache.find(call.open);
   if (cached != cache.end() && cached->second.identity == identity &&
-      cached->second.context == context) {
+      (cached->second.context == context || reuse_cached_context)) {
     return cached->second.signatures;
   }
   const auto completion = completions_at_cursor(cpp, text, context);
@@ -774,10 +775,22 @@ Replxx::ACTION_RESULT on_enter(Replxx& rx, CppInterpreter& cpp,
       if (!call || call->open != call_open || !call->has_close) {
         continue;
       }
+      const bool explicit_empty_slot =
+          call->arguments.size() > 1 &&
+          std::any_of(call->arguments.begin(), call->arguments.end(),
+                      [](const auto& argument) { return argument.begin == argument.end; });
+      const std::string identity = selected_identity_for(*call, *selected);
+      const auto cached = signature_cache.find(call_open);
+      const bool has_cached_metadata =
+          cached != signature_cache.end() && cached->second.identity == identity;
+      if (!explicit_empty_slot && identity.empty() && !has_cached_metadata &&
+          !is_trailing_call(text, *call)) {
+        continue;
+      }
       const std::size_t call_cursor =
           cursor > call->open && cursor <= call->close ? cursor : call->close;
-      auto signatures =
-          signatures_for_call(cpp, text, *call, call_cursor, *selected, signature_cache);
+      auto signatures = signatures_for_call(cpp, text, *call, call_cursor, *selected,
+                                            signature_cache, has_cached_metadata);
       CppInterpreter::Completions completion;
       completion.signature_items = std::move(signatures);
       const auto* selected_item =

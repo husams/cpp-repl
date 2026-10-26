@@ -70,8 +70,8 @@ print menu_execution.length
 let menu_entry = match functionDecl(isDefinition(), matchesName("open_overload_menu$")).bind("f") in repl
 let menu_commands = match callExpr(callee(functionDecl(hasName("example::is_command_line")))).bind("c") in menu_entry.f
 print menu_commands.length
-// Enter checks every completed call, including those followed by expression
-// code, before allowing missing required or nontrailing default slots to submit.
+// Enter walks completed calls and protects explicit or completion-created slots,
+// reusing known signatures without reanalysing arbitrary complete expressions.
 let enter = match functionDecl(isDefinition(), matchesName("on_enter$")).bind("f") in repl
 let enter_frames = match callExpr(callee(functionDecl(matchesName("(completed_call_open_offsets|editor_call_at_cursor|signatures_for_call)$")))).bind("c") in enter.f
 foreach row in enter_frames do print row.c.call_site.static_callee_name

@@ -51,6 +51,7 @@ namespace perfbench {
 struct BenchmarkObject { int value = 37; };
 inline BenchmarkObject benchmark_object;
 inline int unfinished(int first, int second) { return first + second; }
+inline int zero() { return 21; }
 }
 inline int benchmark_overloaded(int first) { return first + 1; }
 inline int benchmark_overloaded(int first, int second) { return first + second; }
@@ -273,6 +274,10 @@ def benchmark(binary, library, iterations, declarations, expect_menu, skip_menu)
                     "nested_call_evaluation_ms",
                     "perfbench::unfinished(perfbench::unfinished(10,11),0)"
                     "+perfbench::unfinished(10,11)",
+                ),
+                (
+                    "manual_zero_call_multi_evaluation_ms",
+                    "perfbench::zero()+perfbench::zero()",
                 ),
             ):
                 samples = []

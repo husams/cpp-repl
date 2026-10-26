@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory() as cwd:
         ("required_embedded_fill", b"1\r", True),
         ("required_embedded_multiple", b"req_gap(, 2)+snippet_one(1)\r"),
         ("required_embedded_multiple_fill", b"1\r", True),
-        ("required_embedded_three_args", b"req_tri(1,2)+20;\r"),
+        ("required_embedded_three_args", b"req_tr\t1\t2\x05+20;\r"),
         ("required_embedded_three_args_fill", b"3\r", True),
         ("default_tab_value", b"snippet_def\t37\t\r", True),
         ("default_tab_exit_value", b"snippet_def\t37\t\t\r", True),
