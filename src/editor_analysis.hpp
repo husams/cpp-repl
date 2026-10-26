@@ -25,15 +25,25 @@ enum class SemanticKind {
   Keyword
 };
 
+struct CompletionParameter {
+  std::string name;
+  std::string type;
+  bool has_default = false;
+  bool is_pack = false;
+};
+
 struct CompletionItem {
   std::string text;   // Only this text is inserted into the buffer.
   std::string label;  // Name and parameters, including overloads.
+  std::string identity; // Stable qualified callable signature key.
   std::string detail; // Type or return type.
   std::string documentation;
   SemanticKind kind = SemanticKind::Variable;
   unsigned priority = 50; // Clang priority; smaller values rank first.
   bool is_header_path = false;
   bool insert_call = true;
+  std::vector<CompletionParameter> parameters;
+  bool variadic = false;
 };
 
 struct SemanticToken {
@@ -45,6 +55,7 @@ struct SemanticToken {
 struct EditorAnalysis {
   std::vector<CompletionItem> items;
   std::vector<std::string> signatures;
+  std::vector<CompletionItem> signature_items;
   unsigned active_parameter = 0;
   // Override the ordinary identifier prefix when completing a non-identifier
   // token such as an include path.

@@ -71,17 +71,16 @@ with tempfile.TemporaryDirectory() as cwd:
     ]
     out, status = session(binary, cwd, steps, args=("-I" + str(headers),))
     check("function completion opens a call with its signature hint",
-          "editor_sum(int first, int second) -> int" in plain(out["function_pair"]) and
-          "[argument 1]" in plain(out["function_pair"]) and
+          "editor_sum(first: <placeholder> (int), second: <placeholder> (int)) -> int" in plain(out["function_pair"]) and
           "(int) 42" in plain(out["function_value"]))
     check("cycling after a unique completion preserves the argument cursor",
           "(int) 42" in plain(out["unique_cycle_value"]))
     check("method completion shows its signature and leaves the cursor inside",
-          "method(int delta) const -> int" in plain(out["method_pair"]) and
-          "[argument 1]" in plain(out["method_pair"]) and
+          "method(delta: <placeholder> (int))" in plain(out["method_pair"]) and
+          "-> int" in plain(out["method_pair"]) and
           "(int) 12" in plain(out["method_value"]))
     check("completed zero-argument methods execute with Enter",
-          "zero() const -> int" in plain(out["zero_pair"]) and
+          "zero()" in plain(out["zero_pair"]) and
           "(int) 7" in plain(out["zero_value"]))
     for key in ("pointer_value", "call_result_value", "middle_value"):
         check(key + " preserves member access and existing call suffixes",

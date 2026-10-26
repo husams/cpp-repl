@@ -45,7 +45,7 @@ with tempfile.TemporaryDirectory() as cwd:
         read_until(fd, PROMPT)
         os.write(fd, b"editor_latency_probe(")
         # Let the previous idle analysis finish before measuring a typing burst.
-        read_until(fd, b"[argument 1]")
+        read_until(fd, b"<placeholder>")
         while select.select([fd], [], [], 0)[0]:
             os.read(fd, 65536)
         # Drain any pending terminal output before timing. Every character

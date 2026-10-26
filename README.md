@@ -795,14 +795,21 @@ session's global scope and accesses members using ordinary C++ access rules.
   compiler importing the session's current declarations; no LSP is required.
   Tab extends the common name prefix; another Tab lists colored suggestions
   with parameter names, return/data types and kind labels. Overloads appear as
-  separate rows. Completing a function or method inserts `()` and leaves the
-  cursor inside; hints show its signature and current argument. Existing call
+  separate rows; Ctrl+N/Ctrl+P cycle through them before typing arguments.
+  Completing a function or method inserts `()` and leaves the
+  cursor at the first argument. Light-gray hints inside the parentheses show
+  parameter names, placeholders and types, with the return type after `)`.
+  Type an argument and press Tab to move to the next slot; Shift+Tab returns
+  to the previous slot, and Tab after the last argument moves past `)`.
+  These hints are display-only: they never enter executed C++ or history.
+  Required empty arguments keep the call editable on Enter; default arguments
+  may be omitted. Ordinary comma-separated typing also works. Existing call
   parentheses are reused, and completing in the middle of a name replaces its
   remaining characters. Suggestions
   follow Clang's context/type priorities and omit inaccessible or unavailable
   members. Completion handles locals in unfinished multiline input, inheritance,
   `const` receivers, namespaces and member access after calls. While entering a
-  function call, gray hints show its signatures and the current argument number.
+  function call, the same inline parameter hints appear after a short pause.
   After `#`, suggestions follow Clang's preprocessor context: directive keywords,
   macro operands or conditional-expression macros, rather than unrelated C++
   symbols. Unique prefixes such as `#def` complete immediately; `#i` has several

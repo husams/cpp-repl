@@ -80,7 +80,7 @@ if(REPLXX_NATIVE_PLATFORM_SUPPORTED)
     target_sources(cpp_interp PRIVATE src/native_runtime.cpp)
   endif()
 endif()
-target_sources(cpp_interp PRIVATE ${REPLXX_NATIVE_SOURCE} src/editor_ui.cpp src/editor_input.cpp
+target_sources(cpp_interp PRIVATE ${REPLXX_NATIVE_SOURCE} src/editor_ui.cpp src/editor_input.cpp src/editor_call.cpp
   src/definition_shadowing.cpp src/source_reload.cpp src/interpreter_symbols.cpp)
 target_include_directories(cpp_interp PUBLIC src)
 target_include_directories(cpp_interp SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
@@ -167,7 +167,7 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
   gtest_discover_tests(library_dependency_test)
 
   add_executable(cpp_interpreter_test tests/cpp_interpreter_test.cpp tests/template_callables_test.cpp
-    tests/editor_context_test.cpp tests/editor_input_test.cpp)
+    tests/editor_context_test.cpp tests/editor_input_test.cpp tests/editor_call_test.cpp)
   add_executable(iterative_development_test tests/iterative_development_test.cpp)
   target_link_libraries(iterative_development_test PRIVATE cpp_interp GTest::gtest_main)
   gtest_discover_tests(iterative_development_test)
@@ -232,6 +232,9 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
 
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_FOUND AND NOT WIN32)
+    add_test(NAME editor_snippet_pty
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/editor_snippet_pty.py
+                     $<TARGET_FILE:cpp-repl>)
     add_test(NAME editor_latency_pty
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/editor_latency_pty.py
                      $<TARGET_FILE:cpp-repl>)

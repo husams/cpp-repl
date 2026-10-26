@@ -61,6 +61,7 @@ class CppInterpreter {
     std::string prefix;              // the identifier being completed
     std::vector<CompletionItem> items;
     std::vector<std::string> signatures;
+    std::vector<CompletionItem> signature_items;
     unsigned active_parameter = 0;
   };
 

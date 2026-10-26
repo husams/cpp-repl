@@ -734,6 +734,7 @@ CppInterpreter::Completions CppInterpreter::complete(const std::string& code) {
   }
   out.items = std::move(analysis.items);
   out.signatures = std::move(analysis.signatures);
+  out.signature_items = std::move(analysis.signature_items);
   out.active_parameter = analysis.active_parameter;
   std::set<std::string> names;
   for (const auto& item : out.items) {

@@ -71,6 +71,7 @@ SemanticKind kind_of(const clang::NamedDecl* decl) {
 
 CompletionItem describe(const clang::NamedDecl* decl) {
   CompletionItem item;
+  const std::string qualified_name = decl->getQualifiedNameAsString();
   item.text = decl->getNameAsString();
   item.label = item.text;
   item.kind = kind_of(decl);
@@ -85,6 +86,12 @@ CompletionItem describe(const clang::NamedDecl* decl) {
         item.label += ", ";
       }
       const auto* param = function->getParamDecl(i);
+      CompletionParameter parameter;
+      parameter.name = param->getNameAsString();
+      parameter.type = param->getType().getAsString(policy);
+      parameter.has_default = param->hasDefaultArg();
+      parameter.is_pack = param->isParameterPack();
+      item.parameters.push_back(std::move(parameter));
       item.label += param->getType().getAsString(policy);
       if (!param->getName().empty()) {
         item.label += " " + param->getNameAsString();
@@ -94,6 +101,7 @@ CompletionItem describe(const clang::NamedDecl* decl) {
       }
     }
     if (function->isVariadic()) {
+      item.variadic = true;
       if (function->getNumParams()) {
         item.label += ", ";
       }
@@ -122,6 +130,10 @@ CompletionItem describe(const clang::NamedDecl* decl) {
   }
   item.label = unversioned_name(std::move(item.label));
   item.detail = unversioned_name(std::move(item.detail));
+  if (!item.parameters.empty() || item.kind == SemanticKind::Function ||
+      item.kind == SemanticKind::Method) {
+    item.identity = qualified_name + item.label.substr(item.text.size()) + " -> " + item.detail;
+  }
   return item;
 }
 
@@ -558,6 +570,12 @@ public:
       if (const auto* function = candidates[i].getFunction()) {
         const auto item = describe(function);
         result_.signatures.push_back(item.label + " -> " + item.detail);
+        const auto duplicate =
+            std::find_if(result_.signature_items.begin(), result_.signature_items.end(),
+                         [&](const auto& existing) { return existing.identity == item.identity; });
+        if (duplicate == result_.signature_items.end()) {
+          result_.signature_items.push_back(item);
+        }
       }
     }
   }
@@ -1091,6 +1109,8 @@ EditorAnalysis analyze_editor(std::unique_ptr<clang::CompilerInstance> compiler,
   std::sort(result.signatures.begin(), result.signatures.end());
   result.signatures.erase(std::unique(result.signatures.begin(), result.signatures.end()),
                           result.signatures.end());
+  std::sort(result.signature_items.begin(), result.signature_items.end(),
+            [](const auto& lhs, const auto& rhs) { return lhs.identity < rhs.identity; });
   return result;
 }
 } // namespace example

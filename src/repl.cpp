@@ -6,10 +6,12 @@
 #include <iostream>
 #include <memory>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "commands.hpp"
 #include "cpp_lexer.hpp"
+#include "editor_call.hpp"
 #include "editor_input.hpp"
 #include "editor_ui.hpp"
 #include "highlight_repl.hpp"
@@ -31,7 +33,8 @@ bool is_identifier_byte(unsigned char c) {
 }
 
 Replxx::completions_t cpp_completions(CppInterpreter& cpp, Replxx& rx, const std::string& input,
-                                      int& context_len) {
+                                      int& context_len,
+                                      std::unordered_map<std::string, std::string>& identities) {
   Replxx::completions_t out;
   const auto result = cpp.complete(input);
   context_len = static_cast<int>(utf8_length(result.prefix));
@@ -75,6 +78,7 @@ Replxx::completions_t cpp_completions(CppInterpreter& cpp, Replxx& rx, const std
         cursor_offset = -1;
       }
     }
+    identities[display] = item.identity;
     out.emplace_back(insertion, display, semantic_color(item.kind), cursor_offset, erase_after);
   }
   return out;
@@ -92,15 +96,16 @@ std::size_t current_path_begin(const std::string& input, const ParsedCommand& cm
 // names, Tab after "%lib " / "%add-path " / "%add " the filesystem path being
 // typed and after "%class " the session's class names.
 Replxx::completions_t complete(CppInterpreter& cpp, const std::string& input, int& context_len,
-                               Replxx& rx) {
+                               Replxx& rx,
+                               std::unordered_map<std::string, std::string>& identities) {
   Replxx::completions_t out;
   if (!is_command_line(input)) {
-    return cpp_completions(cpp, rx, input, context_len);
+    return cpp_completions(cpp, rx, input, context_len, identities);
   }
   const ParsedCommand cmd = parse_command(input);
 
   if (cmd.code && cmd.incomplete) {
-    return cpp_completions(cpp, rx, cmd.code->value, context_len);
+    return cpp_completions(cpp, rx, cmd.code->value, context_len, identities);
   }
 
   if (cmd.name_end == input.size()) { // still typing the command word
@@ -257,13 +262,26 @@ Replxx::completions_t complete(CppInterpreter& cpp, const std::string& input, in
   return out;
 }
 
+std::string callable_qualifiers(const std::string& label) {
+  const auto close = label.rfind(')');
+  if (close == std::string::npos) {
+    return {};
+  }
+  const auto suffix = label.substr(close + 1);
+  const auto first = suffix.find_first_not_of(" \t");
+  return first == std::string::npos ? std::string() : suffix.substr(first);
+}
+
 Replxx::hints_t cpp_hints(CppInterpreter& cpp, const std::string& input, int& context_len,
-                          Replxx::Color& color) {
+                          Replxx::Color& color, bool inline_display_supported = true) {
   Replxx::hints_t out;
   if (lex_cpp(input).open_brackets.find('(') == std::string::npos) {
     return out;
   }
   const auto result = cpp.complete(input);
+  if (inline_display_supported && !result.signature_items.empty()) {
+    return out;
+  }
   context_len = 0;
   color = Replxx::Color::GRAY;
   for (const auto& signature : result.signatures) {
@@ -276,11 +294,11 @@ Replxx::hints_t cpp_hints(CppInterpreter& cpp, const std::string& input, int& co
 Replxx::hints_t hint(CppInterpreter& cpp, const std::string& input, int& context_len,
                      Replxx::Color& color) {
   if (!is_command_line(input)) {
-    return cpp_hints(cpp, input, context_len, color);
+    return cpp_hints(cpp, input, context_len, color, true);
   }
   const ParsedCommand cmd = parse_command(input);
   if (cmd.code && cmd.incomplete) {
-    return cpp_hints(cpp, cmd.code->value, context_len, color);
+    return cpp_hints(cpp, cmd.code->value, context_len, color, false);
   }
   Replxx::hints_t out;
   color = Replxx::Color::GRAY;
@@ -303,12 +321,187 @@ Replxx::hints_t hint(CppInterpreter& cpp, const std::string& input, int& context
   return out;
 }
 
+using SelectedSignatures = std::unordered_map<std::size_t, std::string>;
+
+void remap_selected_signatures(SelectedSignatures& selected, const std::string& before,
+                               const std::string& after) {
+  if (before == after) {
+    return;
+  }
+  std::size_t prefix = 0;
+  while (prefix < before.size() && prefix < after.size() && before[prefix] == after[prefix]) {
+    ++prefix;
+  }
+  std::size_t before_suffix = before.size();
+  std::size_t after_suffix = after.size();
+  while (before_suffix > prefix && after_suffix > prefix &&
+         before[before_suffix - 1] == after[after_suffix - 1]) {
+    --before_suffix;
+    --after_suffix;
+  }
+  const auto delta =
+      static_cast<std::ptrdiff_t>(after_suffix) - static_cast<std::ptrdiff_t>(before_suffix);
+  SelectedSignatures remapped;
+  for (const auto& [offset, identity] : selected) {
+    if (offset < prefix) {
+      remapped[offset] = identity;
+    } else if (offset >= before_suffix) {
+      const auto adjusted = static_cast<std::ptrdiff_t>(offset) + delta;
+      if (adjusted >= 0) {
+        remapped[static_cast<std::size_t>(adjusted)] = identity;
+      }
+    }
+  }
+  selected = std::move(remapped);
+}
+
+void sync_selected_signatures(const std::shared_ptr<SelectedSignatures>& selected,
+                              const std::shared_ptr<std::string>& previous_text,
+                              const std::string& current_text) {
+  remap_selected_signatures(*selected, *previous_text, current_text);
+  *previous_text = current_text;
+}
+
+std::string selected_identity_for(const EditorCall& call, const SelectedSignatures& selected) {
+  const auto it = selected.find(call.open);
+  return it == selected.end() ? std::string() : it->second;
+}
+
+const CompletionItem* selected_signature(const CppInterpreter::Completions& result,
+                                         const std::string& identity) {
+  if (!identity.empty()) {
+    const auto it = std::find_if(result.signature_items.begin(), result.signature_items.end(),
+                                 [&](const auto& item) { return item.identity == identity; });
+    if (it != result.signature_items.end()) {
+      return &*it;
+    }
+  }
+  return result.signature_items.empty() ? nullptr : &result.signature_items.front();
+}
+
+CppInterpreter::Completions completions_at_cursor(CppInterpreter& cpp, const std::string& text,
+                                                  std::size_t cursor) {
+  return cpp.complete(text.substr(0, cursor));
+}
+
+bool should_complete_argument_prefix(CppInterpreter& cpp, const std::string& text,
+                                     const EditorCall& call, std::size_t cursor) {
+  if (call.active_argument >= call.arguments.size()) {
+    return false;
+  }
+  const auto& argument = call.arguments[call.active_argument];
+  if (cursor < argument.begin || cursor > argument.end) {
+    return false;
+  }
+  std::size_t token_begin = cursor;
+  while (token_begin > argument.begin &&
+         is_identifier_byte(static_cast<unsigned char>(text[token_begin - 1]))) {
+    --token_begin;
+  }
+  if (token_begin == cursor) {
+    return false;
+  }
+  const std::string typed = text.substr(token_begin, cursor - token_begin);
+  const auto candidates = completions_at_cursor(cpp, text, cursor);
+  const bool exact_noncallable =
+      std::any_of(candidates.items.begin(), candidates.items.end(), [&](const auto& item) {
+        return item.text == typed && !(item.insert_call && (item.kind == SemanticKind::Function ||
+                                                            item.kind == SemanticKind::Method));
+      });
+  if (exact_noncallable) {
+    return false;
+  }
+  return std::any_of(candidates.items.begin(), candidates.items.end(), [&](const auto& item) {
+    if (!starts_with(item.text, typed)) {
+      return false;
+    }
+    return item.text.size() > typed.size() ||
+           (item.insert_call &&
+            (item.kind == SemanticKind::Function || item.kind == SemanticKind::Method));
+  });
+}
+
+std::string parameter_label(const CompletionParameter& parameter, std::size_t index) {
+  return parameter.name.empty() ? "arg" + std::to_string(index + 1) : parameter.name;
+}
+
 // Enter: submit commands and complete C++; otherwise keep editing in the same
 // buffer, including blank lines. Ctrl+C cancels an incomplete block.
-Replxx::ACTION_RESULT on_enter(Replxx& rx, char32_t code) {
+Replxx::ACTION_RESULT on_enter(Replxx& rx, CppInterpreter& cpp,
+                               const std::shared_ptr<SelectedSignatures>& selected, char32_t code) {
   const auto state = rx.get_state();
-  const std::string text = state.text();
-  const std::size_t cursor = utf8_byte_offset(text, state.cursor_position());
+  std::string text = state.text();
+  std::size_t cursor = utf8_byte_offset(text, state.cursor_position());
+  if (is_cpp_editor_payload(text, cursor) && !is_command_line(text)) {
+    std::size_t call_cursor = cursor;
+    auto call = editor_call_at_cursor(text, call_cursor);
+    if (!call && call_cursor > 0) {
+      call = editor_call_at_cursor(text, call_cursor - 1);
+      if (call && call->has_close && call->close + 1 == call_cursor) {
+        call_cursor = call->close;
+      }
+    }
+    if (call && call->has_close) {
+      const auto completion = completions_at_cursor(cpp, text, call_cursor);
+      const auto* signature =
+          selected_signature(completion, selected_identity_for(*call, *selected));
+      while (signature != nullptr && call->arguments.size() > 1) {
+        const std::size_t last = call->arguments.size() - 1;
+        if (last >= signature->parameters.size() || !signature->parameters[last].has_default ||
+            call->arguments[last].begin != call->arguments[last].end) {
+          break;
+        }
+        const std::size_t comma = call->arguments[last - 1].end;
+        std::size_t erase_begin = comma;
+        while (erase_begin > call->open + 1 &&
+               (text[erase_begin - 1] == ' ' || text[erase_begin - 1] == '\t')) {
+          --erase_begin;
+        }
+        if (comma >= call->close) {
+          break;
+        }
+        const std::size_t removed = call->close - erase_begin;
+        text.erase(erase_begin, removed);
+        cursor = cursor > erase_begin ? std::max(erase_begin, cursor - removed) : cursor;
+        rx.set_state(Replxx::State(
+            text.c_str(), static_cast<int>(utf8_length(std::string_view(text).substr(0, cursor)))));
+        call = editor_call_at_cursor(text, std::min(cursor, text.size()));
+        if (!call) {
+          call = editor_call_at_cursor(text, erase_begin);
+        }
+        if (!call || !call->has_close) {
+          break;
+        }
+      }
+      if (!call || !call->has_close) {
+        return rx.invoke(Replxx::ACTION::COMMIT_LINE, code);
+      }
+      for (std::size_t i = 0; signature != nullptr && i < signature->parameters.size(); ++i) {
+        const auto& parameter = signature->parameters[i];
+        if (parameter.has_default || parameter.is_pack) {
+          continue;
+        }
+        std::size_t gap = call->close;
+        bool append_separator = false;
+        if (i < call->arguments.size()) {
+          if (call->arguments[i].begin != call->arguments[i].end) {
+            continue;
+          }
+          gap = call->arguments[i].begin;
+        } else {
+          append_separator = !call->arguments.empty() &&
+                             call->arguments.back().begin != call->arguments.back().end;
+        }
+        rx.set_state(Replxx::State(
+            text.c_str(), static_cast<int>(utf8_length(std::string_view(text).substr(0, gap)))));
+        if (append_separator) {
+          rx.invoke(Replxx::ACTION::INSERT_CHARACTER, ',');
+          rx.invoke(Replxx::ACTION::INSERT_CHARACTER, ' ');
+        }
+        return Replxx::ACTION_RESULT::CONTINUE;
+      }
+    }
+  }
   if (!is_cpp_editor_payload(text, cursor)) {
     return rx.invoke(
         wants_more_input(text) ? Replxx::ACTION::NEW_LINE : Replxx::ACTION::COMMIT_LINE, code);
@@ -349,8 +542,31 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
   rx.set_max_history_size(1000);
   rx.set_unique_history(true);
   rx.set_word_break_characters(" \t\n");
-  rx.set_completion_callback([&cpp, &rx](const std::string& input, int& context_len) {
-    return complete(cpp, input, context_len, rx);
+  auto selected_identity = std::make_shared<SelectedSignatures>();
+  auto selected_text = std::make_shared<std::string>();
+  auto identities = std::make_shared<std::unordered_map<std::string, std::string>>();
+  rx.set_completion_callback([&cpp, &rx, identities](const std::string& input, int& context_len) {
+    return complete(cpp, input, context_len, rx, *identities);
+  });
+  rx.set_completion_accept_callback([selected_identity, selected_text, identities,
+                                     &rx](const std::string&, const std::string& display) {
+    const auto state = rx.get_state();
+    const auto buffer = state.text();
+    sync_selected_signatures(selected_identity, selected_text, buffer);
+    const auto cursor = utf8_byte_offset(buffer, state.cursor_position());
+    auto call = editor_call_at_cursor(buffer, cursor);
+    if (!call && cursor > 0) {
+      call = editor_call_at_cursor(buffer, cursor - 1);
+    }
+    if (!call) {
+      return;
+    }
+    const auto it = identities->find(display);
+    if (it == identities->end()) {
+      selected_identity->erase(call->open);
+    } else {
+      (*selected_identity)[call->open] = it->second;
+    }
   });
   rx.set_hint_callback([&cpp](const std::string& input, int& length, Replxx::Color& color) {
     return hint(cpp, input, length, color);
@@ -358,14 +574,109 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
   auto last_edit =
       std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
   auto last_input = std::make_shared<std::string>();
-  rx.set_highlighter_callback(
-      [last_edit, last_input](const std::string& input, Replxx::colors_t& colors) {
-        if (*last_input != input) {
-          *last_input = input;
-          *last_edit = std::chrono::steady_clock::now();
+  rx.set_inline_display_callback([&cpp, &rx, selected_identity, selected_text, last_edit,
+                                  last_input](const std::string&) {
+    Replxx::inline_displays_t displays;
+    const auto state = rx.get_state();
+    const std::string full_input = state.text();
+    sync_selected_signatures(selected_identity, selected_text, full_input);
+    if (*last_input != full_input) {
+      *last_input = full_input;
+      *last_edit = std::chrono::steady_clock::now();
+      return displays;
+    }
+    if (std::chrono::steady_clock::now() - *last_edit < std::chrono::milliseconds(160)) {
+      return displays;
+    }
+    if (is_command_line(full_input)) {
+      return displays;
+    }
+    const auto cursor = utf8_byte_offset(full_input, state.cursor_position());
+    const auto frame = editor_call_at_cursor(full_input, cursor);
+    if (!frame) {
+      return displays;
+    }
+    const auto result = completions_at_cursor(cpp, full_input, cursor);
+    const auto* signature =
+        selected_signature(result, selected_identity_for(*frame, *selected_identity));
+    if (signature == nullptr) {
+      return displays;
+    }
+    if (signature->parameters.empty()) {
+      if (!signature->detail.empty()) {
+        const auto return_position = frame->has_close ? frame->close + 1 : frame->close;
+        std::string annotation = " -> " + signature->detail;
+        const auto qualifiers = callable_qualifiers(signature->label);
+        if (!qualifiers.empty()) {
+          annotation += " " + qualifiers;
         }
-        highlight_input(input, colors);
-      });
+        displays.push_back(
+            {static_cast<int>(utf8_length(std::string_view(full_input).substr(0, return_position))),
+             std::move(annotation)});
+      }
+      return displays;
+    }
+    for (std::size_t i = 0; i < signature->parameters.size(); ++i) {
+      const auto& parameter = signature->parameters[i];
+      const std::string prefix = parameter_label(parameter, i) + ": ";
+      if (i < frame->arguments.size()) {
+        const auto& argument = frame->arguments[i];
+        int label_position =
+            static_cast<int>(utf8_length(std::string_view(full_input).substr(0, argument.begin)));
+        if (argument.begin == argument.end) {
+          if (frame->active_argument == i) {
+            label_position =
+                static_cast<int>(utf8_length(std::string_view(full_input).substr(0, cursor)));
+          }
+          std::string ghost = prefix + "<placeholder>";
+          if (!parameter.type.empty()) {
+            ghost += " (" + parameter.type + ")";
+          }
+          const int cursor_offset =
+              frame->active_argument == i ? static_cast<int>(utf8_length(prefix)) : -1;
+          displays.push_back({label_position, std::move(ghost), cursor_offset});
+        } else {
+          const int cursor_offset =
+              frame->active_argument == i ? static_cast<int>(utf8_length(prefix)) : -1;
+          displays.push_back({label_position, prefix, cursor_offset});
+          if (!parameter.type.empty()) {
+            const auto type_position =
+                static_cast<int>(utf8_length(std::string_view(full_input).substr(0, argument.end)));
+            displays.push_back({type_position, " (" + parameter.type + ")"});
+          }
+        }
+      } else {
+        std::string ghost = ", " + prefix + "<placeholder>";
+        if (!parameter.type.empty()) {
+          ghost += " (" + parameter.type + ")";
+        }
+        const auto ghost_position =
+            static_cast<int>(utf8_length(std::string_view(full_input).substr(0, frame->close)));
+        displays.push_back({ghost_position, std::move(ghost)});
+      }
+    }
+    if (!signature->detail.empty()) {
+      const auto return_position = frame->has_close ? frame->close + 1 : frame->close;
+      std::string annotation = " -> " + signature->detail;
+      const auto qualifiers = callable_qualifiers(signature->label);
+      if (!qualifiers.empty()) {
+        annotation += " " + qualifiers;
+      }
+      displays.push_back(
+          {static_cast<int>(utf8_length(std::string_view(full_input).substr(0, return_position))),
+           std::move(annotation)});
+    }
+    return displays;
+  });
+  rx.set_highlighter_callback([last_edit, last_input, selected_identity,
+                               selected_text](const std::string& input, Replxx::colors_t& colors) {
+    sync_selected_signatures(selected_identity, selected_text, input);
+    if (*last_input != input) {
+      *last_input = input;
+      *last_edit = std::chrono::steady_clock::now();
+    }
+    highlight_input(input, colors);
+  });
   rx.set_idle_highlighter_callback(
       [&cpp, last_edit, last_input](const std::string& input, Replxx::colors_t& colors) {
         const auto now = std::chrono::steady_clock::now();
@@ -389,7 +700,79 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
               [&rx](char32_t code) { return rx.invoke(Replxx::ACTION::CLEAR_SCREEN, code); });
 
   // Custom binding: Enter inserts a newline while the C++ input is incomplete.
-  rx.bind_key(Replxx::KEY::ENTER, [&rx](char32_t code) { return on_enter(rx, code); });
+  rx.bind_key(Replxx::KEY::ENTER, [&rx, &cpp, selected_identity, selected_text](char32_t code) {
+    const auto result = on_enter(rx, cpp, selected_identity, code);
+    const auto state = rx.get_state();
+    const std::string current_text = state.text();
+    if (current_text.empty() || result != Replxx::ACTION_RESULT::CONTINUE) {
+      selected_identity->clear();
+      *selected_text = current_text;
+    }
+    return result;
+  });
+
+  rx.bind_key(Replxx::KEY::control('C'), [&rx, selected_identity, selected_text](char32_t code) {
+    selected_identity->clear();
+    *selected_text = {};
+    return rx.invoke(Replxx::ACTION::ABORT_LINE, code);
+  });
+
+  auto advance_snippet = [&cpp, &rx, selected_identity](bool backwards) {
+    const auto state = rx.get_state();
+    const std::string text = state.text();
+    const auto cursor = utf8_byte_offset(text, state.cursor_position());
+    const auto frame = editor_call_at_cursor(text, cursor);
+    if (!frame) {
+      return false;
+    }
+    const auto result = completions_at_cursor(cpp, text, cursor);
+    const auto* signature =
+        selected_signature(result, selected_identity_for(*frame, *selected_identity));
+    if (signature == nullptr || signature->parameters.empty()) {
+      return false;
+    }
+    const std::size_t count = signature->parameters.size();
+    const std::size_t current =
+        std::min(static_cast<std::size_t>(frame->active_argument), count - 1);
+    std::size_t target = frame->close;
+    if (backwards) {
+      if (current == 0) {
+        return true;
+      }
+      target = frame->arguments[current - 1].begin;
+    } else if (current + 1 < count) {
+      if (current + 1 < frame->arguments.size()) {
+        target = frame->arguments[current + 1].begin;
+      } else {
+        target = frame->arguments[current].end;
+        rx.set_state(Replxx::State(
+            text.c_str(), static_cast<int>(utf8_length(std::string_view(text).substr(0, target)))));
+        rx.invoke(Replxx::ACTION::INSERT_CHARACTER, ',');
+        rx.invoke(Replxx::ACTION::INSERT_CHARACTER, ' ');
+        return true;
+      }
+    } else {
+      target = frame->has_close ? frame->close + 1 : text.size();
+    }
+    rx.set_state(Replxx::State(
+        text.c_str(), static_cast<int>(utf8_length(std::string_view(text).substr(0, target)))));
+    return true;
+  };
+  rx.bind_key(Replxx::KEY::TAB, [&cpp, &rx, advance_snippet](char32_t code) {
+    const auto state = rx.get_state();
+    const std::string text = state.text();
+    const auto cursor = utf8_byte_offset(text, state.cursor_position());
+    const auto frame = editor_call_at_cursor(text, cursor);
+    if (frame && should_complete_argument_prefix(cpp, text, *frame, cursor)) {
+      return rx.invoke(Replxx::ACTION::COMPLETE_LINE, code);
+    }
+    return advance_snippet(false) ? Replxx::ACTION_RESULT::CONTINUE
+                                  : rx.invoke(Replxx::ACTION::COMPLETE_LINE, code);
+  });
+  rx.bind_key(Replxx::KEY::BASE_SHIFT | Replxx::KEY::TAB, [&rx, advance_snippet](char32_t code) {
+    return advance_snippet(true) ? Replxx::ACTION_RESULT::CONTINUE
+                                 : rx.invoke(Replxx::ACTION::COMPLETE_PREVIOUS, code);
+  });
 
   for (const char32_t key : {'(', ')', '[', ']', '{', '}', '"', '\'', '<', '>'}) {
     rx.bind_key(key, [&rx, key](char32_t) { return on_delimiter(rx, key); });
