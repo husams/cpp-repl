@@ -57,3 +57,11 @@ let slot_lexer = match callExpr(callee(functionDecl(hasName("example::lex_cpp"))
 print slot_lexer.length
 let inline_api = match callExpr(callee(functionDecl(matchesName("(set_inline_display_callback|set_completion_accept_callback|editor_call_at_cursor)$")))).bind("c") in frontend.f
 foreach row in inline_api do print row.c.call_site.static_callee_name
+// Retain one source per namespace identity, so namespace reopenings do not
+// multiply the work when Clang enumerates visible declarations.
+let imports = match cxxMethodDecl(isDefinition(), matchesName("SessionSource::import$")).bind("f") in engine
+let namespace_ids = match callExpr(callee(cxxMethodDecl(hasName("getCanonicalDecl")))).bind("c") in imports.f
+print namespace_ids.length
+let maps = match cxxMethodDecl(isDefinition(), matchesName("SessionSource::completeVisibleDeclsMap$")).bind("f") in engine
+let map_imports = match callExpr(callee(cxxMethodDecl(matchesName("SessionSource::import$")))).bind("c") in maps.f
+print map_imports.length

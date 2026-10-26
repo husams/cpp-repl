@@ -97,6 +97,42 @@ TEST(EditorContextTest, IncludePathCompletionReportsReplacementPrefix) {
                    "nested/beta_header.hpp"));
 }
 
+TEST(EditorContextTest, LargeHeaderSessionAnalysisAvoidsRepeatedNamespaceImports) {
+  IncludeTree tree;
+  const auto path = tree.quoted / "large_editor.hpp";
+  {
+    std::ofstream header(path);
+    header << "#pragma once\n#include <regex>\n#include <filesystem>\n#include <unordered_map>\n";
+    for (unsigned section = 0; section < 3000; ++section) {
+      header << "namespace editor_large {\n";
+      for (unsigned member = 0; member < 10; ++member) {
+        header << "int symbol_" << section * 10 + member << "(int value);\n";
+      }
+      header << "}\n";
+    }
+  }
+  std::string error;
+  auto cpp = CppInterpreter::create({"-I" + tree.quoted.string()}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("#include \"large_editor.hpp\""));
+  const auto start = std::chrono::steady_clock::now();
+  const auto completion = cpp->complete("editor_large::symbol_2999");
+  const auto completed = std::chrono::steady_clock::now();
+  EXPECT_TRUE(has(completion.names, "symbol_29999"));
+  const auto tokens = cpp->semantic_tokens("editor_large::symbol_29999(42)");
+  const auto colored = std::chrono::steady_clock::now();
+  EXPECT_FALSE(tokens.empty());
+  const auto completion_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(completed - start).count();
+  const auto coloring_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(colored - completed).count();
+  std::cout << "large header (30,000 symbols, 3,000 namespace declarations): completion="
+            << completion_ms << "ms coloring=" << coloring_ms << "ms\n";
+  EXPECT_LT(completion_ms, 1500);
+  EXPECT_LT(coloring_ms, 1500);
+  EXPECT_EQ(cpp->evaluate("21 * 2"), std::optional<std::string>("(int) 42\n"));
+}
+
 TEST(EditorContextTest, MemberCompletionRespectsTypeAndAccessContext) {
   std::string error;
   auto cpp = CppInterpreter::create({}, error);

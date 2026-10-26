@@ -232,6 +232,9 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
 
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_FOUND AND NOT WIN32)
+    add_test(NAME editor_large_session_pty
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/editor_large_session_pty.py
+                     $<TARGET_FILE:cpp-repl> $<TARGET_FILE:hook_test_library>)
     add_test(NAME editor_snippet_pty
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/editor_snippet_pty.py
                      $<TARGET_FILE:cpp-repl>)

@@ -9,6 +9,7 @@
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/ASTImporter.h"
+#include "clang/AST/ASTImporterSharedState.h"
 #include "clang/AST/DeclLookups.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/ExternalASTSource.h"
@@ -640,8 +641,12 @@ protected:
 
 public:
   SessionImporter(clang::CompilerInstance& child, clang::CompilerInstance& parent)
+      // The default importer scans declarations for every name lookup. Build its
+      // dedicated lookup index so importing a large namespace stays linear.
       : ASTImporter(child.getASTContext(), child.getFileManager(), parent.getASTContext(),
-                    parent.getFileManager(), false) {}
+                    parent.getFileManager(), false,
+                    std::make_shared<clang::ASTImporterSharedState>(
+                        *child.getASTContext().getTranslationUnitDecl())) {}
 };
 
 // Like clang-repl's completion importer, use a separate AST. Complete imports
@@ -755,7 +760,10 @@ class SessionSource : public clang::ExternalASTSource {
       if (auto* space = llvm::dyn_cast<clang::NamespaceDecl>(visible)) {
         auto* primary = space->getPrimaryContext();
         auto& sources = namespaces_[primary];
-        auto* original = llvm::cast<clang::NamespaceDecl>(named);
+        // A namespace lookup already spans all of its redeclarations. Retaining
+        // every reopening here repeats the same lookup and, during completion,
+        // traverses the entire redeclaration chain once per reopening.
+        auto* original = llvm::cast<clang::NamespaceDecl>(named)->getCanonicalDecl();
         if (std::find(sources.begin(), sources.end(), original) == sources.end()) {
           sources.push_back(original);
         }
