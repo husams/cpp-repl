@@ -1,0 +1,47 @@
+// Run with ctk --compile-commands ROOT/build/compile_commands.json --script
+// scripts/editor-grounding.ctk root=/absolute/worktree/path (and --server if needed).
+let interpreter_path = "{arg.root}/src/cpp_interpreter.cpp"
+let interpreter = parse interpreter_path
+let functions = match cxxMethodDecl(isDefinition(), matchesName("example::CppInterpreter::(complete|semantic_tokens)$")).bind("f") in interpreter
+foreach row in functions do print row.f.qualified_name
+let analysis_calls = match callExpr(callee(functionDecl(hasName("example::analyze_editor")))).bind("c") in functions.f
+print analysis_calls.length
+let engine_path = "{arg.root}/src/editor_analysis.cpp"
+let engine = parse engine_path
+let entry = match functionDecl(isDefinition(), hasName("example::analyze_editor")).bind("f") in engine
+let execution = match callExpr(callee(cxxMethodDecl(ofClass(hasName("clang::Interpreter")), matchesName("(ParseAndExecute|Execute)$")))).bind("c") in entry.f
+print execution.length
+let syntax_only = match callExpr(callee(functionDecl(matchesName("clang::CompilerInstance::ExecuteAction$")))).bind("c") in entry.f
+foreach row in syntax_only do print row.c.call_site.static_callee_name
+let ui_path = "{arg.root}/src/editor_ui.cpp"
+let ui = parse ui_path
+let overlay = match functionDecl(isDefinition(), hasName("example::highlight_editor_input")).bind("f") in ui
+let color_calls = match callExpr(callee(functionDecl(matchesName("(highlight_input|semantic_tokens|lex_cpp|semantic_color)$")))).bind("c") in overlay.f
+foreach row in color_calls do print row.c.call_site.static_callee_name
+// Completion must retain Clang's contextual pattern text before any session
+// symbol supplement (notably preprocessor directive and macro-name requests).
+let completion = match cxxMethodDecl(isDefinition(), matchesName("CompletionConsumer::ProcessCodeCompleteResults$")).bind("f") in engine
+print completion.length
+let context_calls = match callExpr(callee(functionDecl(matchesName("(getKind|getTypedText|getCodeCompletionFilter|LookupName)$")))).bind("c") in completion.f
+foreach row in context_calls do print row.c.call_site.static_callee_name
+let contextual = match functionDecl(isDefinition(), matchesName("(should_insert_call|included_path_prefix)$")).bind("f") in engine
+foreach row in contextual do print row.f.qualified_name
+let contextual_lexers = match callExpr(callee(functionDecl(hasName("example::lex_cpp")))).bind("c") in contextual.f
+print contextual_lexers.length
+// Paired input remains lexical/grammar aware; the frontend routes call hints
+// through the same embedded compiler and applies edits through replxx actions.
+let input_path = "{arg.root}/src/editor_input.cpp"
+let input = parse input_path
+let pairs = match functionDecl(isDefinition(), hasName("example::delimiter_decision")).bind("f") in input
+print pairs.length
+let lexical_calls = match callExpr(callee(functionDecl(matchesName("(lex_cpp|cpp_payload|in_literal_or_comment|include_context)$")))).bind("c") in pairs.f
+foreach row in lexical_calls do print row.c.call_site.static_callee_name
+let includes = match functionDecl(isDefinition(), matchesName("include_context$")).bind("f") in input
+let include_lexer = match callExpr(callee(functionDecl(hasName("example::lex_cpp")))).bind("c") in includes.f
+print include_lexer.length
+let repl_path = "{arg.root}/src/repl.cpp"
+let repl = parse repl_path
+let frontend = match functionDecl(isDefinition(), matchesName("(cpp_completions|cpp_hints|on_delimiter|on_enter|configure)$")).bind("f") in repl
+foreach row in frontend do print row.f.qualified_name
+let deferred = match callExpr(callee(functionDecl(matchesName("(set_idle_highlighter_callback|set_hint_delay|editor_wants_more_input)$")))).bind("c") in frontend.f
+foreach row in deferred do print row.c.call_site.static_callee_name

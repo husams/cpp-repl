@@ -26,7 +26,6 @@
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/TargetOptions.h"
 #include "clang/Frontend/CompilerInstance.h"
-#include "clang/Interpreter/CodeCompletion.h"
 #include "clang/Interpreter/Interpreter.h"
 #include "clang/Interpreter/PartialTranslationUnit.h"
 #include "clang/Interpreter/Value.h"
@@ -34,23 +33,22 @@
 #include "cpp_lexer.hpp"
 #include "cpp_symbols.hpp"
 #include "definition_shadowing.hpp"
-#include "interpreter_undo.hpp"
 #include "interpreter_symbols.hpp"
+#include "interpreter_undo.hpp"
 #include "library_manager.hpp"
 #include "llvm/Config/llvm-config.h"
 #if LLVM_VERSION_MAJOR >= 22
 #include "clang/Interpreter/IncrementalExecutor.h"
 #endif
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/Demangle/Demangle.h"
-#include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/ExecutionEngine/Orc/Debugging/DebuggerSupport.h"
+#include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
-#include "llvm/Support/CrashRecoveryContext.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/SaveAndRestore.h"
-#include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Host.h"
@@ -179,8 +177,8 @@ std::vector<std::string> compiler_arguments(
 }
 
 // A compiler for the interpreter: platform_args() plus the user's flags.
-llvm::Expected<std::unique_ptr<clang::CompilerInstance>> make_compiler(
-    const std::vector<std::string>& args) {
+llvm::Expected<std::unique_ptr<clang::CompilerInstance>>
+make_compiler(const std::vector<std::string>& args, bool shadow_definitions = true) {
   // Clang's real VFS applies -working-directory to the process as well. It
   // describes the build command, not where the REPL should continue running.
   struct DirectoryScope {
@@ -207,7 +205,9 @@ llvm::Expected<std::unique_ptr<clang::CompilerInstance>> make_compiler(
   clang::IncrementalCompilerBuilder builder;
   builder.SetCompilerArgs(argv);
   auto compiler = builder.CreateCpp();
-  if (compiler) enable_definition_shadowing(**compiler);
+  if (compiler && shadow_definitions) {
+    enable_definition_shadowing(**compiler);
+  }
   return compiler;
 }
 
@@ -698,70 +698,52 @@ std::string CppInterpreter::load_library(const std::string& path) {
   return "";
 }
 
+std::vector<SemanticToken> CppInterpreter::semantic_tokens(const std::string& code) {
+  const auto* context = interp_->getASTContext().getTranslationUnitDecl();
+  if (semantic_context_ == context && semantic_code_ == code && semantic_args_ == args_) {
+    return semantic_cache_;
+  }
+  auto compiler = make_compiler(args_, false);
+  if (!compiler) {
+    llvm::consumeError(compiler.takeError());
+    return {};
+  }
+  auto result = analyze_editor(std::move(*compiler), *interp_->getCompilerInstance(), code, false);
+  semantic_context_ = context;
+  semantic_code_ = code;
+  semantic_args_ = args_;
+  semantic_cache_ = std::move(result.tokens);
+  return semantic_cache_;
+}
+
 CppInterpreter::Completions CppInterpreter::complete(const std::string& code) {
+  const auto* context = interp_->getASTContext().getTranslationUnitDecl();
+  if (completion_context_ == context && completion_code_ == code && completion_args_ == args_) {
+    return completion_cache_;
+  }
   Completions out;
   out.prefix = std::string(trailing_identifier(code));
+  auto compiler = make_compiler(args_, false);
+  if (!compiler) {
+    llvm::consumeError(compiler.takeError());
+    return out;
+  }
+  auto analysis = analyze_editor(std::move(*compiler), *interp_->getCompilerInstance(), code, true);
+  if (analysis.completion_prefix) {
+    out.prefix = std::move(*analysis.completion_prefix);
+  }
+  out.items = std::move(analysis.items);
+  out.signatures = std::move(analysis.signatures);
+  out.active_parameter = analysis.active_parameter;
   std::set<std::string> names;
-
-  // The stock completion importer omits declarations relocated into our
-  // version namespaces. Expose their current public names as well.
-  if (!trailing_member_access(code))
-    for (const auto& name : user_symbol_names(interp_->getASTContext()))
-      if (name.find("::") == std::string::npos) names.insert(name);
-
-  // As clang-repl does: Clang's code completion runs in a fresh compiler
-  // (it parses `code` up to the cursor and stops there) and imports the
-  // session's declarations from the main interpreter's AST.
-  auto ci = make_compiler(args_);
-  if (ci) {
-    auto fresh = clang::Interpreter::create(std::move(*ci));
-    if (fresh) {
-      clang::CompilerInstance* fresh_ci = (*fresh)->getCompilerInstance();
-      // The partial code is usually not valid C++; keep its errors quiet.
-      fresh_ci->getDiagnostics().setClient(new clang::IgnoringDiagConsumer(), true);
-      const std::size_t newline = code.rfind('\n');
-      const auto line = static_cast<unsigned>(std::count(code.begin(), code.end(), '\n') + 1);
-      const auto column = static_cast<unsigned>(
-          (newline == std::string::npos ? code.size() : code.size() - newline - 1) + 1);
-      std::vector<std::string> results;
-      // Importing the session's declarations reports failures (e.g. a
-      // RecoveryExpr left by a failed input) through the main interpreter's
-      // diagnostics; keep them quiet and don't let them fail the next input.
-      clang::DiagnosticsEngine& diags = interp_->getCompilerInstance()->getDiagnostics();
-      const bool had_errors = diags.hasErrorOccurred();
-      std::unique_ptr<clang::DiagnosticConsumer> owned = diags.takeClient();
-      clang::DiagnosticConsumer* client = diags.getClient();
-      diags.setClient(new clang::IgnoringDiagConsumer(), true);
-      // A crash inside Clang's completion costs the completions, not the session.
-      llvm::CrashRecoveryContext::Enable();
-      llvm::CrashRecoveryContext crc;
-      const bool completed = crc.RunSafely([&] {
-        clang::ReplCodeCompleter completer;
-        completer.codeComplete(fresh_ci, code, line, column, interp_->getCompilerInstance(),
-                               results);
-      });
-      llvm::CrashRecoveryContext::Disable();
-      if (owned) diags.setClient(owned.release(), true);
-      else diags.setClient(client, false);
-      if (!had_errors) diags.Reset(/*soft=*/true);
-      if (completed) names.insert(results.begin(), results.end());
-      else (void)fresh->release();  // half-torn-down after a crash; don't destroy it
-    } else {
-      llvm::consumeError(fresh.takeError());
-    }
-  } else {
-    llvm::consumeError(ci.takeError());
+  for (const auto& item : out.items) {
+    names.insert(item.text);
   }
-
-  // After '.' / '->' Clang offers only methods; add the data members.
-  if (const std::optional<MemberAccess> access = trailing_member_access(code)) {
-    for (std::string& name : member_names(interp_->getASTContext(), access->names, access->arrows)) {
-      names.insert(std::move(name));
-    }
-  }
-  for (const std::string& name : names) {
-    if (name.compare(0, out.prefix.size(), out.prefix) == 0) out.names.push_back(name);
-  }
+  out.names.assign(names.begin(), names.end());
+  completion_context_ = context;
+  completion_code_ = code;
+  completion_args_ = args_;
+  completion_cache_ = out;
   return out;
 }
 

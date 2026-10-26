@@ -50,8 +50,16 @@ def session(binary, cwd, steps, home=None, args=()):
 
     outputs = {"start": read(wait=True)}
     for name, keys, *wait in steps:
-        os.write(fd, keys)
+        if os.environ.get("CPP_REPL_PTY_TRACE"):
+            print(f"STEP {name}", flush=True)
+        try:
+            os.write(fd, keys)
+        except OSError as error:
+            previous = "\n".join(f"{label}: {plain(output)}" for label, output in list(outputs.items())[-3:])
+            raise RuntimeError(f"REPL exited before {name}; recent output:\n{previous}") from error
         outputs[name] = read(wait=bool(wait and wait[0]))
+        if os.environ.get("CPP_REPL_PTY_TRACE"):
+            print(plain(outputs[name])[-600:], flush=True)
     time.sleep(0.5)
     done, status = os.waitpid(pid, os.WNOHANG)
     if done == 0:
@@ -281,7 +289,7 @@ def main():
                 ("struct", b"struct Point { int x, y; int sum() const { return x + y; } };\r", True),
                 ("object", b"Point pt{1, 2};\r", True),
                 ("tab_name", b"lab_t\t"),
-                ("call", b"(1, 2)\r", True),
+                ("call", b"1, 2)\r", True),
                 ("tab_member", b"pt.\t"),
                 ("cancel", b"\x03", True),
                 ("class_list", b"%class\r", True),
@@ -818,4 +826,5 @@ def main():
     sys.exit(1 if failures else 0)
 
 
-main()
+if __name__ == "__main__":
+    main()

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "cpp_inspect.hpp"
+#include "editor_analysis.hpp"
 #include "function_hooks.hpp"
 
 namespace clang {
@@ -58,11 +59,16 @@ class CppInterpreter {
   struct Completions {
     std::vector<std::string> names;  // sorted; each starts with `prefix`
     std::string prefix;              // the identifier being completed
+    std::vector<CompletionItem> items;
+    std::vector<std::string> signatures;
+    unsigned active_parameter = 0;
   };
-  // Tab completion at the end of `code` (the text before the cursor): Clang's
-  // code completion over the session's declarations (names, members after
-  // '.' / '->', std names, keywords) plus the data members of an object.
+
+  // Clang completion at the end of `code` (the text before the cursor), with
+  // structured overloads and signature help. Imports current session declarations
+  // into a disposable compiler; edited input is never executed.
   Completions complete(const std::string& code);
+  std::vector<SemanticToken> semantic_tokens(const std::string& code);
 
   // Parses and runs a C++ source file in the session as if it were
   // #included, so diagnostics point into the file and its own #include "..."
@@ -164,6 +170,16 @@ class CppInterpreter {
   bool compile_scope_active_ = false;
   std::string source_input_;
   bool reloading_source_ = false;
+  // Repaints can request the same buffer repeatedly. A new incremental TU or
+  // changed compiler flags invalidates the analysis without retaining AST nodes.
+  const void* semantic_context_ = nullptr;
+  std::string semantic_code_;
+  std::vector<std::string> semantic_args_;
+  std::vector<SemanticToken> semantic_cache_;
+  const void* completion_context_ = nullptr;
+  std::string completion_code_;
+  std::vector<std::string> completion_args_;
+  Completions completion_cache_;
 };
 
 }  // namespace example
