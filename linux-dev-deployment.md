@@ -1,11 +1,11 @@
 # Linux dev deployment
 
 Host: `linux-dev`, user `husam`, x86-64, LLVM/Clang 21.1.8.
-Source: `d3901d3` on `codex/editor-committed-hints`, including the earlier
+Source: `b155db3` on `codex/editor-committed-hints`, including overload selection,
 session options, large-session performance fix and LLVM 21 compatibility guards.
 
 Release directory:
-`/home/husam/.local/share/cpp-repl/releases/20261026-expression-hints`.
+`/home/husam/.local/share/cpp-repl/releases/20261026-overload-menu`.
 Installed command: `/home/husam/.local/bin/cpp-repl`.
 The previous installed executable is retained as `previous-cpp-repl` in the
 release directory. Remote source and build files are isolated from existing
@@ -13,16 +13,20 @@ checkouts; unrelated changes in the primary macOS checkout remain untouched.
 
 Validation:
 
-- Linux full suite: 310/310 passed in 166.98 seconds, including real-terminal
+- Linux full suite: 311/311 passed in 143.77 seconds, including real-terminal
   large-header completion, semantic coloring, inline hints and argument navigation.
-- macOS full suite: 312/312 passed in 162.52 seconds.
+- macOS full suite: 313/313 passed in 163.78 seconds.
 - Installed-release smoke: LLVM 21.1.8 banner, both options defaulting to true,
   a semicolon-terminated call printing 30, and a muted call still executing once.
-- Both option and committed-hint terminal suites passed against the installed
+- Option, committed-hint and overload-menu terminal suites passed against the installed
   executable, including blank slots, clean history and final gray annotations.
   Embedded, nested and multiple calls keep parameter names/types; return
   annotations are omitted when expression code follows the call. Methods,
   earlier-argument cursor edits, comments and strings are covered as well.
+- Overload signatures support Up/Down selection and Tab acceptance for global,
+  method and explicit-template calls. Selection drives parameter hints and Tab
+  stops; C++ resolves execution normally. Cancellation, bounded menu rows,
+  ordinary history and command-specific completion are covered.
 - Dynamic dependencies resolve without missing libraries.
 - Installed and staged executables have identical SHA-256 checksums; source
   files were verified against the committed source before installation.
@@ -46,8 +50,9 @@ Or, while logged into Linux:
 ~/.local/bin/cpp-repl
 ```
 
-The release directory retains configure/build/install logs, `tests.log`, source
-revision metadata, binary checksums and smoke output. A broader standard-library
-temporary-object probe reported unresolved vector/path destructors in both the
-previous installed build and this build, including with the vendor driver config;
-that existing LLVM 21 execution limitation is separate from these editor changes.
+The release directory retains configure/build/install logs, `tests.log`,
+`macos-tests.log`, CTK grounding, independent review, source revision metadata,
+binary checksums and smoke output. The earlier `20261026-expression-hints` release
+also recorded unresolved vector/path destructors in a broader standard-library
+temporary-object probe, including with the vendor driver config; that existing
+LLVM 21 execution limitation is separate from these editor changes.
