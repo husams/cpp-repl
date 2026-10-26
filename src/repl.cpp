@@ -461,29 +461,36 @@ const CompletionItem* enter_signature(const CppInterpreter::Completions& result,
 struct CachedSignature {
   std::string identity;
   std::size_t context = 0;
-  std::optional<CompletionItem> item;
+  std::vector<CompletionItem> signatures;
 };
 
 using SignatureCache = std::unordered_map<std::size_t, CachedSignature>;
+
+std::vector<CompletionItem> signatures_for_call(CppInterpreter& cpp, const std::string& text,
+                                                const EditorCall& call, std::size_t context,
+                                                const SelectedSignatures& selected,
+                                                SignatureCache& cache) {
+  const std::string identity = selected_identity_for(call, selected);
+  const auto cached = cache.find(call.open);
+  if (cached != cache.end() && cached->second.identity == identity &&
+      cached->second.context == context) {
+    return cached->second.signatures;
+  }
+  const auto completion = completions_at_cursor(cpp, text, context);
+  CachedSignature entry{identity, context, completion.signature_items};
+  cache[call.open] = std::move(entry);
+  return cache[call.open].signatures;
+}
 
 std::optional<CompletionItem> signature_for_call(CppInterpreter& cpp, const std::string& text,
                                                  const EditorCall& call, std::size_t context,
                                                  const SelectedSignatures& selected,
                                                  SignatureCache& cache) {
-  const std::string identity = selected_identity_for(call, selected);
-  const auto cached = cache.find(call.open);
-  if (cached != cache.end() && cached->second.identity == identity &&
-      cached->second.context == context) {
-    return cached->second.item;
-  }
-  const auto completion = completions_at_cursor(cpp, text, context);
-  const auto* signature = selected_signature(completion, identity);
-  CachedSignature entry{identity, context, std::nullopt};
-  if (signature != nullptr) {
-    entry.item = *signature;
-  }
-  cache[call.open] = std::move(entry);
-  return cache[call.open].item;
+  const auto signatures = signatures_for_call(cpp, text, call, context, selected, cache);
+  CppInterpreter::Completions completion;
+  completion.signature_items = signatures;
+  const auto* signature = selected_signature(completion, selected_identity_for(call, selected));
+  return signature == nullptr ? std::nullopt : std::optional<CompletionItem>(*signature);
 }
 
 std::vector<EditorCall> completed_calls(const std::string& text) {
@@ -750,11 +757,17 @@ std::vector<std::size_t> completed_call_open_offsets(const std::string& text) {
 // Enter: submit commands and complete C++; otherwise keep editing in the same
 // buffer, including blank lines. Ctrl+C cancels an incomplete block.
 Replxx::ACTION_RESULT on_enter(Replxx& rx, CppInterpreter& cpp,
-                               const std::shared_ptr<SelectedSignatures>& selected, char32_t code) {
+                               const std::shared_ptr<SelectedSignatures>& selected,
+                               SignatureCache& signature_cache, std::string& signature_cache_text,
+                               char32_t code) {
   const auto state = rx.get_state();
   std::string text = state.text();
   std::size_t cursor = utf8_byte_offset(text, state.cursor_position());
   if (is_cpp_editor_payload(text, cursor) && !is_command_line(text)) {
+    if (signature_cache_text != text) {
+      signature_cache.clear();
+      signature_cache_text = text;
+    }
     const auto call_opens = completed_call_open_offsets(text);
     for (std::size_t call_open : call_opens) {
       auto call = editor_call_at_cursor(text, call_open + 1);
@@ -763,10 +776,16 @@ Replxx::ACTION_RESULT on_enter(Replxx& rx, CppInterpreter& cpp,
       }
       const std::size_t call_cursor =
           cursor > call->open && cursor <= call->close ? cursor : call->close;
-      const auto completion = completions_at_cursor(cpp, text, call_cursor);
-      const auto* signature =
+      auto signatures =
+          signatures_for_call(cpp, text, *call, call_cursor, *selected, signature_cache);
+      CppInterpreter::Completions completion;
+      completion.signature_items = std::move(signatures);
+      const auto* selected_item =
           enter_signature(completion, *call, selected_identity_for(*call, *selected));
-      while (signature != nullptr && call->arguments.size() > 1) {
+      std::optional<CompletionItem> signature =
+          selected_item == nullptr ? std::nullopt : std::optional<CompletionItem>(*selected_item);
+      bool source_changed = false;
+      while (signature && call->arguments.size() > 1) {
         const std::size_t last = call->arguments.size() - 1;
         if (last >= signature->parameters.size() || !signature->parameters[last].has_default ||
             call->arguments[last].begin != call->arguments[last].end) {
@@ -784,8 +803,11 @@ Replxx::ACTION_RESULT on_enter(Replxx& rx, CppInterpreter& cpp,
         const std::size_t removed = call->close - erase_begin;
         text.erase(erase_begin, removed);
         cursor = cursor > erase_begin ? std::max(erase_begin, cursor - removed) : cursor;
+        source_changed = true;
         rx.set_state(Replxx::State(
             text.c_str(), static_cast<int>(utf8_length(std::string_view(text).substr(0, cursor)))));
+        signature_cache.clear();
+        signature_cache_text = text;
         call = editor_call_at_cursor(text, call_open + 1);
         if (!call || !call->has_close) {
           break;
@@ -794,7 +816,13 @@ Replxx::ACTION_RESULT on_enter(Replxx& rx, CppInterpreter& cpp,
       if (!call || !call->has_close) {
         continue;
       }
-      for (std::size_t i = 0; signature != nullptr && i < signature->parameters.size(); ++i) {
+      if (source_changed && signature) {
+        const std::size_t context =
+            cursor > call->open && cursor <= call->close ? cursor : call->close;
+        signature_cache[call_open] = {
+            selected_identity_for(*call, *selected), context, {*signature}};
+      }
+      for (std::size_t i = 0; signature && i < signature->parameters.size(); ++i) {
         const auto& parameter = signature->parameters[i];
         if (parameter.is_pack) {
           continue;
@@ -936,6 +964,16 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
       std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
   auto last_input = std::make_shared<std::string>();
   auto committing = std::make_shared<bool>(false);
+  auto seed_accepted_signature = [signature_cache, signature_cache_text, selected_text, last_input,
+                                  last_edit](const std::string& source, std::size_t call_open,
+                                             const CompletionItem& signature) {
+    signature_cache->clear();
+    *signature_cache_text = source;
+    (*signature_cache)[call_open] = {signature.identity, call_open + 1, {signature}};
+    *selected_text = source;
+    *last_input = source;
+    *last_edit = std::chrono::steady_clock::now() - std::chrono::milliseconds(200);
+  };
   rx.set_inline_display_callback([&cpp, &rx, selected_identity, selected_text, last_edit,
                                   last_input, committing, signature_cache,
                                   signature_cache_text](const std::string&) {
@@ -1095,7 +1133,7 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
   rx.bind_key(Replxx::KEY::ENTER, [&rx, &cpp, force_menu_repaint, menu_matches_current,
                                    stale_overload_menu, selected_identity, selected_text,
                                    signature_cache, signature_cache_text, overload_menu,
-                                   committing](char32_t code) {
+                                   seed_accepted_signature, committing](char32_t code) {
     if (stale_overload_menu->pending && rx.get_state().text() == stale_overload_menu->source) {
       stale_overload_menu->pending = false;
       overload_menu->reset();
@@ -1116,23 +1154,30 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
       const auto state = rx.get_state();
       std::string source = state.text();
       sync_selected_signatures(selected_identity, selected_text, source);
+      std::optional<CompletionItem> accepted_signature;
+      std::size_t accepted_call_open = 0;
       if (menu.selected < menu.items.size()) {
+        accepted_signature = menu.items[menu.selected];
         if (menu.from_prefix) {
           const auto& item = menu.items[menu.selected];
           source.replace(menu.prefix_begin, menu.cursor - menu.prefix_begin, item.text + "()");
           const std::size_t call_open = menu.prefix_begin + item.text.size();
+          accepted_call_open = call_open;
           rx.set_state(Replxx::State(
               source.c_str(),
               static_cast<int>(utf8_length(std::string_view(source).substr(0, call_open + 1)))));
           sync_selected_signatures(selected_identity, selected_text, source);
           (*selected_identity)[call_open] = item.identity;
-          signature_cache->erase(call_open);
         } else {
+          accepted_call_open = menu.call_open;
           (*selected_identity)[menu.call_open] = menu.items[menu.selected].identity;
-          signature_cache->erase(menu.call_open);
         }
       }
-      *selected_text = rx.get_state().text();
+      if (accepted_signature) {
+        seed_accepted_signature(rx.get_state().text(), accepted_call_open, *accepted_signature);
+      } else {
+        *selected_text = rx.get_state().text();
+      }
       overload_menu->reset();
       force_menu_repaint(code);
       return Replxx::ACTION_RESULT::CONTINUE;
@@ -1146,7 +1191,8 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
       ~CommitDisplayScope() { flag = false; }
     } commit_display(*committing);
     overload_menu->reset();
-    const auto result = on_enter(rx, cpp, selected_identity, code);
+    const auto result =
+        on_enter(rx, cpp, selected_identity, *signature_cache, *signature_cache_text, code);
     const auto state = rx.get_state();
     const std::string current_text = state.text();
     if (current_text.empty() || result != Replxx::ACTION_RESULT::CONTINUE) {
@@ -1212,7 +1258,8 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
     return true;
   };
   auto accept_overload = [&rx, force_menu_repaint, menu_matches_current, overload_menu,
-                          selected_identity, signature_cache, selected_text](char32_t code) {
+                          selected_identity, selected_text,
+                          seed_accepted_signature](char32_t code) {
     if (!*overload_menu) {
       return false;
     }
@@ -1225,25 +1272,32 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
     const auto state = rx.get_state();
     std::string source = state.text();
     sync_selected_signatures(selected_identity, selected_text, source);
+    std::optional<CompletionItem> accepted_signature;
+    std::size_t accepted_call_open = 0;
     if (menu.selected < menu.items.size()) {
+      accepted_signature = menu.items[menu.selected];
       if (menu.from_prefix) {
         const auto& item = menu.items[menu.selected];
         const std::string inserted = item.text + "()";
         source.replace(menu.prefix_begin, menu.cursor - menu.prefix_begin, inserted);
         const std::size_t call_open = menu.prefix_begin + item.text.size();
+        accepted_call_open = call_open;
         const std::size_t caret = call_open + 1;
         rx.set_state(Replxx::State(
             source.c_str(),
             static_cast<int>(utf8_length(std::string_view(source).substr(0, caret)))));
         sync_selected_signatures(selected_identity, selected_text, source);
         (*selected_identity)[call_open] = item.identity;
-        signature_cache->erase(call_open);
       } else {
+        accepted_call_open = menu.call_open;
         (*selected_identity)[menu.call_open] = menu.items[menu.selected].identity;
-        signature_cache->erase(menu.call_open);
       }
     }
-    *selected_text = rx.get_state().text();
+    if (accepted_signature) {
+      seed_accepted_signature(rx.get_state().text(), accepted_call_open, *accepted_signature);
+    } else {
+      *selected_text = rx.get_state().text();
+    }
     overload_menu->reset();
     force_menu_repaint(code);
     return true;

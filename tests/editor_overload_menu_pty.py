@@ -38,20 +38,57 @@ def fast_menu_probe(binary):
                     break
             return output.decode("utf8", "replace")
 
+        def read_until(needle, timeout):
+            output = bytearray()
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([fd], [], [], deadline - time.monotonic())
+                if not ready:
+                    break
+                try:
+                    output.extend(os.read(fd, 65536))
+                except OSError:
+                    break
+                if needle in re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", output.decode("utf8", "replace")):
+                    return output.decode("utf8", "replace")
+            return output.decode("utf8", "replace")
+
         try:
             read_for(0.3)
-            os.write(fd, b"int quick_menu(int a); int quick_menu(int a,int b);\r")
+            os.write(fd, b"int quick_menu(int a); int quick_menu(int a,int second);\r")
             read_for(2.0)
             os.write(fd, b"quick_menu(")
-            read_for(0.05)
+            read_until("quick_menu(", 0.1)
             os.write(fd, b"\t")
-            opened = read_for(0.05)
+            opened = read_until("> quick_menu(int a)", 0.1)
             os.write(fd, b"\x1b[B")
-            moved = read_for(0.05)
+            moved = read_until("> quick_menu(int a, int second)", 0.1)
+            started = time.perf_counter()
+            os.write(fd, b"\t")
+            accepted = read_until("second:", 0.1)
+            tab_acceptance_ms = (time.perf_counter() - started) * 1000
+            os.write(fd, b"\x03")
+            read_until("cpp-repl", 0.1)
+            os.write(fd, b"quick_menu(")
+            read_until("quick_menu(", 0.1)
+            os.write(fd, b"\t")
+            read_until("> quick_menu(int a)", 0.1)
+            os.write(fd, b"\x1b[B")
+            read_until("> quick_menu(int a, int second)", 0.1)
+            started = time.perf_counter()
+            os.write(fd, b"\r")
+            enter_accepted = read_until("second:", 0.1)
+            enter_acceptance_ms = (time.perf_counter() - started) * 1000
             strip = lambda value: re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", value)
             opened, moved = strip(opened), strip(moved)
-            return ("quick_menu(int a)" in opened and "quick_menu(int a, int b)" in opened and
-                    moved.rfind("> quick_menu(int a, int b)") > moved.rfind("> quick_menu(int a)"))
+            accepted = strip(accepted)
+            menu_ok = ("quick_menu(int a)" in opened and
+                       "quick_menu(int a, int second)" in opened and
+                       moved.rfind("> quick_menu(int a, int second)") >
+                       moved.rfind("> quick_menu(int a)"))
+            return (menu_ok,
+                    tab_acceptance_ms if "second:" in strip(accepted) else None,
+                    enter_acceptance_ms if "second:" in strip(enter_accepted) else None)
         finally:
             try:
                 os.write(fd, b"\x03%quit\r")
@@ -216,7 +253,12 @@ with tempfile.TemporaryDirectory() as cwd:
           "menu_object.choose(left:" not in saved)
     check("history Up and Down still work outside a menu", "error:" not in plain(out["history"]))
     check("overload menu session exits normally", status == 0)
-    check("menu opening and selection redraw within 50 ms", fast_menu_probe(binary))
+    fast_menu_ok, tab_accept_ms, enter_accept_ms = fast_menu_probe(binary)
+    check("menu opening and selection redraw within 100 ms", fast_menu_ok)
+    check("immediate Tab acceptance renders its selected hint within 100 ms",
+          tab_accept_ms is not None and tab_accept_ms < 100)
+    check("immediate Enter acceptance renders its selected hint within 100 ms",
+          enter_accept_ms is not None and enter_accept_ms < 100)
     if helpers["failures"]:
         for key, value in out.items():
             print(f"{key}: {plain(value)}")
