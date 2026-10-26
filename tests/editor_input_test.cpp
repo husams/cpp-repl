@@ -114,5 +114,65 @@ TEST(EditorInputTest, AnglePairingRequiresAnIncludeHeaderContext) {
   EXPECT_EQ(delimiter_decision("#include \"x>\"", 11, '>').action, DelimiterAction::None);
 }
 
+TEST(EditorInputTest, EnterContinuesInsideAnEmptyPairAfterAnIncompleteOperator) {
+  EXPECT_TRUE(editor_wants_more_input("21 * ()", 6));
+  EXPECT_TRUE(editor_wants_more_input("21 * ( )", 6));
+  EXPECT_TRUE(editor_wants_more_input("21 * ( )", 7));
+  EXPECT_TRUE(editor_wants_more_input("21 *", 4));
+  EXPECT_TRUE(editor_wants_more_input("()", 1));
+  const std::string commented_empty_pair = " /* note */ ()";
+  EXPECT_TRUE(editor_wants_more_input(commented_empty_pair, commented_empty_pair.size() - 1));
+  EXPECT_FALSE(editor_wants_more_input("f()", 2));
+  EXPECT_FALSE(editor_wants_more_input("f( )", 2));
+  EXPECT_FALSE(editor_wants_more_input("f( )", 3));
+  EXPECT_FALSE(editor_wants_more_input("f(42)", 4));
+  EXPECT_FALSE(editor_wants_more_input("f(20,22)", 7));
+  EXPECT_FALSE(editor_wants_more_input("// call(\n", 9));
+  EXPECT_FALSE(editor_wants_more_input("%hooks", 6));
+  EXPECT_FALSE(editor_wants_more_input("x++", 3));
+  EXPECT_FALSE(editor_wants_more_input("x;", 2));
+  EXPECT_TRUE(editor_wants_more_input("if (x) {}", 8));
+  EXPECT_FALSE(editor_wants_more_input("#include \"header\"", 16));
+  const std::string continued_macro = "#define MSG \"abc\\\ndef\"";
+  EXPECT_FALSE(editor_wants_more_input(continued_macro, continued_macro.size() - 1));
+  const std::string unicode_call = "f(\"λ\")";
+  EXPECT_FALSE(editor_wants_more_input(unicode_call, unicode_call.size()));
+}
+
+TEST(EditorInputTest, EnterContinuesAnEscapedPreprocessorQuote) {
+  EXPECT_TRUE(editor_wants_more_input("#define MSG \"abc\\\"", 17));
+  const std::string continued_quote = "#define MSG \"abc\\\ndef\\\"";
+  EXPECT_TRUE(editor_wants_more_input(continued_quote, continued_quote.size() - 1));
+  EXPECT_EQ(delimiter_decision(continued_quote, continued_quote.size() - 1, '"').action,
+            DelimiterAction::None);
+  const std::string continued_string = "#define MSG \"abc\\\ndef";
+  EXPECT_EQ(delimiter_decision(continued_string, continued_string.size(), '(').action,
+            DelimiterAction::None);
+  const std::string continued_quote_with_comment = "#define MSG /* \"ignored\" */ \"abc\\\ndef\\\"";
+  EXPECT_TRUE(editor_wants_more_input(continued_quote_with_comment,
+                                      continued_quote_with_comment.size() - 1));
+  const std::string complete_two_line_macro = "#define MSG \"abc\\\ndef\\\nghi\"";
+  EXPECT_FALSE(
+      editor_wants_more_input(complete_two_line_macro, complete_two_line_macro.size() - 1));
+  EXPECT_EQ(
+      delimiter_decision(complete_two_line_macro, complete_two_line_macro.size() - 1, '"').action,
+      DelimiterAction::SkipClosing);
+  EXPECT_FALSE(editor_wants_more_input("#define MSG \"abc\"", 17));
+  EXPECT_FALSE(editor_wants_more_input("%info foo(\"x\")", 14));
+}
+
+TEST(EditorInputTest, AngleHeaderTreatsOrdinaryDelimitersAsFilenameCharacters) {
+  const std::string header = "#include <dir/name";
+  for (const char32_t key :
+       {char32_t{'('}, char32_t{'['}, char32_t{'{'}, char32_t{'\"'}, char32_t{'\''}}) {
+    EXPECT_EQ(delimiter_decision(header, header.size(), key).action, DelimiterAction::None);
+  }
+  for (const char32_t key : {char32_t{')'}, char32_t{']'}, char32_t{'}'}}) {
+    EXPECT_EQ(delimiter_decision(header + ")", header.size(), key).action, DelimiterAction::None);
+  }
+  EXPECT_EQ(delimiter_decision("#include <header>", 16, '>').action, DelimiterAction::SkipClosing);
+  EXPECT_EQ(delimiter_decision("#include <>", 10, '\b').action, DelimiterAction::DeletePair);
+}
+
 } // namespace
 } // namespace example

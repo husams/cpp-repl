@@ -51,8 +51,9 @@ void highlight_editor_input(CppInterpreter& cpp, const std::string& input,
     offset = command.code->span.begin;
   }
   const auto lexical = lex_cpp(code);
-  if (std::none_of(lexical.tokens.begin(), lexical.tokens.end(),
-                   [](const auto& token) { return token.kind == TokenKind::Identifier; })) {
+  if (std::none_of(lexical.tokens.begin(), lexical.tokens.end(), [](const auto& token) {
+        return token.kind == TokenKind::Identifier || token.kind == TokenKind::Type;
+      })) {
     return;
   }
   const auto semantic = cpp.semantic_tokens(code);

@@ -42,19 +42,69 @@ bool escaped_at(std::string_view text, std::size_t pos) {
 }
 
 bool in_preprocessor_quote(std::string_view code, std::size_t cursor_byte) {
-  const std::size_t before_cursor = std::min(cursor_byte, code.size());
-  const auto line_begin =
-      before_cursor == 0 ? std::string_view::npos : code.rfind('\n', before_cursor - 1);
-  const auto begin = line_begin == std::string_view::npos ? 0 : line_begin + 1;
-  const auto line = code.substr(begin, before_cursor - begin);
-  const auto first = line.find_first_not_of(" \t");
-  if (first == std::string_view::npos || line[first] != '#') {
+  cursor_byte = std::min(cursor_byte, code.size());
+  auto begin = cursor_byte == 0 ? std::string_view::npos : code.rfind('\n', cursor_byte - 1);
+  begin = begin == std::string_view::npos ? 0 : begin + 1;
+  while (begin > 1 && code[begin - 2] == '\\') {
+    const auto previous_newline = begin - 1;
+    const auto prior =
+        previous_newline == 0 ? std::string_view::npos : code.rfind('\n', previous_newline - 1);
+    begin = prior == std::string_view::npos ? 0 : prior + 1;
+  }
+
+  const auto physical_end = code.find('\n', begin);
+  const auto first_line = code.substr(
+      begin, (physical_end == std::string_view::npos ? code.size() : physical_end) - begin);
+  const auto first = first_line.find_first_not_of(" \t");
+  if (first == std::string_view::npos || first_line[first] != '#') {
     return false;
   }
+
   bool quoted = false;
-  for (std::size_t i = first + 1; i < line.size(); ++i) {
-    if (line[i] == '"' && !escaped_at(line, i)) {
-      quoted = !quoted;
+  bool character = false;
+  bool escaped = false;
+  bool block_comment = false;
+  bool line_comment = false;
+  for (std::size_t i = begin; i < cursor_byte; ++i) {
+    const char ch = code[i];
+    if (ch == '\\' && i + 1 < cursor_byte && code[i + 1] == '\n') {
+      ++i;
+      continue;
+    }
+    if (line_comment) {
+      if (ch == '\n') {
+        line_comment = false;
+      }
+      continue;
+    }
+    if (block_comment) {
+      if (ch == '*' && i + 1 < cursor_byte && code[i + 1] == '/') {
+        block_comment = false;
+        ++i;
+      }
+      continue;
+    }
+    if (quoted || character) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch == '\\') {
+        escaped = true;
+      } else if ((quoted && ch == '"') || (character && ch == '\'')) {
+        quoted = false;
+        character = false;
+      }
+      continue;
+    }
+    if (ch == '/' && i + 1 < cursor_byte && code[i + 1] == '*') {
+      block_comment = true;
+      ++i;
+    } else if (ch == '/' && i + 1 < cursor_byte && code[i + 1] == '/') {
+      line_comment = true;
+      ++i;
+    } else if (ch == '"') {
+      quoted = true;
+    } else if (ch == '\'') {
+      character = true;
     }
   }
   return quoted;
@@ -173,6 +223,65 @@ bool number_ends_at(std::string_view code, std::size_t cursor_byte) {
          lexed.tokens.back().end == prefix.size();
 }
 
+bool incomplete_at_cursor(std::string_view code, std::size_t cursor_byte) {
+  cursor_byte = std::min(cursor_byte, code.size());
+  // Auto-pairing puts the cursor between the two tokens. In this position,
+  // consider the opener together with its left-hand expression so `21 * ()`
+  // continues while a complete `f()` still submits.
+  std::size_t opening = cursor_byte;
+  while (opening > 0 && std::isspace(static_cast<unsigned char>(code[opening - 1])) != 0) {
+    --opening;
+  }
+  std::size_t closing = cursor_byte;
+  while (closing < code.size() && std::isspace(static_cast<unsigned char>(code[closing])) != 0) {
+    ++closing;
+  }
+  if (opening > 0 && closing < code.size() && code[opening - 1] == '(' && code[closing] == ')') {
+    const auto before_opener = code.substr(0, opening - 1);
+    const auto before_tokens = lex_cpp(before_opener).tokens;
+    const bool has_expression =
+        std::any_of(before_tokens.begin(), before_tokens.end(),
+                    [](const Token& token) { return token.kind != TokenKind::Comment; });
+    if (is_incomplete(before_opener) || !has_expression) {
+      return true;
+    }
+  }
+  // If the cursor sits before an editor-inserted quote that the user has just
+  // escaped, Enter must insert the continued line before that quote. A cursor
+  // elsewhere inside a valid quoted token (including an include path) does
+  // not need special continuation handling.
+  if (cursor_byte < code.size() && code[cursor_byte] == '"' && escaped_at(code, cursor_byte) &&
+      in_preprocessor_quote(code, cursor_byte)) {
+    return true;
+  }
+
+  const auto prefix = code.substr(0, cursor_byte);
+  const auto prefix_tokens = lex_cpp(prefix).tokens;
+  for (auto it = prefix_tokens.rbegin(); it != prefix_tokens.rend(); ++it) {
+    if (it->kind == TokenKind::Comment) {
+      continue;
+    }
+    if (it->kind == TokenKind::Operator) {
+      const auto op = prefix.substr(it->begin, it->end - it->begin);
+      if (op != "++" && op != "--" && op != ";") {
+        return true;
+      }
+    }
+    break;
+  }
+
+  if (cursor_byte < code.size() && code[cursor_byte] == '}') {
+    const auto lexed = lex_cpp(code);
+    for (const auto& token : lexed.tokens) {
+      if (token.begin == cursor_byte && token.kind == TokenKind::Bracket &&
+          code[token.begin] == '}') {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 } // namespace
 
 std::size_t utf8_byte_offset(std::string_view text, std::size_t codepoint_offset) {
@@ -193,12 +302,21 @@ bool is_cpp_editor_payload(std::string_view buffer, std::size_t cursor_byte) {
   return payload.valid;
 }
 
+bool editor_wants_more_input(std::string_view buffer, std::size_t cursor_byte) {
+  if (cursor_byte > buffer.size()) {
+    return false;
+  }
+  const Payload payload = cpp_payload(buffer, cursor_byte);
+  return payload.valid && incomplete_at_cursor(payload.code, payload.cursor);
+}
+
 DelimiterDecision delimiter_decision(std::string_view buffer, std::size_t cursor_byte,
                                      char32_t key) {
   if (cursor_byte > buffer.size() || !is_cpp_editor_payload(buffer, cursor_byte)) {
     return {};
   }
   const Payload payload = cpp_payload(buffer, cursor_byte);
+  const auto header_context = include_context(payload.code, payload.cursor);
   const char closing = matching_close(key);
   if (key == '<') {
     return include_context(payload.code, payload.cursor) == IncludeContext::BeforeHeader
@@ -207,8 +325,7 @@ DelimiterDecision delimiter_decision(std::string_view buffer, std::size_t cursor
   }
   if (key == '>') {
     return payload.cursor < payload.code.size() && payload.code[payload.cursor] == '>' &&
-                   include_context(payload.code, payload.cursor) ==
-                       IncludeContext::InsideAngleHeader
+                   header_context == IncludeContext::InsideAngleHeader
                ? DelimiterDecision{DelimiterAction::SkipClosing, 0}
                : DelimiterDecision{};
   }
@@ -257,6 +374,12 @@ DelimiterDecision delimiter_decision(std::string_view buffer, std::size_t cursor
         return {DelimiterAction::DeletePair, 0};
       }
     }
+    return {};
+  }
+
+  // Header names are preprocessing tokens. Ordinary delimiter keys are
+  // filename characters here, so leave insertion and closing keys untouched.
+  if (header_context == IncludeContext::InsideAngleHeader) {
     return {};
   }
 

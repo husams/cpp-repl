@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <iostream>
+#include <memory>
 #include <string_view>
 #include <vector>
 
@@ -63,7 +65,8 @@ Replxx::completions_t cpp_completions(CppInterpreter& cpp, Replxx& rx, const std
       const auto count = (end == std::string::npos ? buffer.size() : end) - cursor;
       erase_after = static_cast<int>(utf8_length(std::string_view(buffer).substr(cursor, count)));
     }
-    if (item.kind == SemanticKind::Function || item.kind == SemanticKind::Method) {
+    if (item.insert_call &&
+        (item.kind == SemanticKind::Function || item.kind == SemanticKind::Method)) {
       if (existing_call) {
         cursor_offset =
             static_cast<int>(utf8_length(suffix_after_identifier.substr(0, first_nonblank + 1)));
@@ -310,23 +313,7 @@ Replxx::ACTION_RESULT on_enter(Replxx& rx, char32_t code) {
     return rx.invoke(
         wants_more_input(text) ? Replxx::ACTION::NEW_LINE : Replxx::ACTION::COMMIT_LINE, code);
   }
-  const auto prefix = std::string_view(text).substr(0, cursor);
-  bool trailing_operator = false;
-  const auto tokens = lex_cpp(prefix).tokens;
-  for (auto it = tokens.rbegin(); it != tokens.rend(); ++it) {
-    if (it->kind == TokenKind::Comment) {
-      continue;
-    }
-    if (it->kind == TokenKind::Operator) {
-      const auto op = prefix.substr(it->begin, it->end - it->begin);
-      trailing_operator = op != "++" && op != "--" && op != ";";
-    }
-    break;
-  }
-  const bool before_closing_brace =
-      cursor < text.size() && text[cursor] == '}' &&
-      delimiter_decision(text, cursor, '}').action == DelimiterAction::SkipClosing;
-  if (!wants_more_input(text) && !trailing_operator && !before_closing_brace) {
+  if (!wants_more_input(text) && !editor_wants_more_input(text, cursor)) {
     return rx.invoke(Replxx::ACTION::COMMIT_LINE, code);
   }
   return rx.invoke(Replxx::ACTION::NEW_LINE, code);
@@ -368,9 +355,33 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
   rx.set_hint_callback([&cpp](const std::string& input, int& length, Replxx::Color& color) {
     return hint(cpp, input, length, color);
   });
-  rx.set_highlighter_callback([&cpp](const std::string& input, Replxx::colors_t& colors) {
-    highlight_editor_input(cpp, input, colors);
-  });
+  auto last_edit =
+      std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
+  auto last_input = std::make_shared<std::string>();
+  rx.set_highlighter_callback(
+      [last_edit, last_input](const std::string& input, Replxx::colors_t& colors) {
+        if (*last_input != input) {
+          *last_input = input;
+          *last_edit = std::chrono::steady_clock::now();
+        }
+        highlight_input(input, colors);
+      });
+  rx.set_idle_highlighter_callback(
+      [&cpp, last_edit, last_input](const std::string& input, Replxx::colors_t& colors) {
+        const auto now = std::chrono::steady_clock::now();
+        if (*last_input != input) {
+          *last_input = input;
+          *last_edit = now;
+          return;
+        }
+        if (now - *last_edit < std::chrono::milliseconds(160)) {
+          return;
+        }
+        highlight_editor_input(cpp, input, colors);
+      });
+  // Replxx invokes the idle highlighter and signature callback after input has
+  // been quiet for this interval. Both can use the interpreter synchronously.
+  rx.set_hint_delay(160);
   rx.set_max_hint_rows(4);
 
   // Custom binding: Ctrl+L clears the screen and redraws the prompt.

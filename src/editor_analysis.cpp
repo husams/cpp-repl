@@ -1,6 +1,7 @@
 #include "editor_analysis.hpp"
 
 #include <algorithm>
+#include <iterator>
 #include <map>
 #include <set>
 #include <tuple>
@@ -24,6 +25,7 @@
 #include "clang/Sema/CodeCompleteConsumer.h"
 #include "clang/Sema/Lookup.h"
 #include "clang/Sema/Sema.h"
+#include "cpp_lexer.hpp"
 #include "cpp_symbols.hpp"
 #include "definition_shadowing.hpp"
 #include "llvm/ADT/ScopeExit.h"
@@ -123,14 +125,65 @@ CompletionItem describe(const clang::NamedDecl* decl) {
   return item;
 }
 
-std::optional<std::string> included_path_prefix(llvm::StringRef code) {
-  const auto line_start = code.rfind('\n');
-  const auto line = code.substr(line_start == llvm::StringRef::npos ? 0 : line_start + 1);
-  const auto hash = line.find('#');
+struct IncludePathPrefix {
+  std::string logical;
+  std::string replacement;
+};
+
+std::optional<IncludePathPrefix> included_path_prefix(llvm::StringRef code) {
+  const auto lexed = lex_cpp(code.str());
+  if (lexed.tokens.empty() || lexed.tokens.back().kind != TokenKind::Preprocessor ||
+      lexed.tokens.back().end != code.size()) {
+    return std::nullopt;
+  }
+  const auto raw = code.slice(lexed.tokens.back().begin, lexed.tokens.back().end);
+  std::string logical;
+  logical.reserve(raw.size());
+  bool in_header = false;
+  char header_end = '\0';
+  std::size_t raw_path_begin = llvm::StringRef::npos;
+  std::size_t raw_path_end = raw.size();
+  for (std::size_t i = 0; i < raw.size();) {
+    if (raw[i] == '\\' && i + 1 < raw.size() && raw[i + 1] == '\n') {
+      i += 2;
+    } else if (in_header) {
+      if (raw[i] == header_end) {
+        raw_path_end = i;
+        break;
+      }
+      logical.push_back(raw[i++]);
+    } else if (raw[i] == '/' && i + 1 < raw.size() && raw[i + 1] == '*') {
+      const auto close = raw.find("*/", i + 2);
+      if (close == llvm::StringRef::npos) {
+        return std::nullopt;
+      }
+      logical.push_back(' ');
+      i = close + 2;
+    } else if (raw[i] == '/' && i + 1 < raw.size() && raw[i + 1] == '/') {
+      // A continued physical line is still part of a // comment.
+      i += 2;
+      while (i < raw.size()) {
+        if (raw[i] == '\\' && i + 1 < raw.size() && raw[i + 1] == '\n') {
+          i += 2;
+        } else if (raw[i++] == '\n') {
+          break;
+        }
+      }
+    } else {
+      if (raw[i] == '"' || raw[i] == '<') {
+        in_header = true;
+        header_end = raw[i] == '"' ? '"' : '>';
+        raw_path_begin = i + 1;
+      }
+      logical.push_back(raw[i++]);
+    }
+  }
+  llvm::StringRef rest(logical);
+  const auto hash = rest.find('#');
   if (hash == llvm::StringRef::npos) {
     return std::nullopt;
   }
-  auto rest = line.drop_front(hash + 1).ltrim(" \t");
+  rest = rest.drop_front(hash + 1).ltrim(" \t");
   const auto directive_end = rest.find_first_of(" \t<\"");
   const auto directive = rest.take_front(directive_end);
   if (directive != "include" && directive != "include_next" && directive != "import") {
@@ -143,8 +196,92 @@ std::optional<std::string> included_path_prefix(llvm::StringRef code) {
   if (rest.empty() || (rest.front() != '<' && rest.front() != '"')) {
     return std::nullopt;
   }
-  const auto path = rest.drop_front();
-  return path.str();
+  if (raw_path_begin == llvm::StringRef::npos) {
+    return std::nullopt;
+  }
+  return IncludePathPrefix{rest.drop_front().str(), raw.slice(raw_path_begin, raw_path_end).str()};
+}
+
+bool prefers_function_designator(clang::QualType type) {
+  if (type.isNull()) {
+    return false;
+  }
+  if (type->isReferenceType()) {
+    type = type->getPointeeType();
+  }
+  if (type->isPointerType()) {
+    type = type->getPointeeType();
+  }
+  return !type.isNull() && type->isFunctionType();
+}
+
+bool should_insert_call(const clang::CodeCompletionContext& context, llvm::StringRef before) {
+  if (context.getKind() == clang::CodeCompletionContext::CCC_NewName ||
+      context.isUsingDeclaration() || prefers_function_designator(context.getPreferredType())) {
+    return false;
+  }
+  const auto tokens = lex_cpp(before.str()).tokens;
+  bool in_using_declaration = false;
+  auto it = tokens.rbegin();
+  for (; it != tokens.rend(); ++it) {
+    const auto token = before.substr(it->begin, it->end - it->begin);
+    if (it->kind == TokenKind::Comment || (it->kind == TokenKind::Bracket && token == "(")) {
+      continue;
+    }
+    break;
+  }
+  for (; it != tokens.rend(); ++it) {
+    const auto token = before.substr(it->begin, it->end - it->begin);
+    if (it->kind == TokenKind::Comment) {
+      continue;
+    }
+    if (token == ";" || token == "{" || token == "}") {
+      break;
+    }
+    if (token == "using") {
+      in_using_declaration = true;
+      break;
+    }
+  }
+  auto address_it = tokens.rbegin();
+  for (; address_it != tokens.rend(); ++address_it) {
+    const auto token = before.substr(address_it->begin, address_it->end - address_it->begin);
+    if (address_it->kind == TokenKind::Comment ||
+        (address_it->kind == TokenKind::Bracket && token == "(")) {
+      continue;
+    }
+    break;
+  }
+  bool address_operand = false;
+  for (auto it = address_it; it != tokens.rend(); ++it) {
+    const auto token = before.substr(it->begin, it->end - it->begin);
+    if (it->kind == TokenKind::Comment || (it->kind == TokenKind::Bracket && token == "(")) {
+      continue;
+    }
+    if (token == "&") {
+      address_operand = true;
+    }
+    if (token != "::" && it->kind != TokenKind::Identifier && it->kind != TokenKind::Type &&
+        token != "&") {
+      break;
+    }
+    if (token == "&") {
+      const auto previous = std::next(it);
+      if (previous == tokens.rend()) {
+        address_operand = true;
+      } else {
+        const auto prior_text = before.substr(previous->begin, previous->end - previous->begin);
+        const bool prior_is_operand =
+            previous->kind == TokenKind::Identifier || previous->kind == TokenKind::Type ||
+            previous->kind == TokenKind::Number || previous->kind == TokenKind::String ||
+            previous->kind == TokenKind::Char || prior_text == ")" || prior_text == "]" ||
+            prior_text == "}";
+        address_operand = !prior_is_operand;
+      }
+      break;
+    }
+  }
+  return !in_using_declaration && !address_operand;
 }
 
 bool cursor_in_comment(llvm::StringRef code) {
@@ -224,17 +361,17 @@ public:
     const auto kind = context.getKind();
     const bool include_context = kind == clang::CodeCompletionContext::CCC_IncludedFile;
     const auto include_prefix = include_context ? included_path_prefix(code_) : std::nullopt;
-    const auto include_directory = include_prefix
-                                       ? include_prefix->substr(
-                                             0, include_prefix->find_last_of('/') == std::string::npos
-                                                    ? 0
-                                                    : include_prefix->find_last_of('/') + 1)
-                                       : std::string();
-    const auto include_name_prefix = include_prefix
-                                         ? include_prefix->substr(include_directory.size())
-                                         : std::string();
+    const auto include_logical_prefix = include_prefix ? include_prefix->logical : std::string();
+    const auto include_directory =
+        include_prefix ? include_logical_prefix.substr(
+                             0, include_logical_prefix.find_last_of('/') == std::string::npos
+                                    ? 0
+                                    : include_logical_prefix.find_last_of('/') + 1)
+                       : std::string();
+    const auto include_name_prefix =
+        include_prefix ? include_logical_prefix.substr(include_directory.size()) : std::string();
     if (include_prefix) {
-      result_.completion_prefix = *include_prefix;
+      result_.completion_prefix = include_prefix->replacement;
     }
     const bool preprocessor_context =
         kind == clang::CodeCompletionContext::CCC_MacroName ||
@@ -249,6 +386,7 @@ public:
       return;
     }
     const auto before = llvm::StringRef(code_).drop_back(prefix.size()).rtrim();
+    const bool insert_call = should_insert_call(context, before);
     for (unsigned i = 0; i < count; ++i) {
       auto& candidate = results[i];
       if (candidate.Hidden || candidate.Availability == CXAvailability_NotAvailable ||
@@ -265,6 +403,7 @@ public:
           continue;
         }
         item = describe(decl);
+        item.insert_call = insert_call;
         if (auto* text =
                 candidate.CreateCodeCompletionString(sema, context, allocator_, info_, true)) {
           if (const auto* comment = text->getBriefComment()) {
@@ -304,9 +443,8 @@ public:
         const auto candidate_name = slash == llvm::StringRef::npos
                                         ? candidate_path
                                         : candidate_path.drop_front(slash + 1);
-        if (!include_prefix ||
-            (!candidate_name.starts_with(include_name_prefix) &&
-             !candidate_path.starts_with(*include_prefix))) {
+        if (!include_prefix || (!candidate_name.starts_with(include_name_prefix) &&
+                                !candidate_path.starts_with(include_logical_prefix))) {
           continue;
         }
         // Clang's file completion may return either a basename or a relative
@@ -400,6 +538,7 @@ public:
           }
         }
         auto item = describe(decl);
+        item.insert_call = insert_call;
         const auto duplicate =
             std::find_if(result_.items.begin(), result_.items.end(), [&](const auto& existing) {
               return std::tie(existing.text, existing.label, existing.detail) ==

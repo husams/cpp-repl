@@ -25,4 +25,8 @@ std::size_t utf8_byte_offset(std::string_view text, std::size_t codepoint_offset
 // command such as %mock, rather than in command syntax or a shell/path operand.
 bool is_cpp_editor_payload(std::string_view buffer, std::size_t cursor_byte);
 
+// Return whether Enter needs cursor-specific continuation behavior for this
+// UTF-8 byte cursor, beyond the complete-buffer wants_more_input decision.
+bool editor_wants_more_input(std::string_view buffer, std::size_t cursor_byte);
+
 } // namespace example

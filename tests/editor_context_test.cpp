@@ -33,6 +33,7 @@ struct IncludeTree {
     std::ofstream(quoted / "alpha_header.hpp") << "#pragma once\n";
     std::ofstream(quoted / "__detail.hpp") << "#pragma once\n";
     std::ofstream(quoted / "nested" / "beta_header.hpp") << "#pragma once\n";
+    std::ofstream(quoted / "editor_edge_header.hpp") << "#pragma once\n";
     std::ofstream(system / "system_header.hpp") << "#pragma once\n";
     std::ofstream(system / "nested" / "system_nested.hpp") << "#pragma once\n";
   }
@@ -64,6 +65,10 @@ TEST(EditorContextTest, IncludePathCompletionReportsReplacementPrefix) {
   EXPECT_TRUE(has(nested.names, "nested/beta_header.hpp"));
   EXPECT_EQ(nested.prefix, "nested/beta_he");
 
+  const auto repeated_separator = cpp->complete("#include \"nested//beta_he");
+  EXPECT_TRUE(has(repeated_separator.names, "nested//beta_header.hpp"));
+  EXPECT_EQ(repeated_separator.prefix, "nested//beta_he");
+
   const auto nested_directory = cpp->complete("#include \"nested/");
   EXPECT_TRUE(has(nested_directory.names, "nested/beta_header.hpp"));
   EXPECT_EQ(nested_directory.prefix, "nested/");
@@ -75,6 +80,21 @@ TEST(EditorContextTest, IncludePathCompletionReportsReplacementPrefix) {
   const auto system_nested = cpp->complete("#include <nested/system_ne");
   EXPECT_TRUE(has(system_nested.names, "nested/system_nested.hpp"));
   EXPECT_EQ(system_nested.prefix, "nested/system_ne");
+
+  const auto block_comment = cpp->complete("#include /* comment */ \"nested/beta_he");
+  EXPECT_TRUE(has(block_comment.names, "nested/beta_header.hpp"));
+  EXPECT_EQ(block_comment.prefix, "nested/beta_he");
+
+  const auto continued = cpp->complete("#include \\\n  \"nested/beta_he");
+  EXPECT_TRUE(has(continued.names, "nested/beta_header.hpp"));
+  EXPECT_EQ(continued.prefix, "nested/beta_he");
+
+  const auto spliced_path = cpp->complete("#include \"editor_edge_\\\nhe");
+  EXPECT_TRUE(has(spliced_path.names, "editor_edge_header.hpp"));
+  EXPECT_EQ(spliced_path.prefix, "editor_edge_\\\nhe");
+
+  EXPECT_FALSE(has(cpp->complete("int value; // #include \"nested/beta_he").names,
+                   "nested/beta_header.hpp"));
 }
 
 TEST(EditorContextTest, MemberCompletionRespectsTypeAndAccessContext) {
@@ -105,6 +125,74 @@ TEST(EditorContextTest, MemberCompletionRespectsTypeAndAccessContext) {
                                     [](const auto& i) { return i.text == "editor_factory"; });
   ASSERT_NE(factory, function.items.end());
   EXPECT_NE(factory->label.find("editor_factory()"), std::string::npos);
+
+  ASSERT_TRUE(cpp->execute("namespace editor_scope { int editor_function(int); "
+                           "struct EditorCallable { int method(int); }; }"));
+  const auto ordinary = cpp->complete("editor_scope::editor_fun");
+  const auto ordinary_function =
+      std::find_if(ordinary.items.begin(), ordinary.items.end(),
+                   [](const auto& item) { return item.text == "editor_function"; });
+  ASSERT_NE(ordinary_function, ordinary.items.end());
+  EXPECT_TRUE(ordinary_function->insert_call);
+
+  ASSERT_TRUE(cpp->execute("int editor_target(int);"));
+  const auto typed_pointer = cpp->complete("int (*editor_typed_pointer)(int) = editor_tar");
+  const auto pointer_function =
+      std::find_if(typed_pointer.items.begin(), typed_pointer.items.end(),
+                   [](const auto& item) { return item.text == "editor_target"; });
+  ASSERT_NE(pointer_function, typed_pointer.items.end());
+  EXPECT_FALSE(pointer_function->insert_call);
+
+  const auto typed_reference = cpp->complete("int (&editor_typed_reference)(int) = editor_tar");
+  const auto reference_function =
+      std::find_if(typed_reference.items.begin(), typed_reference.items.end(),
+                   [](const auto& item) { return item.text == "editor_target"; });
+  ASSERT_NE(reference_function, typed_reference.items.end());
+  EXPECT_FALSE(reference_function->insert_call);
+
+  const auto value_initializer = cpp->complete("int editor_value = editor_tar");
+  const auto value_function =
+      std::find_if(value_initializer.items.begin(), value_initializer.items.end(),
+                   [](const auto& item) { return item.text == "editor_target"; });
+  ASSERT_NE(value_function, value_initializer.items.end());
+  EXPECT_TRUE(value_function->insert_call);
+
+  const auto address = cpp->complete("auto editor_function_pointer = &editor_scope::editor_fun");
+  const auto address_function =
+      std::find_if(address.items.begin(), address.items.end(),
+                   [](const auto& item) { return item.text == "editor_function"; });
+  ASSERT_NE(address_function, address.items.end());
+  EXPECT_FALSE(address_function->insert_call);
+
+  const auto parenthesized_address =
+      cpp->complete("auto editor_parenthesized_pointer = &(editor_scope::editor_fun");
+  const auto parenthesized_function =
+      std::find_if(parenthesized_address.items.begin(), parenthesized_address.items.end(),
+                   [](const auto& item) { return item.text == "editor_function"; });
+  ASSERT_NE(parenthesized_function, parenthesized_address.items.end());
+  EXPECT_FALSE(parenthesized_function->insert_call);
+
+  const auto commented_address =
+      cpp->complete("auto editor_commented_pointer = & /* address */ editor_scope::editor_fun");
+  const auto commented_function =
+      std::find_if(commented_address.items.begin(), commented_address.items.end(),
+                   [](const auto& item) { return item.text == "editor_function"; });
+  ASSERT_NE(commented_function, commented_address.items.end());
+  EXPECT_FALSE(commented_function->insert_call);
+
+  const auto method_address =
+      cpp->complete("auto editor_method_pointer = &editor_scope::EditorCallable::me");
+  const auto address_method = std::find_if(method_address.items.begin(), method_address.items.end(),
+                                           [](const auto& item) { return item.text == "method"; });
+  ASSERT_NE(address_method, method_address.items.end());
+  EXPECT_FALSE(address_method->insert_call);
+
+  const auto using_decl = cpp->complete("using editor_scope::editor_fun");
+  const auto using_function =
+      std::find_if(using_decl.items.begin(), using_decl.items.end(),
+                   [](const auto& item) { return item.text == "editor_function"; });
+  ASSERT_NE(using_function, using_decl.items.end());
+  EXPECT_FALSE(using_function->insert_call);
 }
 
 TEST(EditorContextTest, IncompleteContextCompletionReturnsWithoutSessionMutation) {

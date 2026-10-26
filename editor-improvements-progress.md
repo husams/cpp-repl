@@ -196,3 +196,28 @@ frontend hint/edit paths (`build/editor-pairs-grounding.log`).
   terminal tests passed in 22.09 seconds (`build/include-pairs-focused.log`).
   CTK verified three calls into include-context detection and its lexer call
   (`build/editor-include-pairs-grounding.log`).
+
+### Review fixes (2026-10-26)
+
+- [x] Keep function addresses and using declarations free of inserted calls.
+- [x] Continue incomplete paired groups and escaped macro quotes on Enter.
+- [x] Complete include paths after comments and logical-line continuations.
+- [x] Keep ordinary delimiter characters literal within angle-header names.
+- [x] Defer semantic painting and signature analysis until typing is idle.
+- [x] Apply semantic variable colors to names lexically classified as types.
+- [x] Validate the final full suite, CTK grounding, and independent fix review.
+
+Regression coverage includes the review reproductions, ordinary call submission,
+quoted and angle includes, nested paths, header punctuation, macro continuations,
+and variable names such as `string`. Fast typing uses lexical painting; semantic
+painting and hints follow a 160 ms idle interval on the same interpreter thread.
+
+Final validation: **284/284 tests passed** in 160.19 seconds
+(`build/editor-fixes-full-suite.log`); the Release build emitted no warnings.
+Expanded CTK grounding passed (`build/editor-fixes-ctk-final.log`). Independent
+engine/input and frontend reviews approved the fixes after addressing their
+follow-up cases: parenthesized and typed function pointers, spliced header names,
+whitespace inside groups, and repeated macro continuations. The actual terminal
+typing probe measured a 2.6 ms median and 2.8 ms maximum for a burst following
+the initial idle hint (`build/final-frontend-review-latency.log`). The dependency
+patch applied twice to a fresh pinned checkout. No merge or publication occurred.

@@ -24,6 +24,10 @@ let completion = match cxxMethodDecl(isDefinition(), matchesName("CompletionCons
 print completion.length
 let context_calls = match callExpr(callee(functionDecl(matchesName("(getKind|getTypedText|getCodeCompletionFilter|LookupName)$")))).bind("c") in completion.f
 foreach row in context_calls do print row.c.call_site.static_callee_name
+let contextual = match functionDecl(isDefinition(), matchesName("(should_insert_call|included_path_prefix)$")).bind("f") in engine
+foreach row in contextual do print row.f.qualified_name
+let contextual_lexers = match callExpr(callee(functionDecl(hasName("example::lex_cpp")))).bind("c") in contextual.f
+print contextual_lexers.length
 // Paired input remains lexical/grammar aware; the frontend routes call hints
 // through the same embedded compiler and applies edits through replxx actions.
 let input_path = "{arg.root}/src/editor_input.cpp"
@@ -37,5 +41,7 @@ let include_lexer = match callExpr(callee(functionDecl(hasName("example::lex_cpp
 print include_lexer.length
 let repl_path = "{arg.root}/src/repl.cpp"
 let repl = parse repl_path
-let frontend = match functionDecl(isDefinition(), matchesName("(cpp_completions|cpp_hints|on_delimiter)$")).bind("f") in repl
+let frontend = match functionDecl(isDefinition(), matchesName("(cpp_completions|cpp_hints|on_delimiter|on_enter|configure)$")).bind("f") in repl
 foreach row in frontend do print row.f.qualified_name
+let deferred = match callExpr(callee(functionDecl(matchesName("(set_idle_highlighter_callback|set_hint_delay|editor_wants_more_input)$")))).bind("c") in frontend.f
+foreach row in deferred do print row.c.call_site.static_callee_name

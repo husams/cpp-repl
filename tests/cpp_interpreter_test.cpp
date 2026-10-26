@@ -2125,6 +2125,20 @@ TEST_F(CppInterpreterTest, SemanticOverlayPreservesLiteralsCommentsAndCommandCol
   EXPECT_EQ(cpp_->evaluate("editor_paint"), "(int) 0\n");
 }
 
+TEST_F(CppInterpreterTest, SemanticOverlayResolvesLexicalTypeNamesAsVariables) {
+  ASSERT_TRUE(cpp_->execute("int string = 42; int vector = 7;"));
+  for (const std::string input : {"string", "string + 1", "vector"}) {
+    replxx::Replxx::colors_t colors(utf8_length(input), replxx::Replxx::Color::DEFAULT);
+    highlight_editor_input(*cpp_, input, colors);
+    const auto name_end = input.find(' ');
+    const auto length = name_end == std::string::npos ? input.size() : name_end;
+    for (std::size_t i = 0; i < length; ++i) {
+      EXPECT_EQ(colors[i], semantic_color(SemanticKind::Variable)) << input;
+    }
+  }
+  EXPECT_EQ(cpp_->evaluate("string + vector"), "(int) 49\n");
+}
+
 TEST_F(CppInterpreterTest, SemanticColorsRespectShadowingAndIncompleteInput) {
   const std::string code = "struct EditorShadow {}; void editor_shadow_fn(int param) { int "
                            "EditorShadow = param; EditorShadow += 1; }";

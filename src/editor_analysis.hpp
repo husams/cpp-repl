@@ -33,6 +33,7 @@ struct CompletionItem {
   SemanticKind kind = SemanticKind::Variable;
   unsigned priority = 50; // Clang priority; smaller values rank first.
   bool is_header_path = false;
+  bool insert_call = true;
 };
 
 struct SemanticToken {

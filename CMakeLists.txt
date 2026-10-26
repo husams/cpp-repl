@@ -232,6 +232,12 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
 
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_FOUND AND NOT WIN32)
+    add_test(NAME editor_latency_pty
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/editor_latency_pty.py
+                     $<TARGET_FILE:cpp-repl>)
+    add_test(NAME editor_review_regressions_pty
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/editor_review_regressions_pty.py
+                     $<TARGET_FILE:cpp-repl>)
     add_test(NAME editor_interaction_pty
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/editor_interaction_pty.py
                      $<TARGET_FILE:cpp-repl>)

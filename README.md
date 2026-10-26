@@ -815,6 +815,9 @@ session's global scope and accesses members using ordinary C++ access rules.
   `>`; ordinary C++ angle brackets retain normal typing. Quotes, escapes, comments,
   raw strings and numeric separators keep their C++ meaning. Pairing applies to C++ input
   and embedded C++ command bodies; shell and path operands retain normal typing.
+- Semantic colors and parameter hints appear after a short pause in typing;
+  lexical colors remain immediate and Tab completion runs on demand. Function
+  addresses and `using` declarations complete names without inserting a call.
 - History persists in `./.replxx_history`; Ctrl+L clears the screen; Ctrl+D
   (or `%quit`) exits.
 

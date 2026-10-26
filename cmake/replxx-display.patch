@@ -1,5 +1,5 @@
 diff --git a/include/replxx.hxx b/include/replxx.hxx
-index ab3c5e5..4a6c2dc 100644
+index ab3c5e5..9fc44b4 100644
 --- a/include/replxx.hxx
 +++ b/include/replxx.hxx
 @@ -211,7 +211,10 @@ public:
@@ -35,11 +35,68 @@ index ab3c5e5..4a6c2dc 100644
  		std::string const& text( void ) const {
  			return ( _text );
  		}
+@@ -321,6 +339,7 @@ public:
+ 	 * \param colors - output buffer for color information.
+ 	 */
+ 	typedef std::function<void ( std::string const& input, colors_t& colors )> highlighter_callback_t;
++	typedef std::function<void ( std::string const& input, colors_t& colors )> idle_highlighter_callback_t;
+ 
+ 	/*! \brief Hints callback type definition.
+ 	 *
+@@ -401,6 +420,7 @@ public:
+ 	 * \param fn - user defined callback function.
+ 	 */
+ 	void set_highlighter_callback( highlighter_callback_t const& fn );
++	void set_idle_highlighter_callback( idle_highlighter_callback_t const& fn );
+ 
+ 	/*! \brief Register hints callback.
+ 	 *
+diff --git a/src/replxx.cxx b/src/replxx.cxx
+index d0db804..8b3697a 100644
+--- a/src/replxx.cxx
++++ b/src/replxx.cxx
+@@ -142,6 +142,10 @@ void Replxx::set_highlighter_callback( highlighter_callback_t const& fn ) {
+ 	_impl->set_highlighter_callback( fn );
+ }
+ 
++void Replxx::set_idle_highlighter_callback( idle_highlighter_callback_t const& fn ) {
++	_impl->set_idle_highlighter_callback( fn );
++}
++
+ void Replxx::set_hint_callback( hint_callback_t const& fn ) {
+ 	_impl->set_hint_callback( fn );
+ }
 diff --git a/src/replxx_impl.cxx b/src/replxx_impl.cxx
-index 22ee748..0b52eeb 100644
+index 22ee748..9874fd5 100644
 --- a/src/replxx_impl.cxx
 +++ b/src/replxx_impl.cxx
-@@ -800,9 +800,6 @@ void Replxx::ReplxxImpl::handle_hints( HINT_ACTION hintAction_ ) {
+@@ -421,8 +421,12 @@ char32_t Replxx::ReplxxImpl::read_char( HINT_ACTION hintAction_ ) {
+ 	while ( true ) {
+ 		Terminal::EVENT_TYPE eventType( _terminal.wait_for_input( hintDelay ) );
+ 		if ( eventType == Terminal::EVENT_TYPE::TIMEOUT ) {
+-			refresh_line( _refreshSkipped ? HINT_ACTION::REGENERATE : HINT_ACTION::REPAINT );
+-			hintDelay = 0;
++			bool const refreshWasSkipped( _refreshSkipped );
++			refresh_line( refreshWasSkipped ? HINT_ACTION::REGENERATE : HINT_ACTION::REPAINT );
++			// A rapid edit burst may have skipped its final redraw. Give the
++			// callbacks another quiet interval after that redraw before repainting
++			// with deferred semantic colors and hints.
++			hintDelay = refreshWasSkipped ? _hintDelay : 0;
+ 			_refreshSkipped = false;
+ 			continue;
+ 		}
+@@ -767,6 +771,10 @@ void Replxx::ReplxxImpl::render( HINT_ACTION hintAction_ ) {
+ 		IOModeGuard ioModeGuard( _terminal );
+ 		_highlighterCallback( _utf8Buffer.get(), colors );
+ 	}
++	if ( !! _idleHighlighterCallback ) {
++		IOModeGuard ioModeGuard( _terminal );
++		_idleHighlighterCallback( _utf8Buffer.get(), colors );
++	}
+ 	paren_info_t pi( matching_paren() );
+ 	Replxx::Color ERROR( Replxx::Color::RED | color::bg( Replxx::Color::BRIGHTRED ) );
+ 	if ( pi.index != -1 ) {
+@@ -800,9 +808,6 @@ void Replxx::ReplxxImpl::handle_hints( HINT_ACTION hintAction_ ) {
  	if ( ( hintAction_ == HINT_ACTION::SKIP ) || ( hintAction_ == HINT_ACTION::TRIM ) ) {
  		return;
  	}
@@ -49,7 +106,7 @@ index 22ee748..0b52eeb 100644
  	_hint = UnicodeString();
  	if ( hintAction_ == HINT_ACTION::REGENERATE ) {
  		_hintSelection = -1;
-@@ -815,6 +812,11 @@ void Replxx::ReplxxImpl::handle_hints( HINT_ACTION hintAction_ ) {
+@@ -815,6 +820,11 @@ void Replxx::ReplxxImpl::handle_hints( HINT_ACTION hintAction_ ) {
  		IOModeGuard ioModeGuard( _terminal );
  		_hintsCache = call_hinter( _utf8Buffer.get(), _hintContextLenght, _hintColor );
  	}
@@ -61,7 +118,7 @@ index 22ee748..0b52eeb 100644
  	int hintCount( static_cast<int>( _hintsCache.size() ) );
  	if ( hintCount == 1 ) {
  		_hint = _hintsCache.front();
-@@ -1091,6 +1093,10 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+@@ -1091,6 +1101,10 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
  	// get a list of completions
  	_completionSelection = -1;
  	_completionContextLength = context_length();
@@ -72,7 +129,7 @@ index 22ee748..0b52eeb 100644
  	/* IOModeGuard scope */ {
  		IOModeGuard ioModeGuard( _terminal );
  		_completions = call_completer( _utf8Buffer.get(), _completionContextLength );
-@@ -1101,12 +1107,21 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+@@ -1101,12 +1115,21 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
  		beep();
  		return 0;
  	}
@@ -95,7 +152,7 @@ index 22ee748..0b52eeb 100644
  		selectedCompletion = _hintSelection;
  		completionsCount = 1;
  	}
-@@ -1121,10 +1136,29 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+@@ -1121,10 +1144,29 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
  
  	// if we can extend the item, extend it and return to main loop
  	if ( ( longestCommonPrefix > _completionContextLength ) || ( completionsCount == 1 ) ) {
@@ -125,7 +182,7 @@ index 22ee748..0b52eeb 100644
  		_completionContextLength = longestCommonPrefix;
  		refresh_line();
  		return 0;
-@@ -1181,7 +1215,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+@@ -1181,7 +1223,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
  	if ( showCompletions ) {
  		int longestCompletion( 0 );
  		for ( size_t j( 0 ); j < _completions.size(); ++ j ) {
@@ -134,7 +191,7 @@ index 22ee748..0b52eeb 100644
  			if ( itemLength > longestCompletion ) {
  				longestCompletion = itemLength;
  			}
-@@ -1253,7 +1287,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+@@ -1253,7 +1295,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
  				size_t index = (column * rowCount) + row;
  				if ( index < _completions.size() ) {
  					Completion const& c( _completions[index] );
@@ -143,7 +200,7 @@ index 22ee748..0b52eeb 100644
  					fflush(stdout);
  
  					if ( longestCommonPrefix > 0 ) {
-@@ -1271,7 +1305,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+@@ -1271,7 +1313,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
  						UnicodeString ac( ansi_color( c.color() ) );
  						_terminal.write32( ac.get(), ac.length() );
  					}
@@ -152,7 +209,7 @@ index 22ee748..0b52eeb 100644
  					if ( !_noColor && ( c.color() != Replxx::Color::DEFAULT ) ) {
  						_terminal.write32( res.get(), res.length() );
  					}
-@@ -1383,7 +1417,8 @@ Replxx::ACTION_RESULT Replxx::ReplxxImpl::action( action_trait_t actionTrait_, k
+@@ -1383,7 +1425,8 @@ Replxx::ACTION_RESULT Replxx::ReplxxImpl::action( action_trait_t actionTrait_, k
  	}
  	if ( actionTrait_ & MOVE_CURSOR ) {
  		_modifiedState = ( _pos != _oldPos ) && (
@@ -162,7 +219,7 @@ index 22ee748..0b52eeb 100644
  			|| ( _oldPos == _data.length() )
  			|| ( ( _pos < _data.length() ) && strchr( "{}[]()", _data[_pos] ) )
  			|| ( ( _oldPos < _data.length() ) && strchr( "{}[]()", _data[_oldPos] ) )
-@@ -2020,21 +2055,37 @@ Replxx::ACTION_RESULT Replxx::ReplxxImpl::complete( bool previous_ ) {
+@@ -2020,21 +2063,37 @@ Replxx::ACTION_RESULT Replxx::ReplxxImpl::complete( bool previous_ ) {
  			return ( Replxx::ACTION_RESULT::CONTINUE );
  		}
  	}
@@ -200,8 +257,19 @@ index 22ee748..0b52eeb 100644
  	}
  	_completionSelection = newSelection;
  	refresh_line();  // Refresh the line
+@@ -2367,6 +2426,10 @@ void Replxx::ReplxxImpl::set_highlighter_callback( Replxx::highlighter_callback_
+ 	_highlighterCallback = fn;
+ }
+ 
++void Replxx::ReplxxImpl::set_idle_highlighter_callback( Replxx::idle_highlighter_callback_t const& fn ) {
++	_idleHighlighterCallback = fn;
++}
++
+ void Replxx::ReplxxImpl::set_hint_callback( Replxx::hint_callback_t const& fn ) {
+ 	_hintCallback = fn;
+ }
 diff --git a/src/replxx_impl.hxx b/src/replxx_impl.hxx
-index 8f6357b..1c6987a 100644
+index 8f6357b..dc5f7fc 100644
 --- a/src/replxx_impl.hxx
 +++ b/src/replxx_impl.hxx
 @@ -53,20 +53,38 @@ class Replxx::ReplxxImpl {
@@ -245,7 +313,15 @@ index 8f6357b..1c6987a 100644
  		UnicodeString const& text( void ) const {
  			return ( _text );
  		}
-@@ -145,6 +163,10 @@ private:
+@@ -137,6 +155,7 @@ private:
+ 	Replxx::modify_callback_t _modifyCallback;
+ 	Replxx::completion_callback_t _completionCallback;
+ 	Replxx::highlighter_callback_t _highlighterCallback;
++	Replxx::idle_highlighter_callback_t _idleHighlighterCallback;
+ 	Replxx::hint_callback_t _hintCallback;
+ 	key_presses_t _keyPresses;
+ 	messages_t _messages;
+@@ -145,6 +164,10 @@ private:
  	completions_t _completions;
  	int _completionContextLength;
  	int _completionSelection;
@@ -256,3 +332,11 @@ index 8f6357b..1c6987a 100644
  	std::string _preloadedBuffer; // used with set_preload_buffer
  	std::string _errorMessage;
  	UnicodeString _previousSearchText; // remembered across invocations of replxx_input()
+@@ -163,6 +186,7 @@ public:
+ 	void set_modify_callback( Replxx::modify_callback_t const& fn );
+ 	void set_completion_callback( Replxx::completion_callback_t const& fn );
+ 	void set_highlighter_callback( Replxx::highlighter_callback_t const& fn );
++	void set_idle_highlighter_callback( Replxx::idle_highlighter_callback_t const& fn );
+ 	void set_hint_callback( Replxx::hint_callback_t const& fn );
+ 	char const* input( std::string const& prompt );
+ 	void history_add( std::string const& line );
