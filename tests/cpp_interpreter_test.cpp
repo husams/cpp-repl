@@ -975,6 +975,66 @@ TEST_F(CppInterpreterTest, SymbolInfoSelectsTypedSignaturesWithoutExecuting) {
   EXPECT_EQ(cpp_->evaluate("typed_info::calls"), "(int) 0\n");
 }
 
+TEST_F(CppInterpreterTest, SymbolInfoMatchesAliasReferenceQualifiersWithoutExecuting) {
+  ASSERT_TRUE(cpp_->execute(
+      "namespace alias_info { using Count = int; using Ratio = double; using Pointer = int*; "
+      "using Values = int[2]; "
+      "int calls = 0; "
+      "int take(Count, const Ratio&) { ++calls; return 1; } "
+      "int take(Count, Ratio&) { ++calls; return 2; } "
+      "int mixed(const Ratio&, const Count&) noexcept { ++calls; return 3; } "
+      "int moving(const Ratio&&) { ++calls; return 4; } "
+      "int qualified(const volatile Ratio&) { ++calls; return 5; } "
+      "int pointer(Pointer const&) { ++calls; return 6; } "
+      "int pointer(const int*&) { ++calls; return 7; } "
+      "int array(const Values&) { ++calls; return 9; } "
+      "struct Probe { int read(const Ratio&) const & noexcept { return 8; } }; }"));
+  std::string error;
+  const auto prefix =
+      cpp_->symbol_info("alias_info::take(alias_info::Count, const alias_info::Ratio&)", error);
+  ASSERT_TRUE(prefix) << error;
+  const auto selected = info_field(*prefix, "Mangled");
+  for (const auto* query : {"alias_info::take(alias_info::Count,alias_info::Ratio const&)",
+                            "alias_info::take(int,alias_info::Ratio const &)",
+                            "alias_info::take(alias_info::Count,double const&)",
+                            "alias_info::take(int,const double&)"}) {
+    const auto info = cpp_->symbol_info(query, error);
+    ASSERT_TRUE(info) << query << ": " << error;
+    EXPECT_EQ(info_field(*info, "Mangled"), selected) << *info;
+    EXPECT_EQ(info->find("matches for"), std::string::npos) << *info;
+  }
+  for (const auto* query :
+       {"alias_info::mixed(alias_info::Ratio const&,const alias_info::Count&) noexcept",
+        "alias_info::mixed(const alias_info::Ratio&,alias_info::Count const&)",
+        "alias_info::mixed(double const&,alias_info::Count const&) noexcept",
+        "alias_info::moving(alias_info::Ratio const&&)",
+        "alias_info::qualified(alias_info::Ratio const volatile&)",
+        "alias_info::array(alias_info::Values const&)",
+        "alias_info::Probe::read(alias_info::Ratio const&) const & noexcept"}) {
+    ASSERT_TRUE(cpp_->symbol_info(query, error)) << query << ": " << error;
+  }
+  const auto mutable_ref =
+      cpp_->symbol_info("alias_info::take(alias_info::Count,alias_info::Ratio&)", error);
+  ASSERT_TRUE(mutable_ref) << error;
+  EXPECT_NE(info_field(*mutable_ref, "Mangled"), selected);
+  const auto pointer = cpp_->symbol_info("alias_info::pointer(alias_info::Pointer const&)", error);
+  const auto pointer_canonical = cpp_->symbol_info("alias_info::pointer(int* const&)", error);
+  const auto pointee_const = cpp_->symbol_info("alias_info::pointer(const int*&)", error);
+  ASSERT_TRUE(pointer && pointer_canonical && pointee_const) << error;
+  EXPECT_EQ(info_field(*pointer, "Mangled"), info_field(*pointer_canonical, "Mangled"));
+  EXPECT_NE(info_field(*pointer, "Mangled"), info_field(*pointee_const, "Mangled"));
+  for (const auto* query :
+       {"alias_info::take(alias_info::Count,alias_info::Ratio volatile&)",
+        "alias_info::moving(alias_info::Ratio const&)",
+        "alias_info::qualified(alias_info::Ratio const&)", "alias_info::array(int (const&)[2])",
+        "alias_info::take(alias_info::Count,alias_info::Ratio const& value)",
+        "alias_info::take(++alias_info::calls,alias_info::Ratio const&)",
+        "alias_info::take(alias_info::Count,alias_info::Ratio const&) noexcept"}) {
+    EXPECT_FALSE(cpp_->symbol_info(query, error)) << query;
+  }
+  EXPECT_EQ(cpp_->evaluate("alias_info::calls"), "(int) 0\n");
+}
+
 TEST_F(CppInterpreterTest, SymbolInfoDescribesVariablesTypesAndFields) {
   ASSERT_TRUE(cpp_->execute("int info_count = 7; "
       "struct InfoBox { int value; int get() const { return value; } }; "
