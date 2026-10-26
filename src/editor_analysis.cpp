@@ -804,7 +804,11 @@ public:
     if (!pending_lookups_.insert(key).second) {
       return false;
     }
+#if LLVM_VERSION_MAJOR >= 22
     const llvm::scope_exit cleanup([&] { pending_lookups_.erase(key); });
+#else
+    const auto cleanup = llvm::make_scope_exit([&] { pending_lookups_.erase(key); });
+#endif
     const auto parent_name =
         clang::DeclarationName(&parent_.getASTContext().Idents.get(name.getAsString()));
     bool any = false;
