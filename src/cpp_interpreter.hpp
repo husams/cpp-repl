@@ -10,6 +10,7 @@
 #include "cpp_inspect.hpp"
 #include "editor_analysis.hpp"
 #include "function_hooks.hpp"
+#include "repl_options.hpp"
 
 namespace clang {
 class Interpreter;
@@ -37,10 +38,14 @@ class CppInterpreter {
   CppInterpreter(const CppInterpreter&) = delete;
   CppInterpreter& operator=(const CppInterpreter&) = delete;
 
-  // Parses and runs one input; a final expression without ';' prints its
-  // value, e.g. "(int) 42". Returns false after reporting an error; the
+  // Parses and runs one input; value expressions print when options().
+  // print_values is enabled. Returns false after reporting an error; the
   // session stays usable.
   bool execute(const std::string& code);
+
+  ReplOptions& options() { return options_; }
+
+  const ReplOptions& options() const { return options_; }
 
   // Empty body removes that hook. A failed update preserves existing hooks.
   bool set_hook(HookKind kind, const std::string& signature, const std::string& body,
@@ -52,8 +57,8 @@ class CppInterpreter {
   // does not execute code.
   std::vector<ActiveHook> active_hooks() const;
 
-  // Like execute(), but returns the printed value of a final expression
-  // without ';' ("" when there is none), or nullopt on error.
+  // Returns the value of a final C++ expression without ';' ("" when there is
+  // none), or nullopt on error. Independent of the automatic display options.
   std::optional<std::string> evaluate(const std::string& code);
 
   struct Completions {
@@ -61,6 +66,7 @@ class CppInterpreter {
     std::string prefix;              // the identifier being completed
     std::vector<CompletionItem> items;
     std::vector<std::string> signatures;
+    std::vector<CompletionItem> signature_items;
     unsigned active_parameter = 0;
   };
 
@@ -132,9 +138,10 @@ class CppInterpreter {
   CppInterpreter(std::unique_ptr<clang::Interpreter> interp, llvm::orc::LLJIT& jit,
                  std::vector<std::string> args,
                  std::unique_ptr<ProjectCompilationDatabase> database);
-  bool run(const std::string& code, clang::Value& value);
+  bool run(const std::string& code, clang::Value& value, bool capture_semicolon_expression = false);
   bool run_raw(const std::string& code, clang::Value& value,
-               std::vector<std::string>* abi_exports = nullptr);
+               std::vector<std::string>* abi_exports = nullptr,
+               bool capture_semicolon_expression = false);
   bool with_compile_options(const SourceCompileOptions& options,
                             const std::function<bool()>& action,
                             std::string& error);
@@ -159,6 +166,7 @@ class CppInterpreter {
   std::unique_ptr<clang::Interpreter> interp_;
   llvm::orc::LLJIT& jit_;  // Owned by interp_'s incremental executor.
   FunctionHooks hooks_;
+  ReplOptions options_;
   std::vector<std::string> args_;  // the user's compiler flags, for completion
   std::vector<std::string> sources_;  // canonical paths of the %add-ed files
   std::unique_ptr<ProjectCompilationDatabase> database_;

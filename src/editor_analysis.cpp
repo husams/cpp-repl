@@ -9,6 +9,7 @@
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/ASTImporter.h"
+#include "clang/AST/ASTImporterSharedState.h"
 #include "clang/AST/DeclLookups.h"
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/ExternalASTSource.h"
@@ -71,6 +72,7 @@ SemanticKind kind_of(const clang::NamedDecl* decl) {
 
 CompletionItem describe(const clang::NamedDecl* decl) {
   CompletionItem item;
+  const std::string qualified_name = decl->getQualifiedNameAsString();
   item.text = decl->getNameAsString();
   item.label = item.text;
   item.kind = kind_of(decl);
@@ -85,6 +87,12 @@ CompletionItem describe(const clang::NamedDecl* decl) {
         item.label += ", ";
       }
       const auto* param = function->getParamDecl(i);
+      CompletionParameter parameter;
+      parameter.name = param->getNameAsString();
+      parameter.type = param->getType().getAsString(policy);
+      parameter.has_default = param->hasDefaultArg();
+      parameter.is_pack = param->isParameterPack();
+      item.parameters.push_back(std::move(parameter));
       item.label += param->getType().getAsString(policy);
       if (!param->getName().empty()) {
         item.label += " " + param->getNameAsString();
@@ -94,6 +102,7 @@ CompletionItem describe(const clang::NamedDecl* decl) {
       }
     }
     if (function->isVariadic()) {
+      item.variadic = true;
       if (function->getNumParams()) {
         item.label += ", ";
       }
@@ -122,6 +131,10 @@ CompletionItem describe(const clang::NamedDecl* decl) {
   }
   item.label = unversioned_name(std::move(item.label));
   item.detail = unversioned_name(std::move(item.detail));
+  if (!item.parameters.empty() || item.kind == SemanticKind::Function ||
+      item.kind == SemanticKind::Method) {
+    item.identity = qualified_name + item.label.substr(item.text.size()) + " -> " + item.detail;
+  }
   return item;
 }
 
@@ -558,6 +571,12 @@ public:
       if (const auto* function = candidates[i].getFunction()) {
         const auto item = describe(function);
         result_.signatures.push_back(item.label + " -> " + item.detail);
+        const auto duplicate =
+            std::find_if(result_.signature_items.begin(), result_.signature_items.end(),
+                         [&](const auto& existing) { return existing.identity == item.identity; });
+        if (duplicate == result_.signature_items.end()) {
+          result_.signature_items.push_back(item);
+        }
       }
     }
   }
@@ -622,8 +641,12 @@ protected:
 
 public:
   SessionImporter(clang::CompilerInstance& child, clang::CompilerInstance& parent)
+      // The default importer scans declarations for every name lookup. Build its
+      // dedicated lookup index so importing a large namespace stays linear.
       : ASTImporter(child.getASTContext(), child.getFileManager(), parent.getASTContext(),
-                    parent.getFileManager(), false) {}
+                    parent.getFileManager(), false,
+                    std::make_shared<clang::ASTImporterSharedState>(
+                        *child.getASTContext().getTranslationUnitDecl())) {}
 };
 
 // Like clang-repl's completion importer, use a separate AST. Complete imports
@@ -737,7 +760,10 @@ class SessionSource : public clang::ExternalASTSource {
       if (auto* space = llvm::dyn_cast<clang::NamespaceDecl>(visible)) {
         auto* primary = space->getPrimaryContext();
         auto& sources = namespaces_[primary];
-        auto* original = llvm::cast<clang::NamespaceDecl>(named);
+        // A namespace lookup already spans all of its redeclarations. Retaining
+        // every reopening here repeats the same lookup and, during completion,
+        // traverses the entire redeclaration chain once per reopening.
+        auto* original = llvm::cast<clang::NamespaceDecl>(named)->getCanonicalDecl();
         if (std::find(sources.begin(), sources.end(), original) == sources.end()) {
           sources.push_back(original);
         }
@@ -778,7 +804,11 @@ public:
     if (!pending_lookups_.insert(key).second) {
       return false;
     }
+#if LLVM_VERSION_MAJOR >= 22
     const llvm::scope_exit cleanup([&] { pending_lookups_.erase(key); });
+#else
+    const auto cleanup = llvm::make_scope_exit([&] { pending_lookups_.erase(key); });
+#endif
     const auto parent_name =
         clang::DeclarationName(&parent_.getASTContext().Idents.get(name.getAsString()));
     bool any = false;
@@ -1091,6 +1121,8 @@ EditorAnalysis analyze_editor(std::unique_ptr<clang::CompilerInstance> compiler,
   std::sort(result.signatures.begin(), result.signatures.end());
   result.signatures.erase(std::unique(result.signatures.begin(), result.signatures.end()),
                           result.signatures.end());
+  std::sort(result.signature_items.begin(), result.signature_items.end(),
+            [](const auto& lhs, const auto& rhs) { return lhs.identity < rhs.identity; });
   return result;
 }
 } // namespace example

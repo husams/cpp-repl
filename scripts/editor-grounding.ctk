@@ -26,6 +26,15 @@ let context_calls = match callExpr(callee(functionDecl(matchesName("(getKind|get
 foreach row in context_calls do print row.c.call_site.static_callee_name
 let contextual = match functionDecl(isDefinition(), matchesName("(should_insert_call|included_path_prefix)$")).bind("f") in engine
 foreach row in contextual do print row.f.qualified_name
+let descriptions = match functionDecl(isDefinition(), matchesName("describe$")).bind("f") in engine
+let parameters = match callExpr(callee(functionDecl(matchesName("(getParamDecl|hasDefaultArg|isParameterPack|getReturnType)$")))).bind("c") in descriptions.f
+foreach row in parameters do print row.c.call_site.static_callee_name
+// Overload rows retain the concrete Clang callable and structured parameters;
+// choosing a row must only select metadata, never execute a candidate.
+let overloads = match cxxMethodDecl(isDefinition(), matchesName("CompletionConsumer::ProcessOverloadCandidates$")).bind("f") in engine
+foreach row in overloads do print row.f.qualified_name
+let overload_metadata = match callExpr(callee(functionDecl(matchesName("(getFunction|describe)$")))).bind("c") in overloads.f
+foreach row in overload_metadata do print row.c.call_site.static_callee_name
 let contextual_lexers = match callExpr(callee(functionDecl(hasName("example::lex_cpp")))).bind("c") in contextual.f
 print contextual_lexers.length
 // Paired input remains lexical/grammar aware; the frontend routes call hints
@@ -41,7 +50,51 @@ let include_lexer = match callExpr(callee(functionDecl(hasName("example::lex_cpp
 print include_lexer.length
 let repl_path = "{arg.root}/src/repl.cpp"
 let repl = parse repl_path
-let frontend = match functionDecl(isDefinition(), matchesName("(cpp_completions|cpp_hints|on_delimiter|on_enter|configure)$")).bind("f") in repl
+let frontend = match functionDecl(isDefinition(), matchesName("(cpp_completions|cpp_hints|completed_calls|completed_call_open_offsets|enter_signature|signature_for_call|signatures_for_call|open_overload_menu|overload_menu_label|is_trailing_call|on_delimiter|on_enter|configure)$")).bind("f") in repl
 foreach row in frontend do print row.f.qualified_name
 let deferred = match callExpr(callee(functionDecl(matchesName("(set_idle_highlighter_callback|set_hint_delay|editor_wants_more_input)$")))).bind("c") in frontend.f
 foreach row in deferred do print row.c.call_site.static_callee_name
+// Inline display/navigation use lexical source slots and Clang metadata, while
+// the decorations remain separate from the interpreter's executable input.
+let slots_path = "{arg.root}/src/editor_call.cpp"
+let slots = parse slots_path
+let slot_model = match functionDecl(isDefinition(), hasName("example::editor_call_at_cursor")).bind("f") in slots
+let slot_lexer = match callExpr(callee(functionDecl(hasName("example::lex_cpp")))).bind("c") in slot_model.f
+print slot_lexer.length
+let inline_api = match callExpr(callee(functionDecl(matchesName("(set_inline_display_callback|set_completion_accept_callback|set_selection_menu_callback|editor_call_at_cursor)$")))).bind("c") in frontend.f
+foreach row in inline_api do print row.c.call_site.static_callee_name
+let menu_execution = match callExpr(callee(cxxMethodDecl(ofClass(hasName("example::CppInterpreter")), hasName("execute")))).bind("c") in frontend.f
+print menu_execution.length
+// Meta-commands retain their dedicated completion dispatcher instead of opening
+// a C++ overload menu for a class name, option, or filesystem argument.
+let menu_entry = match functionDecl(isDefinition(), matchesName("open_overload_menu$")).bind("f") in repl
+let menu_commands = match callExpr(callee(functionDecl(hasName("example::is_command_line")))).bind("c") in menu_entry.f
+print menu_commands.length
+// Enter walks completed calls and protects explicit or completion-created slots,
+// reusing known signatures without reanalysing arbitrary complete expressions.
+let enter = match functionDecl(isDefinition(), matchesName("on_enter$")).bind("f") in repl
+let enter_frames = match callExpr(callee(functionDecl(matchesName("(completed_call_open_offsets|editor_call_at_cursor|signatures_for_call)$")))).bind("c") in enter.f
+foreach row in enter_frames do print row.c.call_site.static_callee_name
+// Embedded calls retain argument annotations, but a return annotation must not
+// split a larger expression. Repaints reuse only selected signature metadata.
+let call_frames = match functionDecl(isDefinition(), matchesName("completed_calls$")).bind("f") in repl
+let frame_model = match callExpr(callee(functionDecl(hasName("example::editor_call_at_cursor")))).bind("c") in call_frames.f
+print frame_model.length
+let signature_cache = match functionDecl(isDefinition(), matchesName("signature_for_call$")).bind("f") in repl
+let signature_requests = match callExpr(callee(functionDecl(matchesName("completions_at_cursor$")))).bind("c") in signature_cache.f
+print signature_requests.length
+// Retain one source per namespace identity, so namespace reopenings do not
+// multiply the work when Clang enumerates visible declarations.
+let imports = match cxxMethodDecl(isDefinition(), matchesName("SessionSource::import$")).bind("f") in engine
+let namespace_ids = match callExpr(callee(cxxMethodDecl(hasName("getCanonicalDecl")))).bind("c") in imports.f
+print namespace_ids.length
+let maps = match cxxMethodDecl(isDefinition(), matchesName("SessionSource::completeVisibleDeclsMap$")).bind("f") in engine
+let map_imports = match callExpr(callee(cxxMethodDecl(matchesName("SessionSource::import$")))).bind("c") in maps.f
+print map_imports.length
+// Runtime output policy marks Clang expressions before code generation; it
+// does not rewrite source strings or execute an expression to inspect it.
+let shadow_path = "{arg.root}/src/definition_shadowing.cpp"
+let shadow = parse shadow_path
+let top_level = match cxxMethodDecl(isDefinition(), hasName("HandleTopLevelDecl")).bind("f") in shadow
+let value_capture = match callExpr(callee(cxxMethodDecl(hasName("setSemiMissing")))).bind("c") in top_level.f
+print value_capture.length

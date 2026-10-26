@@ -32,7 +32,8 @@ struct Point {  // size 8, align 4
 };
 ```
 
-An expression without a final `;` prints its value. Clang's diagnostics go to
+Value expressions print by default, including expressions ending in `;`.
+`%set print_values = false` disables automatic result output. Clang's diagnostics go to
 stderr, and the session stays usable after an error. Two guards cover clang 22
 problems:
 - An input that references a symbol the JIT can't resolve is rejected with
@@ -86,10 +87,10 @@ Pass `-DREPLXX_EXAMPLE_BUILD_TESTS=OFF` to skip the tests (and googletest).
 ./build/cpp-repl -std=c++20 -Iinclude
 ```
 
-REPL commands always start with `%`. Anything else is C++: it is highlighted,
-then compiled and run by the interpreter.
+REPL commands start with `%`, and `$option` queries a session setting. Other
+input is C++: it is highlighted, then compiled and run by the interpreter.
 
-Any `%` command can substitute shell output into its arguments using double
+Commands other than `%set` can substitute shell output into their arguments using double
 backticks. Each block launches `/bin/sh -c` in the REPL's current directory,
 with its environment, and replaces the block with captured stdout. Trailing
 newlines are removed; other newlines remain and separate arguments where the
@@ -795,14 +796,29 @@ session's global scope and accesses members using ordinary C++ access rules.
   compiler importing the session's current declarations; no LSP is required.
   Tab extends the common name prefix; another Tab lists colored suggestions
   with parameter names, return/data types and kind labels. Overloads appear as
-  separate rows. Completing a function or method inserts `()` and leaves the
-  cursor inside; hints show its signature and current argument. Existing call
+  separate rows. Tab on an overloaded name or an unselected empty call opens
+  a signature menu; Up/Down selects a row and Tab accepts it. The chosen
+  signature supplies the gray parameter hints and argument stops. Escape closes
+  the menu, and ordinary editing dismisses it. Selection guides the editor;
+  C++ still resolves the call from the argument types.
+  Completing a function or method inserts `()` and leaves the
+  cursor at the first argument. Light-gray hints inside the parentheses show
+  parameter names, blank argument slots and types, with the return type after `)`.
+  Type an argument and press Tab to move to the next slot; Shift+Tab returns
+  to the previous slot, and Tab after the last argument moves past `)`.
+  These hints are display-only: they never enter executed C++ or history.
+  Enter keeps the annotations on a completed call's terminal line by default,
+  including when the cursor has moved past `)` or `;`. Parameter names and types
+  also remain on calls inside expressions, such as `add(1, 2) + 20`; a return
+  annotation appears only when no expression code follows that call.
+  Required empty arguments keep the call editable on Enter; default arguments
+  may be omitted. Ordinary comma-separated typing also works. Existing call
   parentheses are reused, and completing in the middle of a name replaces its
   remaining characters. Suggestions
   follow Clang's context/type priorities and omit inaccessible or unavailable
   members. Completion handles locals in unfinished multiline input, inheritance,
   `const` receivers, namespaces and member access after calls. While entering a
-  function call, gray hints show its signatures and the current argument number.
+  function call, the same inline parameter hints appear after a short pause.
   After `#`, suggestions follow Clang's preprocessor context: directive keywords,
   macro operands or conditional-expression macros, rather than unrelated C++
   symbols. Unique prefixes such as `#def` complete immediately; `#i` has several
@@ -813,7 +829,7 @@ session's global scope and accesses members using ordinary C++ access rules.
   `%add-path `, `%add ` and `%reload `, and class names after `%class `,
   `%methods ` and `%fields `. The member commands also complete their option
   keywords, access values and parent traversal booleans.
-  The pinned replxx dependency carries a small local display-label extension;
+  The pinned replxx dependency carries local completion and display extensions;
   `cmake/replxx-display.patch` preserves its existing insertion and pagination
   behavior. `scripts/editor-grounding.ctk` traces the AST analysis and rendering
   paths using this build's compilation database.
@@ -828,6 +844,39 @@ session's global scope and accesses members using ordinary C++ access rules.
   addresses and `using` declarations complete names without inserting a call.
 - History persists in `./.replxx_history`; Ctrl+L clears the screen; Ctrl+D
   (or `%quit`) exits.
+
+### Session options
+
+Use `%set <option> = true|false` to change an option and `$option` to show its
+current value. Tab completes option names and boolean values. Unknown options
+and invalid assignments report an error without changing session settings.
+
+| Option | Default | Behavior |
+| --- | --- | --- |
+| `print_values` | `true` | Print non-void expression values, including calls and assignments ending in `;`; `false` mutes automatic result output. |
+| `keep_hints` | `true` | Retain gray call annotations after Enter; `false` removes them from the submitted line while keeping editing hints. |
+
+```text
+cpp-repl> int add(int a, int b) { return a + b; }
+cpp-repl> add(10, 20);
+(int) 30
+cpp-repl> %set print_values = false
+print_values = false
+cpp-repl> $print_values
+print_values = false
+cpp-repl> %set keep_hints = false
+keep_hints = false
+```
+
+Expressions execute once in either output mode. Declarations, void expressions
+and control flow have no synthetic result; explicit program output is unaffected.
+Semicolon expressions requiring temporary-object cleanup execute with ordinary
+C++ lifetimes and may omit automatic value output: Clang's value-capture rewrite
+can lose those cleanups. This includes class results with nontrivial destructors.
+When one input contains several expressions, Clang's last captured value is shown.
+Options apply immediately within the session. Put `%set` commands in startup
+`.repl` files to reuse your preferences in later sessions; `$option` is a standalone
+query, rather than substitution inside C++ source.
 
 Non-interactive smoke test (ordinary C++ is read line by line; hook blocks
 can span multiple lines):

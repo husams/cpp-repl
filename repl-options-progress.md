@@ -1,0 +1,58 @@
+# Expression output and committed hints
+
+Worktree branch: `codex/editor-committed-hints`, based on `cb62cdd`.
+The primary checkout and unrelated changes remain untouched.
+
+- [x] Reproduce disappearing annotations on Enter with a real-terminal test.
+- [x] Retain completed-call annotations on the final repaint, even after `;`.
+- [x] Add strict `%set option = true|false` and `$option` query grammar.
+- [x] Replace visible placeholder markers with blank argument slots.
+- [x] Capture top-level scalar expression values through Clang, including semicolons.
+- [x] Verify both runtime options, completion, independent defaults and errors.
+- [x] Run complete macOS regression tests and review the final implementation.
+- [x] Build, verify and redeploy on `linux-dev`.
+
+`print_values=true` prints values for non-void expressions, with or without a
+semicolon. `print_values=false` mutes automatic value output; expressions still
+execute once. Declarations, control flow, source-file contents and explicit
+program output retain their meanings. The library `evaluate()` API is separate.
+Semicolon expressions with nontrivial temporary cleanup keep ordinary C++
+evaluation without automatic value capture, avoiding a Clang cleanup limitation.
+
+`keep_hints=true` retains gray parameter names, types and return annotations on
+submitted calls. `keep_hints=false` clears them from the committed terminal line;
+editing hints remain available. Both options default to true and are per session;
+startup `.repl` files can use the same `%set` commands.
+
+Final macOS suite: 312/312 passed. CTK grounding completed successfully and an
+independent review approved the final implementation. Regression tests cover
+recovery after invalid expressions and exact destructor counts for class results,
+scalar member calls and function arguments containing nontrivial temporaries.
+The terminal latency harness drains pending output while awaiting shutdown.
+
+Linux LLVM 21 suite: 310/310 passed. Source revision `fc076f1` is installed in
+`~/.local/bin/cpp-repl`, with release files and the previous executable retained
+under `~/.local/share/cpp-repl/releases/20261026-session-options`. The installed
+binary matches the tested staged executable; option and committed-hint terminal
+suites also passed against that installed binary. The primary checkout retains
+its five unrelated modified files.
+
+## Calls inside expressions
+
+- [x] Reproduce missing parameter annotations in `add(1, 2) + 20;`.
+- [x] Retain parameter names and types for embedded, nested and multiple calls.
+- [x] Omit return annotations when more code follows the call.
+- [x] Verify idle caching, cursor movement and the `keep_hints` option.
+- [x] Review and deploy the verified fix to `linux-dev`.
+
+The enhanced terminal regression is green, as are option, snippet, interaction
+and typing-latency checks. CTK traces call enumeration back to the lexical slot
+model and signature lookup to embedded Clang. Independent review approved the
+implementation and checked 1, 10 and 30 calls without errors or repeated execution.
+The complete macOS suite passed 312/312 in 162.52 seconds on the final source.
+The Linux suite passed 310/310 in 166.98 seconds. Source revision `d3901d3` is
+deployed under `~/.local/share/cpp-repl/releases/20261026-expression-hints`;
+`~/.local/bin/cpp-repl` is the stable launch path. The prior executable is
+preserved in the new release, and the primary checkout remains unchanged.
+Option and enhanced committed-hint terminal suites passed against the installed
+executable, whose SHA-256 matches the staged tested binary.

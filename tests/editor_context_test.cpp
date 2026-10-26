@@ -97,6 +97,42 @@ TEST(EditorContextTest, IncludePathCompletionReportsReplacementPrefix) {
                    "nested/beta_header.hpp"));
 }
 
+TEST(EditorContextTest, LargeHeaderSessionAnalysisAvoidsRepeatedNamespaceImports) {
+  IncludeTree tree;
+  const auto path = tree.quoted / "large_editor.hpp";
+  {
+    std::ofstream header(path);
+    header << "#pragma once\n#include <regex>\n#include <filesystem>\n#include <unordered_map>\n";
+    for (unsigned section = 0; section < 3000; ++section) {
+      header << "namespace editor_large {\n";
+      for (unsigned member = 0; member < 10; ++member) {
+        header << "int symbol_" << section * 10 + member << "(int value);\n";
+      }
+      header << "}\n";
+    }
+  }
+  std::string error;
+  auto cpp = CppInterpreter::create({"-I" + tree.quoted.string()}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("#include \"large_editor.hpp\""));
+  const auto start = std::chrono::steady_clock::now();
+  const auto completion = cpp->complete("editor_large::symbol_2999");
+  const auto completed = std::chrono::steady_clock::now();
+  EXPECT_TRUE(has(completion.names, "symbol_29999"));
+  const auto tokens = cpp->semantic_tokens("editor_large::symbol_29999(42)");
+  const auto colored = std::chrono::steady_clock::now();
+  EXPECT_FALSE(tokens.empty());
+  const auto completion_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(completed - start).count();
+  const auto coloring_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(colored - completed).count();
+  std::cout << "large header (30,000 symbols, 3,000 namespace declarations): completion="
+            << completion_ms << "ms coloring=" << coloring_ms << "ms\n";
+  EXPECT_LT(completion_ms, 1500);
+  EXPECT_LT(coloring_ms, 1500);
+  EXPECT_EQ(cpp->evaluate("21 * 2"), std::optional<std::string>("(int) 42\n"));
+}
+
 TEST(EditorContextTest, MemberCompletionRespectsTypeAndAccessContext) {
   std::string error;
   auto cpp = CppInterpreter::create({}, error);
@@ -193,6 +229,85 @@ TEST(EditorContextTest, MemberCompletionRespectsTypeAndAccessContext) {
                    [](const auto& item) { return item.text == "editor_function"; });
   ASSERT_NE(using_function, using_decl.items.end());
   EXPECT_FALSE(using_function->insert_call);
+}
+
+TEST(EditorContextTest, CompletionItemsCarryStructuredParameterMetadata) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("int editor_signature(int count, const char* label = nullptr); "
+                           "int editor_empty(); "
+                           "int editor_unnamed(int, double); "
+                           "int editor_variadic(const char* format, ...); "
+                           "struct EditorSignature { int method(double amount) const &; }; "
+                           "template<class... Ts> int editor_pack(Ts... values);"));
+
+  const auto completion = cpp->complete("editor_sign");
+  const auto item =
+      std::find_if(completion.items.begin(), completion.items.end(),
+                   [](const auto& candidate) { return candidate.text == "editor_signature"; });
+  ASSERT_NE(item, completion.items.end());
+  EXPECT_EQ(item->identity.substr(0, std::string("editor_signature").size()), "editor_signature");
+  ASSERT_EQ(item->parameters.size(), 2u);
+  EXPECT_EQ(item->parameters[0].name, "count");
+  EXPECT_EQ(item->parameters[0].type, "int");
+  EXPECT_FALSE(item->parameters[0].has_default);
+  EXPECT_EQ(item->parameters[1].name, "label");
+  EXPECT_EQ(item->parameters[1].type, "const char *");
+  EXPECT_TRUE(item->parameters[1].has_default);
+  EXPECT_FALSE(item->variadic);
+
+  const auto empty = cpp->complete("editor_empty");
+  const auto empty_item =
+      std::find_if(empty.items.begin(), empty.items.end(),
+                   [](const auto& candidate) { return candidate.text == "editor_empty"; });
+  ASSERT_NE(empty_item, empty.items.end());
+  EXPECT_TRUE(empty_item->parameters.empty());
+  EXPECT_FALSE(empty_item->variadic);
+
+  const auto unnamed = cpp->complete("editor_unnamed");
+  const auto unnamed_item =
+      std::find_if(unnamed.items.begin(), unnamed.items.end(),
+                   [](const auto& candidate) { return candidate.text == "editor_unnamed"; });
+  ASSERT_NE(unnamed_item, unnamed.items.end());
+  ASSERT_EQ(unnamed_item->parameters.size(), 2u);
+  EXPECT_TRUE(unnamed_item->parameters[0].name.empty());
+  EXPECT_EQ(unnamed_item->parameters[1].type, "double");
+
+  const auto variadic = cpp->complete("editor_variadic");
+  const auto variadic_item =
+      std::find_if(variadic.items.begin(), variadic.items.end(),
+                   [](const auto& candidate) { return candidate.text == "editor_variadic"; });
+  ASSERT_NE(variadic_item, variadic.items.end());
+  EXPECT_TRUE(variadic_item->variadic);
+
+  const auto packed = cpp->complete("editor_pack");
+  const auto pack_item =
+      std::find_if(packed.items.begin(), packed.items.end(),
+                   [](const auto& candidate) { return candidate.text == "editor_pack"; });
+  ASSERT_NE(pack_item, packed.items.end());
+  ASSERT_EQ(pack_item->parameters.size(), 1u);
+  EXPECT_TRUE(pack_item->parameters[0].is_pack);
+
+  const auto method = cpp->complete("EditorSignature::method");
+  const auto method_item =
+      std::find_if(method.items.begin(), method.items.end(),
+                   [](const auto& candidate) { return candidate.text == "method"; });
+  ASSERT_NE(method_item, method.items.end());
+  EXPECT_EQ(method_item->parameters.size(), 1u);
+  EXPECT_EQ(method_item->parameters[0].type, "double");
+  EXPECT_NE(method_item->label.find("const &"), std::string::npos);
+
+  const auto typed_call = cpp->complete("editor_signature(");
+  EXPECT_FALSE(typed_call.signature_items.empty());
+  const auto active_signature =
+      std::find_if(typed_call.signature_items.begin(), typed_call.signature_items.end(),
+                   [](const auto& candidate) { return candidate.text == "editor_signature"; });
+  ASSERT_NE(active_signature, typed_call.signature_items.end());
+  EXPECT_FALSE(active_signature->identity.empty());
+  ASSERT_EQ(active_signature->parameters.size(), 2u);
+  EXPECT_EQ(active_signature->parameters[1].name, "label");
+  EXPECT_TRUE(active_signature->parameters[1].has_default);
 }
 
 TEST(EditorContextTest, IncompleteContextCompletionReturnsWithoutSessionMutation) {

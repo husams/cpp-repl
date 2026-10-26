@@ -6,8 +6,11 @@
 
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclContextInternals.h"
 #include "clang/AST/DeclTemplate.h"
+#include "clang/AST/Expr.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendAction.h"
@@ -44,6 +47,59 @@ bool is_definition(const clang::NamedDecl *declaration) {
   return true;
 }
 
+bool has_nontrivial_temporary_cleanup(const clang::Stmt& statement) {
+  if (const auto* bound = llvm::dyn_cast<clang::CXXBindTemporaryExpr>(&statement)) {
+    const auto* destructor = bound->getTemporary()->getDestructor();
+    if (destructor && !destructor->isTrivial()) {
+      return true;
+    }
+  }
+
+  // A lambda body is not evaluated as part of evaluating the lambda
+  // expression, so its local temporaries do not affect this full-expression.
+  if (llvm::isa<clang::LambdaExpr>(&statement)) {
+    return false;
+  }
+
+  for (const clang::Stmt* child : statement.children()) {
+    if (child && has_nontrivial_temporary_cleanup(*child)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool safe_to_capture_expression(const clang::Expr& expression) {
+  if (expression.containsErrors() || expression.isTypeDependent() ||
+      expression.isValueDependent()) {
+    return false;
+  }
+
+  const clang::QualType type = expression.getType();
+  if (type.isNull() || type->isDependentType() || type->isVoidType()) {
+    return false;
+  }
+
+  // Clang's value-capture rewrite unwraps ExprWithCleanups. If any evaluated
+  // subexpression owns a nontrivial temporary cleanup, capturing can drop that
+  // cleanup even when the overall result is a scalar.
+  if (has_nontrivial_temporary_cleanup(expression)) {
+    return false;
+  }
+
+  // Keep this direct-result check as well: record prvalues can need destruction
+  // even when Clang did not wrap them in CXXBindTemporaryExpr.
+  if (expression.isPRValue()) {
+    if (const auto* record = type->getAsCXXRecordDecl()) {
+      if (record->hasNonTrivialDestructor()) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
 class ShadowConsumer : public clang::ASTConsumer {
   clang::CompilerInstance &compiler_;
   unsigned generation_ = 0;
@@ -54,6 +110,7 @@ class ShadowConsumer : public clang::ASTConsumer {
   };
   std::vector<Hidden> hidden_;
   std::set<std::string> version_files_;
+  bool capture_semicolon_expressions_ = false;
 
   void hide(clang::DeclContext *context, clang::NamedDecl *old) {
     if (auto *map = context->getPrimaryContext()->getLookupPtr()) {
@@ -216,6 +273,8 @@ public:
   void version_files(const std::vector<std::string> &files) {
     version_files_ = {files.begin(), files.end()};
   }
+
+  void capture_semicolon_expressions(bool capture) { capture_semicolon_expressions_ = capture; }
   void hide_files(const clang::DeclContext &context,
                   const std::set<std::string> &files) {
     auto &manager = compiler_.getSourceManager();
@@ -243,8 +302,24 @@ public:
     }
   }
   bool HandleTopLevelDecl(clang::DeclGroupRef declarations) override {
-    for (auto *declaration : declarations)
+    for (auto* declaration : declarations) {
+      if (capture_semicolon_expressions_ && !compiler_.getDiagnostics().hasErrorOccurred()) {
+        auto* statement = llvm::dyn_cast<clang::TopLevelStmtDecl>(declaration);
+        auto* expression = statement && statement->getStmt()
+                               ? llvm::dyn_cast<clang::Expr>(statement->getStmt())
+                               : nullptr;
+        if (expression && safe_to_capture_expression(*expression) &&
+            compiler_.getSourceManager()
+                .getBufferName(
+                    compiler_.getSourceManager().getExpansionLoc(statement->getBeginLoc()))
+                .starts_with("input_line_")) {
+          // ParseAndExecute emits the PTU before returning, so this capture
+          // policy must be applied while the declaration is delivered here.
+          statement->setSemiMissing();
+        }
+      }
       shadow(declaration);
+    }
     return true;
   }
 };
@@ -267,6 +342,13 @@ clang::FrontendPluginRegistry::Add<ShadowAction>
 
 void enable_definition_shadowing(clang::CompilerInstance &compiler) {
   compiler.getFrontendOpts().AddPluginActions.push_back("cpp-repl-shadowing");
+}
+
+void capture_semicolon_expressions(clang::CompilerInstance& compiler, bool capture) {
+  std::lock_guard<std::mutex> lock(consumers_mutex);
+  if (auto found = consumers.find(&compiler); found != consumers.end()) {
+    found->second->capture_semicolon_expressions(capture);
+  }
 }
 
 std::string unversioned_name(std::string name) {
