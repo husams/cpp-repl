@@ -130,3 +130,54 @@ interpreter.
   test (`build/editor-cursor-final.log`): **all 259 distinct tests passed**.
 - CTK grounding rerun against the corrected analysis path; evidence in
   `build/editor-cursor-grounding.log`.
+
+## 2026-10-26 — context audit and paired input
+
+Requested behavior: complete functions/methods with `()` (no inserted argument
+commas), keep the cursor inside and show their signatures. Automatically close
+parentheses, braces and quotes while preserving existing closing characters.
+
+- [x] Add include-path, member-access and unfinished-input context regressions.
+- [x] Propagate include-name replacement spans, including directory components
+  and partial filename extensions, from Clang to the terminal editor.
+- [x] Validate callable insertion, selection cycling and reuse of existing calls.
+- [x] Validate paired input, escaping, empty-pair Backspace and command boundaries.
+- [x] Run terminal regressions and complete the context audit.
+
+The new terminal interaction test exercises free functions, methods through `.`,
+`->` and call results, signature hints, zero-argument calls, mid-name replacement,
+cycling choices, UTF-8, comments, quoted nested includes and angle includes.
+
+Audit findings and completed corrections:
+
+- Include completion normalizes Clang's basename/full-path candidates and closing
+  delimiters, replaces complete path prefixes and suffixes, and permits real
+  header names beginning with `__`. Tests use private `-I`/`-isystem` fixtures.
+- Comments receive no C++ symbol suggestions. Session-name supplementation is
+  limited to ordinary expression/statement/name contexts, so an alias's type-only
+  position does not receive variables. Member tests cover inheritance, access,
+  const receivers, pointers, call results and function signature metadata.
+- Callable completion retains separate display signatures and adds `()` only to
+  inserted call text. Cursor offsets handle unique completion, forward/reverse
+  selection, existing parentheses and mid-identifier edits. Cycling back restores
+  the original remaining suffix even after extending a shared prefix.
+- Replxx now renders signature hints when the cursor is inside a paired call,
+  including calls in embedded C++ command bodies, and refreshes them on movement.
+- Pairing applies to explicitly typed C++ keys, including command payloads;
+  comments, escapes, raw prefixes, numeric apostrophes and shell/path operands
+  retain their syntax. Quote handling accounts for escape-separated lexer tokens.
+- Enter preserves body/parameter continuation and valid completed calls; command
+  operands keep command grammar semantics. The earlier smoke test's completed
+  two-argument call was updated to use the newly inserted opening parenthesis.
+- Empty-pair Backspace is checked by deleting a pair and then successfully
+  entering a declaration, rather than by evaluating an equivalently grouped sum.
+
+Validation: **274/274 tests passed** in 123.30 seconds, including the existing
+terminal smoke and both editor terminal tests (`build/editor-pairs-final.log`).
+The final focused checks additionally cover internal-header names and the stronger
+Backspace case (`build/editor-pairs-last-check.log`). Build output is in
+`build/editor-pairs-build.log`; no compiler warnings were emitted. New C++ files
+pass clang-format and `git diff --check` passes. The expanded replxx patch applies
+cleanly to a fresh pinned checkout and its second application is idempotent.
+The extended CTK script verifies the embedded analysis, context, pairing and
+frontend hint/edit paths (`build/editor-pairs-grounding.log`).

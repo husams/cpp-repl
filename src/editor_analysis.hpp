@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,7 @@ struct CompletionItem {
   std::string documentation;
   SemanticKind kind = SemanticKind::Variable;
   unsigned priority = 50; // Clang priority; smaller values rank first.
+  bool is_header_path = false;
 };
 
 struct SemanticToken {
@@ -43,6 +45,9 @@ struct EditorAnalysis {
   std::vector<CompletionItem> items;
   std::vector<std::string> signatures;
   unsigned active_parameter = 0;
+  // Override the ordinary identifier prefix when completing a non-identifier
+  // token such as an include path.
+  std::optional<std::string> completion_prefix;
   std::vector<SemanticToken> tokens;
 };
 

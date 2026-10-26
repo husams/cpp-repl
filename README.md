@@ -787,7 +787,10 @@ session's global scope and accesses members using ordinary C++ access rules.
   compiler importing the session's current declarations; no LSP is required.
   Tab extends the common name prefix; another Tab lists colored suggestions
   with parameter names, return/data types and kind labels. Overloads appear as
-  separate rows, but only the identifier is inserted into the input. Suggestions
+  separate rows. Completing a function or method inserts `()` and leaves the
+  cursor inside; hints show its signature and current argument. Existing call
+  parentheses are reused, and completing in the middle of a name replaces its
+  remaining characters. Suggestions
   follow Clang's context/type priorities and omit inaccessible or unavailable
   members. Completion handles locals in unfinished multiline input, inheritance,
   `const` receivers, namespaces and member access after calls. While entering a
@@ -796,6 +799,8 @@ session's global scope and accesses members using ordinary C++ access rules.
   macro operands or conditional-expression macros, rather than unrelated C++
   symbols. Unique prefixes such as `#def` complete immediately; `#i` has several
   valid matches, including `if` and `include`.
+  Header-name completion uses Clang's configured include search paths, including
+  quoted, angle-bracket and nested paths.
   Tab also completes `%` commands, filesystem paths after `%lib `,
   `%add-path `, `%add ` and `%reload `, and class names after `%class `,
   `%methods ` and `%fields `. The member commands also complete their option
@@ -804,6 +809,11 @@ session's global scope and accesses members using ordinary C++ access rules.
   `cmake/replxx-display.patch` preserves its existing insertion and pagination
   behavior. `scripts/editor-grounding.ctk` traces the AST analysis and rendering
   paths using this build's compilation database.
+- **Paired delimiters**: typing `(`, `[`, `{`, `"` or `'` closes the pair and keeps
+  the cursor inside. Typing an existing closer moves past it; Backspace between
+  an empty pair removes both characters. Quotes, escapes, comments, raw strings
+  and numeric separators keep their C++ meaning. Pairing applies to C++ input
+  and embedded C++ command bodies; shell and path operands retain normal typing.
 - History persists in `./.replxx_history`; Ctrl+L clears the screen; Ctrl+D
   (or `%quit`) exits.
 

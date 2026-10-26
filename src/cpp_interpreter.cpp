@@ -729,6 +729,9 @@ CppInterpreter::Completions CppInterpreter::complete(const std::string& code) {
     return out;
   }
   auto analysis = analyze_editor(std::move(*compiler), *interp_->getCompilerInstance(), code, true);
+  if (analysis.completion_prefix) {
+    out.prefix = std::move(*analysis.completion_prefix);
+  }
   out.items = std::move(analysis.items);
   out.signatures = std::move(analysis.signatures);
   out.active_parameter = analysis.active_parameter;

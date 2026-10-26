@@ -123,6 +123,75 @@ CompletionItem describe(const clang::NamedDecl* decl) {
   return item;
 }
 
+std::optional<std::string> included_path_prefix(llvm::StringRef code) {
+  const auto line_start = code.rfind('\n');
+  const auto line = code.substr(line_start == llvm::StringRef::npos ? 0 : line_start + 1);
+  const auto hash = line.find('#');
+  if (hash == llvm::StringRef::npos) {
+    return std::nullopt;
+  }
+  auto rest = line.drop_front(hash + 1).ltrim(" \t");
+  const auto directive_end = rest.find_first_of(" \t<\"");
+  const auto directive = rest.take_front(directive_end);
+  if (directive != "include" && directive != "include_next" && directive != "import") {
+    return std::nullopt;
+  }
+  if (directive_end == llvm::StringRef::npos) {
+    return std::nullopt;
+  }
+  rest = rest.drop_front(directive_end).ltrim(" \t");
+  if (rest.empty() || (rest.front() != '<' && rest.front() != '"')) {
+    return std::nullopt;
+  }
+  const auto path = rest.drop_front();
+  return path.str();
+}
+
+bool cursor_in_comment(llvm::StringRef code) {
+  enum class State { Code, String, Character, LineComment, BlockComment };
+  State state = State::Code;
+  for (std::size_t i = 0; i < code.size(); ++i) {
+    const char c = code[i];
+    const char next = i + 1 < code.size() ? code[i + 1] : '\0';
+    switch (state) {
+    case State::Code:
+      if (c == '/' && next == '/') {
+        state = State::LineComment;
+        ++i;
+      } else if (c == '/' && next == '*') {
+        state = State::BlockComment;
+        ++i;
+      } else if (c == '"') {
+        state = State::String;
+      } else if (c == '\'') {
+        state = State::Character;
+      }
+      break;
+    case State::String:
+    case State::Character:
+      if (c == '\\' && i + 1 < code.size()) {
+        ++i;
+      } else if ((state == State::String && c == '"') ||
+                 (state == State::Character && c == '\'')) {
+        state = State::Code;
+      }
+      break;
+    case State::LineComment:
+      if (c == '\n') {
+        state = State::Code;
+      }
+      break;
+    case State::BlockComment:
+      if (c == '*' && next == '/') {
+        state = State::Code;
+        ++i;
+      }
+      break;
+    }
+  }
+  return state == State::LineComment || state == State::BlockComment;
+}
+
 class CompletionConsumer : public clang::CodeCompleteConsumer {
   clang::GlobalCodeCompletionAllocator allocator_;
   clang::CodeCompletionTUInfo info_{std::make_shared<clang::GlobalCodeCompletionAllocator>()};
@@ -153,6 +222,20 @@ public:
                                   clang::CodeCompletionResult* results, unsigned count) override {
     const auto prefix = sema.getPreprocessor().getCodeCompletionFilter();
     const auto kind = context.getKind();
+    const bool include_context = kind == clang::CodeCompletionContext::CCC_IncludedFile;
+    const auto include_prefix = include_context ? included_path_prefix(code_) : std::nullopt;
+    const auto include_directory = include_prefix
+                                       ? include_prefix->substr(
+                                             0, include_prefix->find_last_of('/') == std::string::npos
+                                                    ? 0
+                                                    : include_prefix->find_last_of('/') + 1)
+                                       : std::string();
+    const auto include_name_prefix = include_prefix
+                                         ? include_prefix->substr(include_directory.size())
+                                         : std::string();
+    if (include_prefix) {
+      result_.completion_prefix = *include_prefix;
+    }
     const bool preprocessor_context =
         kind == clang::CodeCompletionContext::CCC_MacroName ||
         kind == clang::CodeCompletionContext::CCC_MacroNameUse ||
@@ -162,6 +245,10 @@ public:
     const bool macro_context = kind == clang::CodeCompletionContext::CCC_MacroName ||
                                kind == clang::CodeCompletionContext::CCC_MacroNameUse ||
                                kind == clang::CodeCompletionContext::CCC_PreprocessorExpression;
+    if (cursor_in_comment(code_)) {
+      return;
+    }
+    const auto before = llvm::StringRef(code_).drop_back(prefix.size()).rtrim();
     for (unsigned i = 0; i < count; ++i) {
       auto& candidate = results[i];
       if (candidate.Hidden || candidate.Availability == CXAvailability_NotAvailable ||
@@ -206,9 +293,35 @@ public:
       } else {
         continue;
       }
-      if (!llvm::StringRef(item.text).starts_with(prefix) ||
-          (item.text.rfind("__", 0) == 0 &&
-           !(macro_context && candidate.Kind == clang::CodeCompletionResult::RK_Macro))) {
+      if (include_context) {
+        item.is_header_path = true;
+        if (!item.text.empty() && (item.text.back() == '"' || item.text.back() == '>')) {
+          item.text.pop_back();
+          item.label = item.text;
+        }
+        const llvm::StringRef candidate_path(item.text);
+        const auto slash = candidate_path.rfind('/');
+        const auto candidate_name = slash == llvm::StringRef::npos
+                                        ? candidate_path
+                                        : candidate_path.drop_front(slash + 1);
+        if (!include_prefix ||
+            (!candidate_name.starts_with(include_name_prefix) &&
+             !candidate_path.starts_with(*include_prefix))) {
+          continue;
+        }
+        // Clang's file completion may return either a basename or a relative
+        // path. The editor replaces the whole typed path, so normalize each
+        // candidate to that same shape before exposing it.
+        if (!include_directory.empty() &&
+            !llvm::StringRef(item.text).starts_with(include_directory)) {
+          item.text = include_directory + item.text;
+          item.label = item.text;
+        }
+      } else if (!llvm::StringRef(item.text).starts_with(prefix)) {
+        continue;
+      }
+      if (!include_context && item.text.rfind("__", 0) == 0 &&
+          !(macro_context && candidate.Kind == clang::CodeCompletionResult::RK_Macro)) {
         continue;
       }
       result_.items.push_back(std::move(item));
@@ -239,12 +352,23 @@ public:
     if (preprocessor_context) {
       return;
     }
-    const auto before = llvm::StringRef(code_).drop_back(prefix.size()).rtrim();
     if (!context.getBaseType().isNull() || before.ends_with(".") || before.ends_with("->") ||
         before.ends_with("::")) {
       return;
     }
-    if (context.getKind() == clang::CodeCompletionContext::CCC_Type && !before.empty()) {
+    const bool supplement_allowed =
+        kind == clang::CodeCompletionContext::CCC_Statement ||
+        kind == clang::CodeCompletionContext::CCC_Expression ||
+        kind == clang::CodeCompletionContext::CCC_ParenthesizedExpression ||
+        kind == clang::CodeCompletionContext::CCC_Symbol ||
+        kind == clang::CodeCompletionContext::CCC_SymbolOrNewName ||
+        kind == clang::CodeCompletionContext::CCC_TopLevelOrExpression ||
+        (before.empty() &&
+         (kind == clang::CodeCompletionContext::CCC_TopLevel ||
+          kind == clang::CodeCompletionContext::CCC_Other ||
+          kind == clang::CodeCompletionContext::CCC_OtherWithMacros ||
+          kind == clang::CodeCompletionContext::CCC_Type));
+    if (!supplement_allowed) {
       return;
     }
     for (const auto& qualified : user_symbol_names(session_.getASTContext())) {

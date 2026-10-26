@@ -24,3 +24,15 @@ let completion = match cxxMethodDecl(isDefinition(), matchesName("CompletionCons
 print completion.length
 let context_calls = match callExpr(callee(functionDecl(matchesName("(getKind|getTypedText|getCodeCompletionFilter|LookupName)$")))).bind("c") in completion.f
 foreach row in context_calls do print row.c.call_site.static_callee_name
+// Paired input remains lexical/grammar aware; the frontend routes call hints
+// through the same embedded compiler and applies edits through replxx actions.
+let input_path = "{arg.root}/src/editor_input.cpp"
+let input = parse input_path
+let pairs = match functionDecl(isDefinition(), hasName("example::delimiter_decision")).bind("f") in input
+print pairs.length
+let lexical_calls = match callExpr(callee(functionDecl(matchesName("(lex_cpp|cpp_payload|in_literal_or_comment)$")))).bind("c") in pairs.f
+foreach row in lexical_calls do print row.c.call_site.static_callee_name
+let repl_path = "{arg.root}/src/repl.cpp"
+let repl = parse repl_path
+let frontend = match functionDecl(isDefinition(), matchesName("(cpp_completions|cpp_hints|on_delimiter)$")).bind("f") in repl
+foreach row in frontend do print row.f.qualified_name

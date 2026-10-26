@@ -1,32 +1,90 @@
 diff --git a/include/replxx.hxx b/include/replxx.hxx
-index ab3c5e5..30ac2d7 100644
+index ab3c5e5..4a6c2dc 100644
 --- a/include/replxx.hxx
 +++ b/include/replxx.hxx
-@@ -211,6 +211,7 @@ public:
+@@ -211,7 +211,10 @@ public:
  	typedef std::vector<Color> colors_t;
  	class Completion {
  		std::string _text;
 +		std::string _display;
  		Color _color;
++		int _cursorOffset = 0;
++		int _eraseAfter = 0;
  	public:
  		Completion( char const* text_ )
-@@ -225,6 +226,11 @@ public:
+ 			: _text( text_ )
+@@ -225,6 +228,21 @@ public:
  			: _text( text_ )
  			, _color( color_ ) {
  		}
 +		Completion( std::string const& text_, std::string const& display_, Color color_ )
 +			: _text( text_ ), _display( display_ ), _color( color_ ) {}
++		Completion( std::string const& text_, std::string const& display_, Color color_,
++			int cursorOffset_, int eraseAfter_ )
++			: _text( text_ ), _display( display_ ), _color( color_ ),
++			  _cursorOffset( cursorOffset_ ), _eraseAfter( eraseAfter_ ) {}
 +		std::string const& display( void ) const {
 +			return _display.empty() ? _text : _display;
++		}
++		int cursor_offset( void ) const {
++			return _cursorOffset;
++		}
++		int erase_after( void ) const {
++			return _eraseAfter;
 +		}
  		std::string const& text( void ) const {
  			return ( _text );
  		}
 diff --git a/src/replxx_impl.cxx b/src/replxx_impl.cxx
-index 22ee748..95f9621 100644
+index 22ee748..0b52eeb 100644
 --- a/src/replxx_impl.cxx
 +++ b/src/replxx_impl.cxx
-@@ -1106,7 +1106,9 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+@@ -800,9 +800,6 @@ void Replxx::ReplxxImpl::handle_hints( HINT_ACTION hintAction_ ) {
+ 	if ( ( hintAction_ == HINT_ACTION::SKIP ) || ( hintAction_ == HINT_ACTION::TRIM ) ) {
+ 		return;
+ 	}
+-	if ( _pos != _data.length() ) {
+-		return;
+-	}
+ 	_hint = UnicodeString();
+ 	if ( hintAction_ == HINT_ACTION::REGENERATE ) {
+ 		_hintSelection = -1;
+@@ -815,6 +812,11 @@ void Replxx::ReplxxImpl::handle_hints( HINT_ACTION hintAction_ ) {
+ 		IOModeGuard ioModeGuard( _terminal );
+ 		_hintsCache = call_hinter( _utf8Buffer.get(), _hintContextLenght, _hintColor );
+ 	}
++	// Signature/usage hints have no replaceable prefix and remain useful while
++	// the cursor is inside a paired call. Ordinary suffix hints stay at EOL.
++	if ( ( _pos != _data.length() ) && ( _hintContextLenght != 0 ) ) {
++		return;
++	}
+ 	int hintCount( static_cast<int>( _hintsCache.size() ) );
+ 	if ( hintCount == 1 ) {
+ 		_hint = _hintsCache.front();
+@@ -1091,6 +1093,10 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+ 	// get a list of completions
+ 	_completionSelection = -1;
+ 	_completionContextLength = context_length();
++	_completionCursorOffset = 0;
++	_completionPrefixCursorOffset = 0;
++	_completionErasedSuffix.clear();
++	_completionSuffixErased = false;
+ 	/* IOModeGuard scope */ {
+ 		IOModeGuard ioModeGuard( _terminal );
+ 		_completions = call_completer( _utf8Buffer.get(), _completionContextLength );
+@@ -1101,12 +1107,21 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+ 		beep();
+ 		return 0;
+ 	}
++	_completionErasedSuffix.clear();
++	if ( _completions[0].erase_after() > 0 ) {
++		int suffixLength( min( _completions[0].erase_after(), _data.length() - _pos ) );
++		for ( int i( 0 ); i < suffixLength; ++ i ) {
++			_completionErasedSuffix.push_back( _data[_pos + i] );
++		}
++	}
+ 
+ 	// at least one completion
  	int longestCommonPrefix = 0;
  	int completionsCount( static_cast<int>( _completions.size() ) );
  	int selectedCompletion( 0 );
@@ -37,7 +95,37 @@ index 22ee748..95f9621 100644
  		selectedCompletion = _hintSelection;
  		completionsCount = 1;
  	}
-@@ -1181,7 +1183,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+@@ -1121,10 +1136,29 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+ 
+ 	// if we can extend the item, extend it and return to main loop
+ 	if ( ( longestCommonPrefix > _completionContextLength ) || ( completionsCount == 1 ) ) {
++		// A shared prefix may already consume the start of the saved suffix.
++		// Restore only its remaining characters if selection cycling is undone.
++		int consumed( 0 );
++		while ( ( consumed < _completionErasedSuffix.length() )
++			&& ( _completionContextLength + consumed < longestCommonPrefix )
++			&& ( _completionErasedSuffix[consumed]
++				== _completions[selectedCompletion].text()[_completionContextLength + consumed] ) ) {
++			++ consumed;
++		}
++		_completionErasedSuffix.erase( 0, consumed );
+ 		_pos -= _completionContextLength;
+ 		_data.erase( _pos, _completionContextLength );
+ 		_data.insert( _pos, _completions[selectedCompletion].text(), 0, longestCommonPrefix );
+ 		_pos = _pos + longestCommonPrefix;
++		if ( _completions[selectedCompletion].erase_after() > 0 ) {
++			_data.erase( _pos, _completions[selectedCompletion].erase_after() );
++			_completionSuffixErased = true;
++		}
++		_completionCursorOffset = longestCommonPrefix ==
++				static_cast<int>( _completions[selectedCompletion].text().length() )
++			? _completions[selectedCompletion].cursor_offset() : 0;
++		_pos += _completionCursorOffset;
++		_completionPrefixCursorOffset = _completionCursorOffset;
+ 		_completionContextLength = longestCommonPrefix;
+ 		refresh_line();
+ 		return 0;
+@@ -1181,7 +1215,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
  	if ( showCompletions ) {
  		int longestCompletion( 0 );
  		for ( size_t j( 0 ); j < _completions.size(); ++ j ) {
@@ -46,7 +134,7 @@ index 22ee748..95f9621 100644
  			if ( itemLength > longestCompletion ) {
  				longestCompletion = itemLength;
  			}
-@@ -1253,7 +1255,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+@@ -1253,7 +1287,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
  				size_t index = (column * rowCount) + row;
  				if ( index < _completions.size() ) {
  					Completion const& c( _completions[index] );
@@ -55,7 +143,7 @@ index 22ee748..95f9621 100644
  					fflush(stdout);
  
  					if ( longestCommonPrefix > 0 ) {
-@@ -1271,7 +1273,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
+@@ -1271,7 +1305,7 @@ char32_t Replxx::ReplxxImpl::do_complete_line( bool showCompletions_ ) {
  						UnicodeString ac( ansi_color( c.color() ) );
  						_terminal.write32( ac.get(), ac.length() );
  					}
@@ -64,26 +152,82 @@ index 22ee748..95f9621 100644
  					if ( !_noColor && ( c.color() != Replxx::Color::DEFAULT ) ) {
  						_terminal.write32( res.get(), res.length() );
  					}
+@@ -1383,7 +1417,8 @@ Replxx::ACTION_RESULT Replxx::ReplxxImpl::action( action_trait_t actionTrait_, k
+ 	}
+ 	if ( actionTrait_ & MOVE_CURSOR ) {
+ 		_modifiedState = ( _pos != _oldPos ) && (
+-			( _pos == _data.length() )
++			!! _hintCallback
++			|| ( _pos == _data.length() )
+ 			|| ( _oldPos == _data.length() )
+ 			|| ( ( _pos < _data.length() ) && strchr( "{}[]()", _data[_pos] ) )
+ 			|| ( ( _oldPos < _data.length() ) && strchr( "{}[]()", _data[_oldPos] ) )
+@@ -2020,21 +2055,37 @@ Replxx::ACTION_RESULT Replxx::ReplxxImpl::complete( bool previous_ ) {
+ 			return ( Replxx::ACTION_RESULT::CONTINUE );
+ 		}
+ 	}
++	const int oldSelection = _completionSelection;
+ 	int newSelection( _completionSelection + ( previous_ ? -1 : 1 ) );
+ 	if ( newSelection >= static_cast<int>( _completions.size() ) ) {
+ 		newSelection = -1;
+ 	} else if ( newSelection == -2 ) {
+ 		newSelection = static_cast<int>( _completions.size() ) - 1;
+ 	}
++	_pos -= _completionCursorOffset;
++	_completionCursorOffset = 0;
+ 	if ( _completionSelection != -1 ) {
+ 		int oldCompletionLength( max( _completions[_completionSelection].text().length() - _completionContextLength, 0 ) );
+ 		_pos -= oldCompletionLength;
+ 		_data.erase( _pos, oldCompletionLength );
+ 	}
+ 	if ( newSelection != -1 ) {
++		if ( !_completionSuffixErased && _completionErasedSuffix.length() > 0 ) {
++			_data.erase( _pos, _completionErasedSuffix.length() );
++			_completionSuffixErased = true;
++		}
+ 		int newCompletionLength( max( _completions[newSelection].text().length() - _completionContextLength, 0 ) );
+ 		_data.insert( _pos, _completions[newSelection].text(), _completionContextLength, newCompletionLength );
+ 		_pos += newCompletionLength;
++		_completionCursorOffset = _completions[newSelection].cursor_offset();
++		_pos += _completionCursorOffset;
++	} else {
++		if ( oldSelection != -1 && _completionErasedSuffix.length() > 0 ) {
++			_data.insert( _pos, _completionErasedSuffix, 0, _completionErasedSuffix.length() );
++			_completionSuffixErased = false;
++		}
++		_completionCursorOffset = _completionPrefixCursorOffset;
++		_pos += _completionCursorOffset;
+ 	}
+ 	_completionSelection = newSelection;
+ 	refresh_line();  // Refresh the line
 diff --git a/src/replxx_impl.hxx b/src/replxx_impl.hxx
-index 8f6357b..9761f9d 100644
+index 8f6357b..1c6987a 100644
 --- a/src/replxx_impl.hxx
 +++ b/src/replxx_impl.hxx
-@@ -53,20 +53,26 @@ class Replxx::ReplxxImpl {
+@@ -53,20 +53,38 @@ class Replxx::ReplxxImpl {
  public:
  	class Completion {
  		UnicodeString _text;
 +		UnicodeString _display;
  		Replxx::Color _color;
++		int _cursorOffset;
++		int _eraseAfter;
  	public:
  		Completion( UnicodeString const& text_, Replxx::Color color_ )
  			: _text( text_ )
+-			, _color( color_ ) {
 +			, _display( text_ )
- 			, _color( color_ ) {
++			, _color( color_ )
++			, _cursorOffset( 0 )
++			, _eraseAfter( 0 ) {
  		}
  		Completion( Replxx::Completion const& completion_ )
  			: _text( completion_.text() )
+-			, _color( completion_.color() ) {
 +			, _display( completion_.display() )
- 			, _color( completion_.color() ) {
++			, _color( completion_.color() )
++			, _cursorOffset( completion_.cursor_offset() )
++			, _eraseAfter( completion_.erase_after() ) {
  		}
  		Completion( Completion const& ) = default;
  		Completion& operator = ( Completion const& ) = default;
@@ -92,6 +236,23 @@ index 8f6357b..9761f9d 100644
 +		UnicodeString const& display( void ) const {
 +			return _display;
 +		}
++		int cursor_offset( void ) const {
++			return _cursorOffset;
++		}
++		int erase_after( void ) const {
++			return _eraseAfter;
++		}
  		UnicodeString const& text( void ) const {
  			return ( _text );
  		}
+@@ -145,6 +163,10 @@ private:
+ 	completions_t _completions;
+ 	int _completionContextLength;
+ 	int _completionSelection;
++	UnicodeString _completionErasedSuffix;
++	bool _completionSuffixErased = false;
++	int _completionCursorOffset = 0;
++	int _completionPrefixCursorOffset = 0;
+ 	std::string _preloadedBuffer; // used with set_preload_buffer
+ 	std::string _errorMessage;
+ 	UnicodeString _previousSearchText; // remembered across invocations of replxx_input()

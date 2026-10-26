@@ -16,8 +16,9 @@ with tempfile.TemporaryDirectory() as cwd:
         binary, cwd,
         [
             ("definitions", b"int editor_menu(int first) { return first; } double editor_menu(double value) { return value; } struct EditorPty { int field = 7; int method() const { return field; } }; EditorPty editor_pty;\r", True),
-            ("rich_menu", b"editor_men\t\t"),
-            ("signature", b"("),
+            ("rich_menu", b"editor_\t"),
+            ("cancel_rich_menu", b"\x03", True),
+            ("signature", b"editor_men\t"),
             ("cancel_signature", b"\x03", True),
             ("rich_call", b"editor_menu(2)\r", True),
             ("rich_members", b"editor_pty.\t"),
