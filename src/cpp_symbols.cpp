@@ -129,59 +129,123 @@ std::vector<std::string> signature_tokens(const std::string& text) {
   return result;
 }
 
-std::string function_signature(clang::ASTContext& context, const clang::FunctionDecl& function,
-                               bool canonical) {
+std::string parameter_spelling(clang::ASTContext& context, clang::QualType type, bool postfix) {
   auto policy = context.getPrintingPolicy();
   policy.SuppressTagKeyword = true;
   policy.FullyQualifiedName = true;
-  std::string result = unversioned_name(function.getQualifiedNameAsString()) + "(";
+  if (!postfix) {
+    return clang::TypeName::getFullyQualifiedType(type, context).getAsString(policy);
+  }
+  if (!type->isReferenceType()) {
+    return "";
+  }
+  const auto referent = type->getPointeeType();
+  const auto qualifiers = referent.getLocalQualifiers();
+  if (qualifiers.empty()) {
+    return "";
+  }
+  const auto* spelling_type = referent.getTypePtr();
+#if LLVM_VERSION_MAJOR < 22
+  while (const auto* elaborated = llvm::dyn_cast<clang::ElaboratedType>(spelling_type)) {
+    spelling_type = elaborated->getNamedType().getTypePtr();
+  }
+#endif
+  // An alias is a valid decl-specifier even when its underlying type is an
+  // array. Direct array/function declarators cannot take cv words here.
+  if (!llvm::isa<clang::TypedefType>(spelling_type) &&
+      (referent->isArrayType() || referent->isFunctionType())) {
+    return "";
+  }
+  // Move only the reference's referent-local qualifiers. Qualifiers behind a
+  // pointer stay there; const Pointer& must not become const Pointee*&.
+  std::string result = qualifiers.getAsString();
+  result += type->isLValueReferenceType() ? " &" : " &&";
+  clang::TypeName::getFullyQualifiedType(referent.getLocalUnqualifiedType(), context)
+      .getAsStringInternal(result, policy);
+  return result;
+}
+
+bool matches_ast_signature(clang::ASTContext& context, const clang::FunctionDecl& function,
+                           const std::vector<std::string>& query) {
+  auto consume = [&](const std::string& text, std::size_t& position) {
+    const auto tokens = signature_tokens(unversioned_name(text));
+    if (tokens.size() > query.size() - position ||
+        !std::equal(tokens.begin(), tokens.end(), query.begin() + position)) {
+      return false;
+    }
+    position += tokens.size();
+    return true;
+  };
+  std::size_t position = 0;
+  if (!consume(function.getQualifiedNameAsString() + "(", position)) {
+    return false;
+  }
   for (unsigned i = 0; i < function.getNumParams(); ++i) {
-    if (i) {
-      result += ", ";
+    const std::string delimiter =
+        i + 1 < function.getNumParams() || function.isVariadic() ? "," : ")";
+    bool matched = false;
+    for (bool canonical : {false, true}) {
+      auto type = function.getParamDecl(i)->getType();
+      if (canonical) {
+        type = context.getCanonicalParamType(type);
+      }
+      for (bool postfix : {false, true}) {
+        const auto spelling = parameter_spelling(context, type, postfix);
+        if (spelling.empty()) {
+          continue;
+        }
+        auto end = position;
+        if (consume(spelling, end) && end < query.size() && query[end] == delimiter) {
+          position = end + (delimiter == "," ? 1 : 0);
+          matched = true;
+          break;
+        }
+      }
+      if (matched) {
+        break;
+      }
     }
-    auto type = function.getParamDecl(i)->getType();
-    if (canonical) {
-      type = context.getCanonicalParamType(type);
+    if (!matched) {
+      return false;
     }
-    result += clang::TypeName::getFullyQualifiedType(type, context).getAsString(policy);
   }
-  if (function.isVariadic()) {
-    result += function.getNumParams() ? ", ..." : "...";
+  if (function.isVariadic() && !consume("...", position)) {
+    return false;
   }
-  result += ")";
+  std::string suffix = ")";
   if (const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(&function)) {
     if (method->isConst()) {
-      result += " const";
+      suffix += " const";
     }
     if (method->isVolatile()) {
-      result += " volatile";
+      suffix += " volatile";
     }
     if (method->getRefQualifier() == clang::RQ_LValue) {
-      result += " &";
+      suffix += " &";
     }
     if (method->getRefQualifier() == clang::RQ_RValue) {
-      result += " &&";
+      suffix += " &&";
     }
   }
-  return unversioned_name(result);
+  if (!consume(suffix, position)) {
+    return false;
+  }
+  if (position == query.size()) {
+    return true;
+  }
+  const auto* prototype = function.getType()->getAs<clang::FunctionProtoType>();
+  return prototype && prototype->isNothrow() && consume("noexcept", position) &&
+         position == query.size();
 }
 
 bool matches_signature(clang::ASTContext& context, const clang::FunctionDecl& function,
                        const std::vector<std::string>& query) {
   // Compare AST type spellings, not a parsed expression: inspection must not
   // execute a call, add helper declarations, or perturb incremental lookup.
-  for (bool canonical : {false, true}) {
-    const auto signature = function_signature(context, function, canonical);
-    if (signature_tokens(signature) == query) {
-      return true;
-    }
-    const auto* prototype = function.getType()->getAs<clang::FunctionProtoType>();
-    if (prototype && prototype->isNothrow() && signature_tokens(signature + " noexcept") == query) {
-      return true;
-    }
+  if (matches_ast_signature(context, function, query)) {
+    return true;
   }
-  // Native demangling supplies the conventional postfix cv spelling too,
-  // e.g. Price const& alongside Clang's const Price& spelling.
+  // Retain native demangled forms, including cv spellings inside pointer types.
   const auto mangled = mangled_name(context, &function);
   return !mangled.empty() && signature_tokens(unversioned_name(llvm::demangle(mangled))) == query;
 }

@@ -379,7 +379,10 @@ keep their literal contents; substitutions belong outside those bodies.
   functions loaded with `%add`. Supply parameter types without parameter names
   or argument expressions; method `const`/`volatile` and reference qualifiers
   distinguish overloads. Declared aliases and canonical parameter type spellings
-  are accepted. Queries read AST metadata without parsing or executing C++ input.
+  may be mixed per parameter. Reference parameters accept prefix/postfix cv
+  spellings for aliases too, preserving pointer-level qualifiers and the
+  distinction between `&` and `&&`. Queries read AST metadata without parsing
+  or executing C++ input.
 - ``%define <symbol> cpp`initializer` `` - provide a missing definition for a
   declared global variable or static data member. Clang supplies the actual
   type and declarator; you supply any valid C++ initializer, including function

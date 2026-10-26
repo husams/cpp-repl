@@ -99,16 +99,19 @@ rollback; fix the environment and use a fresh process.
 Both `%syminfo` and `%info` accept a bare name, a typed signature or a mangled
 name. Typed queries use parameter types without names or return types, plus
 method `const`/`volatile` and `&`/`&&` qualifiers where needed. They accept the
-declaration's printed alias spelling, canonical parameter types and ordinary
-parameter whitespace. Canonical const-reference types accept prefix/postfix
-const forms; those transformations do not apply to every alias spelling.
+declaration's qualified alias spelling, canonical parameter types and ordinary
+parameter whitespace. Alias and canonical spellings can be mixed per parameter;
+reference parameters accept prefix/postfix cv forms for aliases too.
 For example, given aliases `ns::Count = int` and `ns::Ratio = double` in a
 declaration `ns::take(ns::Count, const ns::Ratio&)`, query that printed signature
-or `ns::take(int, double const&)`. `ns::take(ns::Count, ns::Ratio const&)` can
-report no symbol despite denoting the same C++ types. Retry the bare name and
-use one of the supported spellings or its actual mangled name; do not call the
-function to establish its existence. Supported `noexcept` queries must match
-a nonthrowing declaration. This is AST spelling comparison, not arbitrary
+or `ns::take(int, double const&)`; `ns::take(ns::Count, ns::Ratio const&)` and
+mixed forms such as `ns::take(int, ns::Ratio const&)` select the same declaration.
+Qualifiers stay at their original pointer/reference level: a const pointer
+reference is different from a reference to a pointer to const data. Use qualified
+alias names from metadata; unqualified aliases are not automatically resolved.
+On an unsupported spelling, retry the bare name or its actual mangled name;
+do not call the function to establish its existence. Supported `noexcept`
+queries must match a nonthrowing declaration. This is AST spelling comparison, not arbitrary
 semantic normalization of every possible alias or template spelling.
 
 ```text

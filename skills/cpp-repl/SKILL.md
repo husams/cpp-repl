@@ -71,9 +71,9 @@ project history when the project's launch directory is needed.
 Current builds support typed symbol queries for session declarations, including
 `%add`-ed functions. Use parameter types without parameter names, return types
 or argument expressions; include method cv/ref qualifiers to select an overload.
-Declared aliases in the AST's printed spelling and canonical parameter type
-spellings are accepted. Canonical const-reference types support ordinary prefix
-and postfix const forms; a postfix const spelling of a declared alias may miss.
+Declared aliases and canonical parameter type spellings can be mixed per
+parameter. Ordinary prefix/postfix cv spellings on reference parameters work
+for aliases too; pointer-level qualifiers and `&` versus `&&` remain distinct.
 On a typed-query miss, inspect the bare qualified name and use its printed alias
 spelling, canonical types or reported mangled name. Do not infer an absent
 function from a spelling mismatch. This compares AST spellings, never evaluates
