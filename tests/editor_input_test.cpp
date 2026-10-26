@@ -78,5 +78,41 @@ TEST(EditorInputTest, CursorOffsetCountsUnicodeCodepoints) {
   EXPECT_EQ(utf8_byte_offset("a🧪b", 2), 5);
 }
 
+TEST(EditorInputTest, IncludeAngleBracketsPairAtHeaderStart) {
+  for (const std::string text : {"#include ", "  # include\t", "#include_next ", "#include",
+                                 "int x;\n#include ", "#include /* header */ ", "#include \\\n "}) {
+    const auto decision = delimiter_decision(text, text.size(), '<');
+    EXPECT_EQ(decision.action, DelimiterAction::InsertPair) << text;
+    EXPECT_EQ(decision.closing, '>') << text;
+  }
+}
+
+TEST(EditorInputTest, IncludeAngleCloserSkipsExistingMatch) {
+  for (const std::string text :
+       {"#include <>", "#include <nested/header.hpp>", "# include_next <header.hpp>"}) {
+    EXPECT_EQ(delimiter_decision(text, text.size() - 1, '>').action, DelimiterAction::SkipClosing)
+        << text;
+  }
+}
+
+TEST(EditorInputTest, EmptyIncludeAnglePairDeletesTogether) {
+  const std::string text = "#include <>";
+  for (const char32_t key : {char32_t{'\b'}, char32_t{127}}) {
+    EXPECT_EQ(delimiter_decision(text, text.size() - 1, key).action, DelimiterAction::DeletePair);
+  }
+}
+
+TEST(EditorInputTest, AnglePairingRequiresAnIncludeHeaderContext) {
+  for (const std::string text :
+       {"a ", "std::vector", "#if VALUE ", "#define LESS ", "#include HEADER ",
+        "#include \"nested/", "#include <nested/", "#include <header> ", "// #include ",
+        "/*\n#include ", "R\"tag(\n#include ", "#include // comment ", "%shell #include "}) {
+    EXPECT_EQ(delimiter_decision(text, text.size(), '<').action, DelimiterAction::None) << text;
+  }
+  EXPECT_EQ(delimiter_decision("a > b", 2, '>').action, DelimiterAction::None);
+  EXPECT_EQ(delimiter_decision("std::vector<>", 12, '\b').action, DelimiterAction::None);
+  EXPECT_EQ(delimiter_decision("#include \"x>\"", 11, '>').action, DelimiterAction::None);
+}
+
 } // namespace
 } // namespace example

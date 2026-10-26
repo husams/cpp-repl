@@ -60,6 +60,56 @@ bool in_preprocessor_quote(std::string_view code, std::size_t cursor_byte) {
   return quoted;
 }
 
+enum class IncludeContext { None, BeforeHeader, InsideAngleHeader };
+
+IncludeContext include_context(std::string_view code, std::size_t cursor_byte) {
+  const auto prefix = code.substr(0, cursor_byte);
+  const auto lexed = lex_cpp(prefix);
+  if (lexed.tokens.empty() || lexed.tokens.back().kind != TokenKind::Preprocessor ||
+      lexed.tokens.back().end != cursor_byte) {
+    return IncludeContext::None;
+  }
+  const auto directive = prefix.substr(lexed.tokens.back().begin);
+  std::size_t pos = 1; // The lexer has verified the leading '#'.
+  const auto skip_trivia = [&] {
+    while (pos < directive.size()) {
+      if (std::isspace(static_cast<unsigned char>(directive[pos])) != 0) {
+        ++pos;
+      } else if (directive.substr(pos, 2) == "\\\n") {
+        pos += 2;
+      } else if (directive.substr(pos, 2) == "/*") {
+        const auto end = directive.find("*/", pos + 2);
+        if (end == std::string_view::npos) {
+          return false;
+        }
+        pos = end + 2;
+      } else {
+        break;
+      }
+    }
+    return true;
+  };
+  if (!skip_trivia()) {
+    return IncludeContext::None;
+  }
+  const auto name_begin = pos;
+  while (pos < directive.size() &&
+         (std::isalnum(static_cast<unsigned char>(directive[pos])) != 0 || directive[pos] == '_')) {
+    ++pos;
+  }
+  const auto name = directive.substr(name_begin, pos - name_begin);
+  if ((name != "include" && name != "include_next" && name != "import") || !skip_trivia()) {
+    return IncludeContext::None;
+  }
+  if (pos == directive.size()) {
+    return IncludeContext::BeforeHeader;
+  }
+  if (directive[pos] == '<' && directive.find('>', pos + 1) == std::string_view::npos) {
+    return IncludeContext::InsideAngleHeader;
+  }
+  return IncludeContext::None;
+}
+
 struct Payload {
   std::string_view code;
   std::size_t cursor = 0;
@@ -150,11 +200,27 @@ DelimiterDecision delimiter_decision(std::string_view buffer, std::size_t cursor
   }
   const Payload payload = cpp_payload(buffer, cursor_byte);
   const char closing = matching_close(key);
+  if (key == '<') {
+    return include_context(payload.code, payload.cursor) == IncludeContext::BeforeHeader
+               ? DelimiterDecision{DelimiterAction::InsertPair, '>'}
+               : DelimiterDecision{};
+  }
+  if (key == '>') {
+    return payload.cursor < payload.code.size() && payload.code[payload.cursor] == '>' &&
+                   include_context(payload.code, payload.cursor) ==
+                       IncludeContext::InsideAngleHeader
+               ? DelimiterDecision{DelimiterAction::SkipClosing, 0}
+               : DelimiterDecision{};
+  }
   if (key == '\b' || key == 127) {
     if (cursor_byte == 0 || cursor_byte == buffer.size()) {
       return {};
     }
     const char open = buffer[cursor_byte - 1];
+    if (open == '<' && buffer[cursor_byte] == '>' && payload.cursor > 0 &&
+        include_context(payload.code, payload.cursor - 1) == IncludeContext::BeforeHeader) {
+      return {DelimiterAction::DeletePair, 0};
+    }
     const char close = matching_close(static_cast<unsigned char>(open));
     if (close == 0 || buffer[cursor_byte] != close) {
       return {};

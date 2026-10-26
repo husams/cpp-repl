@@ -811,8 +811,9 @@ session's global scope and accesses members using ordinary C++ access rules.
   paths using this build's compilation database.
 - **Paired delimiters**: typing `(`, `[`, `{`, `"` or `'` closes the pair and keeps
   the cursor inside. Typing an existing closer moves past it; Backspace between
-  an empty pair removes both characters. Quotes, escapes, comments, raw strings
-  and numeric separators keep their C++ meaning. Pairing applies to C++ input
+  an empty pair removes both characters. Include directives also pair `<` with
+  `>`; ordinary C++ angle brackets retain normal typing. Quotes, escapes, comments,
+  raw strings and numeric separators keep their C++ meaning. Pairing applies to C++ input
   and embedded C++ command bodies; shell and path operands retain normal typing.
 - History persists in `./.replxx_history`; Ctrl+L clears the screen; Ctrl+D
   (or `%quit`) exits.

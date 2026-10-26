@@ -30,8 +30,11 @@ let input_path = "{arg.root}/src/editor_input.cpp"
 let input = parse input_path
 let pairs = match functionDecl(isDefinition(), hasName("example::delimiter_decision")).bind("f") in input
 print pairs.length
-let lexical_calls = match callExpr(callee(functionDecl(matchesName("(lex_cpp|cpp_payload|in_literal_or_comment)$")))).bind("c") in pairs.f
+let lexical_calls = match callExpr(callee(functionDecl(matchesName("(lex_cpp|cpp_payload|in_literal_or_comment|include_context)$")))).bind("c") in pairs.f
 foreach row in lexical_calls do print row.c.call_site.static_callee_name
+let includes = match functionDecl(isDefinition(), matchesName("include_context$")).bind("f") in input
+let include_lexer = match callExpr(callee(functionDecl(hasName("example::lex_cpp")))).bind("c") in includes.f
+print include_lexer.length
 let repl_path = "{arg.root}/src/repl.cpp"
 let repl = parse repl_path
 let frontend = match functionDecl(isDefinition(), matchesName("(cpp_completions|cpp_hints|on_delimiter)$")).bind("f") in repl

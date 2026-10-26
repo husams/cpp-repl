@@ -60,8 +60,13 @@ with tempfile.TemporaryDirectory() as cwd:
         ("quoted_include_value", b"editor_header_value\r", True),
         ("middle_include", include_line + back_to_filename + b"\t\x05\r", True),
         ("middle_include_value", b"editor_header_value\r", True),
-        ("system_include", b"#include <system_he\t>\r", True),
+        ("angle_open", b"#include <"),
+        ("system_include", b"system_he\t>\r", True),
         ("system_include_value", b"editor_system_value\r", True),
+        ("auto_closed_include", b"#include <system_he\t\r", True),
+        ("include_pair_backspace", b'#include <\x7f"nested/beta_he\t\r', True),
+        ("less_than", b"21 < 42\r", True),
+        ("greater_than", b"42 > 21\r", True),
         ("quit", b"%quit\r"),
     ]
     out, status = session(binary, cwd, steps, args=("-I" + str(headers),))
@@ -104,7 +109,16 @@ with tempfile.TemporaryDirectory() as cwd:
     check("mid-filename completion replaces the whole remaining path token",
           "error:" not in plain(out["middle_include"]) and
           "(int) 73" in plain(out["middle_include_value"]))
-    check("angle include completes a header path", "(int) 74" in plain(out["system_include_value"]))
+    check("angle include pairs and completes without duplicating its closer",
+          "<>" in plain(out["angle_open"]) and
+          "error:" not in plain(out["system_include"]) and
+          "(int) 74" in plain(out["system_include_value"]))
+    check("angle include submits with its automatic closer",
+          "error:" not in plain(out["auto_closed_include"]))
+    check("Backspace removes both include angle brackets",
+          "error:" not in plain(out["include_pair_backspace"]))
+    for key in ("less_than", "greater_than"):
+        check(key + " remains an ordinary comparison", "(bool) true" in plain(out[key]))
     check("editor session exits normally", status == 0)
     if helpers["failures"]:
         for key, value in out.items():

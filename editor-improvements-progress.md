@@ -181,3 +181,18 @@ pass clang-format and `git diff --check` passes. The expanded replxx patch appli
 cleanly to a fresh pinned checkout and its second application is idempotent.
 The extended CTK script verifies the embedded analysis, context, pairing and
 frontend hint/edit paths (`build/editor-pairs-grounding.log`).
+
+### Include angle pairs (2026-10-26)
+
+- Added include-only `<>` insertion with the cursor between the brackets,
+  existing `>` skipping, and empty-pair Backspace deletion.
+- Directive detection uses the C++ lexer and handles whitespace, block comments,
+  continuations, and `include_next`; ordinary comparisons, templates, comments,
+  quoted paths, macro operands, and shell command text do not gain angle pairs.
+- Added four helper regression tests (three failed before implementation), plus
+  real terminal coverage of header completion, automatic closers, closer skipping,
+  pair deletion, and ordinary comparisons.
+- Validation: build passed without warnings; all 16 focused editor input and
+  terminal tests passed in 22.09 seconds (`build/include-pairs-focused.log`).
+  CTK verified three calls into include-context detection and its lexer call
+  (`build/editor-include-pairs-grounding.log`).

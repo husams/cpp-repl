@@ -380,7 +380,7 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
   // Custom binding: Enter inserts a newline while the C++ input is incomplete.
   rx.bind_key(Replxx::KEY::ENTER, [&rx](char32_t code) { return on_enter(rx, code); });
 
-  for (const char32_t key : {'(', ')', '[', ']', '{', '}', '"', '\''}) {
+  for (const char32_t key : {'(', ')', '[', ']', '{', '}', '"', '\'', '<', '>'}) {
     rx.bind_key(key, [&rx, key](char32_t) { return on_delimiter(rx, key); });
   }
   rx.bind_key(Replxx::KEY::BACKSPACE + 0, [&rx](char32_t) { return on_delimiter(rx, '\b'); });
