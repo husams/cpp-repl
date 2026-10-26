@@ -43,10 +43,16 @@ its five unrelated modified files.
 - [x] Retain parameter names and types for embedded, nested and multiple calls.
 - [x] Omit return annotations when more code follows the call.
 - [x] Verify idle caching, cursor movement and the `keep_hints` option.
-- [ ] Review and deploy the verified fix to `linux-dev`.
+- [x] Review and deploy the verified fix to `linux-dev`.
 
 The enhanced terminal regression is green, as are option, snippet, interaction
 and typing-latency checks. CTK traces call enumeration back to the lexical slot
 model and signature lookup to embedded Clang. Independent review approved the
 implementation and checked 1, 10 and 30 calls without errors or repeated execution.
 The complete macOS suite passed 312/312 in 162.52 seconds on the final source.
+The Linux suite passed 310/310 in 166.98 seconds. Source revision `d3901d3` is
+deployed under `~/.local/share/cpp-repl/releases/20261026-expression-hints`;
+`~/.local/bin/cpp-repl` is the stable launch path. The prior executable is
+preserved in the new release, and the primary checkout remains unchanged.
+Option and enhanced committed-hint terminal suites passed against the installed
+executable, whose SHA-256 matches the staged tested binary.

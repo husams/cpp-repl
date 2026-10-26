@@ -1,11 +1,11 @@
 # Linux dev deployment
 
 Host: `linux-dev`, user `husam`, x86-64, LLVM/Clang 21.1.8.
-Source: `fc076f1` on `codex/editor-committed-hints`, including the earlier
-large-session performance fix and LLVM 21 compatibility guards.
+Source: `d3901d3` on `codex/editor-committed-hints`, including the earlier
+session options, large-session performance fix and LLVM 21 compatibility guards.
 
 Release directory:
-`/home/husam/.local/share/cpp-repl/releases/20261026-session-options`.
+`/home/husam/.local/share/cpp-repl/releases/20261026-expression-hints`.
 Installed command: `/home/husam/.local/bin/cpp-repl`.
 The previous installed executable is retained as `previous-cpp-repl` in the
 release directory. Remote source and build files are isolated from existing
@@ -13,13 +13,16 @@ checkouts; unrelated changes in the primary macOS checkout remain untouched.
 
 Validation:
 
-- Linux full suite: 310/310 passed in 166.69 seconds, including real-terminal
+- Linux full suite: 310/310 passed in 166.98 seconds, including real-terminal
   large-header completion, semantic coloring, inline hints and argument navigation.
-- macOS full suite: 312/312 passed in 160.28 seconds.
+- macOS full suite: 312/312 passed in 162.52 seconds.
 - Installed-release smoke: LLVM 21.1.8 banner, both options defaulting to true,
   a semicolon-terminated call printing 30, and a muted call still executing once.
 - Both option and committed-hint terminal suites passed against the installed
   executable, including blank slots, clean history and final gray annotations.
+  Embedded, nested and multiple calls keep parameter names/types; return
+  annotations are omitted when expression code follows the call. Methods,
+  earlier-argument cursor edits, comments and strings are covered as well.
 - Dynamic dependencies resolve without missing libraries.
 - Installed and staged executables have identical SHA-256 checksums; source
   files were verified against the committed source before installation.
