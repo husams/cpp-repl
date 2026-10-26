@@ -492,6 +492,12 @@ std::string overload_menu_label(const CompletionItem& item) {
 
 bool open_overload_menu(CppInterpreter& cpp, const std::string& text, std::size_t cursor,
                         const SelectedSignatures& selected, ActiveOverloadMenu& menu) {
+  // Command lines have their own completion parser, including CPP payloads
+  // embedded in commands. Let that route handle them before querying C++ on
+  // the raw command text for overload-menu candidates.
+  if (is_command_line(text)) {
+    return false;
+  }
   std::size_t context = cursor;
   std::size_t anchor = 0;
   std::size_t prefix_begin = cursor;

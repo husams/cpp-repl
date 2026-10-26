@@ -142,6 +142,8 @@ with tempfile.TemporaryDirectory() as cwd:
         ("many_open", b"many_pick_with_a_really_long_name("),
         ("many_menu", b"\t"),
         ("many_cancel", b"\x03", True),
+        ("command_class_prefix", b"%class menu_pi\t"),
+        ("command_class_cancel", b"\x03", True),
         ("history", b"\x1b[A\x1b[B"),
         ("quit", b"%quit\r"),
     ])
@@ -205,6 +207,9 @@ with tempfile.TemporaryDirectory() as cwd:
           any(line.startswith("> ") for line in menu_rows))
     check("long menu rows are clipped with an ellipsis",
           "…" in plain(out["many_menu"]))
+    check("class-name command completion does not open a C++ overload picker",
+          "> menu_pick(int first)" not in plain(out["command_class_prefix"]) and
+          "> menu_pick(int first, int second)" not in plain(out["command_class_prefix"]))
     saved = (Path(cwd) / ".replxx_history").read_text()
     check("menus and parameter annotations never enter history",
           "menu_pick(first:" not in saved and "-> int" not in saved and

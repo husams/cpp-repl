@@ -65,6 +65,11 @@ let inline_api = match callExpr(callee(functionDecl(matchesName("(set_inline_dis
 foreach row in inline_api do print row.c.call_site.static_callee_name
 let menu_execution = match callExpr(callee(cxxMethodDecl(ofClass(hasName("example::CppInterpreter")), hasName("execute")))).bind("c") in frontend.f
 print menu_execution.length
+// Meta-commands retain their dedicated completion dispatcher instead of opening
+// a C++ overload menu for a class name, option, or filesystem argument.
+let menu_entry = match functionDecl(isDefinition(), matchesName("open_overload_menu$")).bind("f") in repl
+let menu_commands = match callExpr(callee(functionDecl(hasName("example::is_command_line")))).bind("c") in menu_entry.f
+print menu_commands.length
 // Embedded calls retain argument annotations, but a return annotation must not
 // split a larger expression. Repaints reuse only selected signature metadata.
 let call_frames = match functionDecl(isDefinition(), matchesName("completed_calls$")).bind("f") in repl
