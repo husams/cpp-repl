@@ -886,6 +886,34 @@ std::string info_field(const std::string& text, const std::string& label) {
   return "";
 }
 
+TEST(IncludeRecovery, AddedNamespaceAndCompiledCallerSurviveRejectedInputs) {
+  SourceDir dir;
+  const auto header = dir.write("billing.hpp", "#pragma once\nnamespace retained_project { struct "
+                                               "Price { int quote() const { return 70; } }; "
+                                               "extern int fee; int invoice(const Price&); }\n");
+  const auto source =
+      dir.write("billing.cpp", "#include \"billing.hpp\"\nnamespace retained_project { "
+                               "int invoice(const Price& item) { return item.quote() + fee; } }\n");
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->add_source(header).ok);
+  ASSERT_TRUE(cpp->define_variable("retained_project::fee", "5", error)) << error;
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  ASSERT_TRUE(
+      cpp->execute("retained_project::Price retained_price; "
+                   "int retained_caller() { return retained_project::invoice(retained_price); }"));
+  for (const auto* rejected : {"namespace retained_project { int broken = ; }",
+                               "namespace retained_project { int missing(); } "
+                               "int failed_result = retained_project::missing();"}) {
+    EXPECT_FALSE(cpp->execute(rejected));
+    EXPECT_EQ(cpp->evaluate("retained_project::fee"), "(int) 5\n");
+    EXPECT_EQ(cpp->evaluate("retained_price.quote()"), "(int) 70\n");
+    EXPECT_EQ(cpp->evaluate("retained_project::invoice(retained_price)"), "(int) 75\n");
+    EXPECT_EQ(cpp->evaluate("retained_caller()"), "(int) 75\n");
+  }
+}
+
 TEST_F(CppInterpreterTest, SymbolInfoShowsOverloadsAndMangledLookup) {
   ASSERT_TRUE(cpp_->execute("namespace info_demo { int add(int a, int b); }"));
   ASSERT_TRUE(cpp_->execute("namespace info_demo { int add(int a, int b) { return a+b; } "
@@ -912,6 +940,39 @@ TEST_F(CppInterpreterTest, SymbolInfoShowsOverloadsAndMangledLookup) {
   while (std::getline(lines, line)) {
     if (line.compare(0, 2, "  ") == 0) EXPECT_EQ(line.find(" : "), 13u) << line;
   }
+}
+
+TEST_F(CppInterpreterTest, SymbolInfoSelectsTypedSignaturesWithoutExecuting) {
+  ASSERT_TRUE(cpp_->execute("namespace typed_info { "
+                            "using Index = long; struct Price {}; int calls = 0; "
+                            "int subtotal(Price) { ++calls; return 1; } "
+                            "int pick(int) { ++calls; return 2; } "
+                            "double pick(double) { ++calls; return 3; } "
+                            "int reference(const Price&) { ++calls; return 4; } "
+                            "int index(Index) { ++calls; return 5; } "
+                            "struct Probe { int get() & { return 6; } "
+                            "int get() const & { return 7; } int get() && { return 8; } }; }"));
+  std::string error;
+  for (const auto* query :
+       {"typed_info::subtotal(typed_info::Price)", "::typed_info::subtotal(typed_info::Price)",
+        "typed_info::pick( int )", "typed_info::pick(double)",
+        "typed_info::reference(const typed_info::Price &)",
+        "typed_info::reference(typed_info::Price const&)", "typed_info::index(typed_info::Index)",
+        "typed_info::index(long)", "typed_info::Probe::get() &", "typed_info::Probe::get() const &",
+        "typed_info::Probe::get() &&"}) {
+    const auto info = cpp_->symbol_info(query, error);
+    ASSERT_TRUE(info.has_value()) << query << ": " << error;
+    EXPECT_EQ(info->find("matches for"), std::string::npos) << *info;
+    EXPECT_EQ(info_field(*info, "Definition"), "yes") << *info;
+  }
+  const auto integer = cpp_->symbol_info("typed_info::pick(int)", error);
+  const auto floating = cpp_->symbol_info("typed_info::pick(double)", error);
+  ASSERT_TRUE(integer && floating);
+  EXPECT_NE(info_field(*integer, "Mangled"), info_field(*floating, "Mangled"));
+  EXPECT_FALSE(cpp_->symbol_info("typed_info::pick(1)", error));
+  EXPECT_FALSE(cpp_->symbol_info("typed_info::pick(short)", error));
+  EXPECT_FALSE(cpp_->symbol_info("typed_info::Probe::get() const &&", error));
+  EXPECT_EQ(cpp_->evaluate("typed_info::calls"), "(int) 0\n");
 }
 
 TEST_F(CppInterpreterTest, SymbolInfoDescribesVariablesTypesAndFields) {

@@ -49,7 +49,7 @@ std::vector<std::string> symbol_reference_sites(clang::ASTContext& context,
                                                 const std::string& mangled);
 
 // Read declarations without parsing or executing an expression. A name can
-// identify several overloads; a mangled name identifies a single declaration.
+// identify several overloads; a typed signature or mangled name selects one.
 std::vector<SymbolDescription> describe_symbols(clang::ASTContext& context,
                                                 std::string_view name);
 std::vector<std::string> user_symbol_names(clang::ASTContext& context);

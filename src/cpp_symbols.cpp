@@ -1,5 +1,4 @@
 #include "cpp_symbols.hpp"
-#include "definition_shadowing.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -13,11 +12,15 @@
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/Mangle.h"
 #include "clang/AST/PrettyPrinter.h"
+#include "clang/AST/QualTypeNames.h"
 #include "clang/AST/RecordLayout.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/SourceManager.h"
-#include "llvm/Support/raw_ostream.h"
+#include "cpp_lexer.hpp"
+#include "definition_shadowing.hpp"
 #include "llvm/Config/llvm-config.h"
+#include "llvm/Demangle/Demangle.h"
+#include "llvm/Support/raw_ostream.h"
 
 namespace example {
 namespace {
@@ -112,6 +115,75 @@ std::string linkage_name(const clang::NamedDecl& decl) {
       return "unknown";
   }
   return "unknown";
+}
+
+std::vector<std::string> signature_tokens(const std::string& text) {
+  std::vector<std::string> result;
+  for (const auto& token : lex_cpp(text).tokens) {
+    auto word = text.substr(token.begin, token.end - token.begin);
+    if (std::all_of(word.begin(), word.end(), [](unsigned char c) { return std::isspace(c); })) {
+      continue;
+    }
+    result.push_back(std::move(word));
+  }
+  return result;
+}
+
+std::string function_signature(clang::ASTContext& context, const clang::FunctionDecl& function,
+                               bool canonical) {
+  auto policy = context.getPrintingPolicy();
+  policy.SuppressTagKeyword = true;
+  policy.FullyQualifiedName = true;
+  std::string result = unversioned_name(function.getQualifiedNameAsString()) + "(";
+  for (unsigned i = 0; i < function.getNumParams(); ++i) {
+    if (i) {
+      result += ", ";
+    }
+    auto type = function.getParamDecl(i)->getType();
+    if (canonical) {
+      type = context.getCanonicalParamType(type);
+    }
+    result += clang::TypeName::getFullyQualifiedType(type, context).getAsString(policy);
+  }
+  if (function.isVariadic()) {
+    result += function.getNumParams() ? ", ..." : "...";
+  }
+  result += ")";
+  if (const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(&function)) {
+    if (method->isConst()) {
+      result += " const";
+    }
+    if (method->isVolatile()) {
+      result += " volatile";
+    }
+    if (method->getRefQualifier() == clang::RQ_LValue) {
+      result += " &";
+    }
+    if (method->getRefQualifier() == clang::RQ_RValue) {
+      result += " &&";
+    }
+  }
+  return unversioned_name(result);
+}
+
+bool matches_signature(clang::ASTContext& context, const clang::FunctionDecl& function,
+                       const std::vector<std::string>& query) {
+  // Compare AST type spellings, not a parsed expression: inspection must not
+  // execute a call, add helper declarations, or perturb incremental lookup.
+  for (bool canonical : {false, true}) {
+    const auto signature = function_signature(context, function, canonical);
+    if (signature_tokens(signature) == query) {
+      return true;
+    }
+    const auto* prototype = function.getType()->getAs<clang::FunctionProtoType>();
+    if (prototype && prototype->isNothrow() && signature_tokens(signature + " noexcept") == query) {
+      return true;
+    }
+  }
+  // Native demangling supplies the conventional postfix cv spelling too,
+  // e.g. Price const& alongside Clang's const Price& spelling.
+  const auto mangled = mangled_name(context, &function);
+  return !mangled.empty() && signature_tokens(unversioned_name(llvm::demangle(mangled))) == query;
 }
 
 SymbolDescription describe(clang::ASTContext& context, const clang::NamedDecl* decl) {
@@ -301,8 +373,17 @@ std::vector<SymbolDescription> describe_symbols(clang::ASTContext& context,
   std::set<const clang::Decl*> seen;
   const bool mangled_query =
       query.substr(0, 2) == "_Z" || query.substr(0, 3) == "__Z";
+  const bool signature_query = query.find('(') != std::string_view::npos;
+  const auto signature =
+      signature_query ? signature_tokens(std::string(query)) : std::vector<std::string>{};
   for (const auto* decl : all) {
-    bool match = unversioned_name(decl->getQualifiedNameAsString()) == query;
+    const auto name = unversioned_name(decl->getQualifiedNameAsString());
+    bool match = name == query;
+    if (!match && signature_query && query.substr(0, name.size()) == name) {
+      if (const auto* function = llvm::dyn_cast<clang::FunctionDecl>(decl)) {
+        match = matches_signature(context, *function, signature);
+      }
+    }
     if (!match && mangled_query) {
       const auto symbol = mangled_name(context, decl);
       match = !symbol.empty() && (symbol == query
