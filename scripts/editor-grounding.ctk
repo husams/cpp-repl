@@ -50,7 +50,7 @@ let include_lexer = match callExpr(callee(functionDecl(hasName("example::lex_cpp
 print include_lexer.length
 let repl_path = "{arg.root}/src/repl.cpp"
 let repl = parse repl_path
-let frontend = match functionDecl(isDefinition(), matchesName("(cpp_completions|cpp_hints|displayed_call|completed_calls|signature_for_call|open_overload_menu|overload_menu_label|is_trailing_call|on_delimiter|on_enter|configure)$")).bind("f") in repl
+let frontend = match functionDecl(isDefinition(), matchesName("(cpp_completions|cpp_hints|completed_calls|completed_call_open_offsets|enter_signature|signature_for_call|open_overload_menu|overload_menu_label|is_trailing_call|on_delimiter|on_enter|configure)$")).bind("f") in repl
 foreach row in frontend do print row.f.qualified_name
 let deferred = match callExpr(callee(functionDecl(matchesName("(set_idle_highlighter_callback|set_hint_delay|editor_wants_more_input)$")))).bind("c") in frontend.f
 foreach row in deferred do print row.c.call_site.static_callee_name
@@ -70,6 +70,11 @@ print menu_execution.length
 let menu_entry = match functionDecl(isDefinition(), matchesName("open_overload_menu$")).bind("f") in repl
 let menu_commands = match callExpr(callee(functionDecl(hasName("example::is_command_line")))).bind("c") in menu_entry.f
 print menu_commands.length
+// Enter checks every completed call, including those followed by expression
+// code, before allowing missing required or nontrailing default slots to submit.
+let enter = match functionDecl(isDefinition(), matchesName("on_enter$")).bind("f") in repl
+let enter_frames = match callExpr(callee(functionDecl(matchesName("(completed_call_open_offsets|editor_call_at_cursor)$")))).bind("c") in enter.f
+foreach row in enter_frames do print row.c.call_site.static_callee_name
 // Embedded calls retain argument annotations, but a return annotation must not
 // split a larger expression. Repaints reuse only selected signature metadata.
 let call_frames = match functionDecl(isDefinition(), matchesName("completed_calls$")).bind("f") in repl

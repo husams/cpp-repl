@@ -12,7 +12,7 @@ session, plain, check = (helpers[key] for key in ("session", "plain", "check"))
 binary = os.path.abspath(sys.argv[1])
 with tempfile.TemporaryDirectory() as cwd:
     out, status = session(binary, cwd, [
-        ("definitions", b"int snippet_effects = 0; int snippet_add(int x, int y) { ++snippet_effects; return x + y; } int snippet_one(int value) { return value + 1; } int snippet_default(int x, int y = 5) { return x + y; } int snippet_zero() { return 7; } int snippet_text(const char* text, int value) { return value; } struct SnippetObject { int method(int amount, int multiplier) const { return 10 + amount * multiplier; } int zero() const { return 7; } }; SnippetObject snippet_obj; template<class T, class U> int snippet_template(T, U) { return 20; }\r", True),
+        ("definitions", b"int snippet_effects = 0; int snippet_add(int x, int y) { ++snippet_effects; return x + y; } int snippet_one(int value) { return value + 1; } int snippet_default(int x, int y = 5) { return x + y; } int default_gap(int a = 1, int b = 2) { return a + b; } int req_gap(int a, int b) { return a + b; } int req_tri(int a, int b, int c) { return a + b + c; } int snippet_zero() { return 7; } int snippet_text(const char* text, int value) { return value; } struct SnippetObject { int method(int amount, int multiplier) const { return 10 + amount * multiplier; } int zero() const { return 7; } }; SnippetObject snippet_obj; template<class T, class U> int snippet_template(T, U) { return 20; }\r", True),
         ("overload_definitions", b"int snippet_over(int first) { return first; } int snippet_over(int first, int second) { return first + second; }\r", True),
         ("variable_definitions", b"int snippet_x = 20; int snippet_x_other = 3;\r", True),
         ("empty_call", b"snippet_ad\t"),
@@ -32,6 +32,16 @@ with tempfile.TemporaryDirectory() as cwd:
         ("skip_empty", b"snippet_ad\t\t22\x1b[Z20\x05\r", True),
         ("default_hint", b"snippet_def\t"),
         ("default_value", b"37\r", True),
+        ("default_gap", b"default_ga\t\t2\r"),
+        ("default_gap_fill", b"1\r", True),
+        ("default_gap_empty_call", b"default_gap()\r", True),
+        ("default_gap_one_argument", b"default_gap(1)\r", True),
+        ("required_embedded_gap", b"req_ga\t\t2\x05+20;\r"),
+        ("required_embedded_fill", b"1\r", True),
+        ("required_embedded_multiple", b"req_gap(, 2)+snippet_one(1)\r"),
+        ("required_embedded_multiple_fill", b"1\r", True),
+        ("required_embedded_three_args", b"req_tri(1,2)+20;\r"),
+        ("required_embedded_three_args_fill", b"3\r", True),
         ("default_tab_value", b"snippet_def\t37\t\r", True),
         ("default_tab_exit_value", b"snippet_def\t37\t\t\r", True),
         ("zero_hint", b"snippet_zer\t"),
@@ -76,6 +86,25 @@ with tempfile.TemporaryDirectory() as cwd:
                 "nested_value", "nested_completion", "overload_value", "nested_overload", "variable_argument",
                 "string_value", "template_value", "unicode_value", "ordinary_comma"):
         check(key + " evaluates the intended arguments", "(int) 42" in plain(out[key]))
+    check("Enter returns to a nontrailing default gap instead of submitting it",
+          "error:" not in plain(out["default_gap"]) and
+          "default_gap(, 2)" in plain(out["default_gap"]) and
+          "(int) 3" in plain(out["default_gap_fill"]))
+    check("trailing defaults remain optional in empty and one-argument calls",
+          "error:" not in plain(out["default_gap_empty_call"]) and
+          "(int) 3" in plain(out["default_gap_empty_call"]) and
+          "error:" not in plain(out["default_gap_one_argument"]) and
+          "(int) 3" in plain(out["default_gap_one_argument"]))
+    check("Enter returns to a required gap inside a larger expression",
+          "error:" not in plain(out["required_embedded_gap"]) and
+          "req_gap(, 2)+20;" in plain(out["required_embedded_gap"]) and
+          "(int) 23" in plain(out["required_embedded_fill"]))
+    check("a later valid call does not hide an earlier required gap",
+          "error:" not in plain(out["required_embedded_multiple"]) and
+          "(int) 5" in plain(out["required_embedded_multiple_fill"]))
+    check("Enter restores a missing third argument in an embedded call",
+          "error:" not in plain(out["required_embedded_three_args"]) and
+          "(int) 26" in plain(out["required_embedded_three_args_fill"]))
     for key in ("zero_value", "zero_method"):
         check(key + " has no argument placeholders", "(int) 7" in plain(out[key]))
     check("zero-argument calls retain return type hints",

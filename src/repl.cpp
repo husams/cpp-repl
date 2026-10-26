@@ -421,6 +421,43 @@ const CompletionItem* selected_signature(const CppInterpreter::Completions& resu
   return result.signature_items.empty() ? nullptr : &result.signature_items.front();
 }
 
+const CompletionItem* enter_signature(const CppInterpreter::Completions& result,
+                                      const EditorCall& call, const std::string& identity) {
+  const auto* selected = selected_signature(result, identity);
+  const bool empty_call =
+      call.arguments.size() == 1 && call.arguments.front().begin == call.arguments.front().end;
+  const bool has_other_empty_slot =
+      std::any_of(call.arguments.begin(), call.arguments.end(),
+                  [](const auto& argument) { return argument.begin == argument.end; }) &&
+      !empty_call;
+  if (has_other_empty_slot) {
+    return selected;
+  }
+
+  const std::size_t supplied_arguments = empty_call ? 0 : call.arguments.size();
+  const CompletionItem* compatible = nullptr;
+  for (const auto& signature : result.signature_items) {
+    if (supplied_arguments > signature.parameters.size() &&
+        (signature.parameters.empty() || !signature.parameters.back().is_pack)) {
+      continue;
+    }
+    bool accepts_omitted_arguments = true;
+    for (std::size_t i = supplied_arguments; i < signature.parameters.size(); ++i) {
+      if (!signature.parameters[i].has_default && !signature.parameters[i].is_pack) {
+        accepts_omitted_arguments = false;
+        break;
+      }
+    }
+    if (!accepts_omitted_arguments) {
+      continue;
+    }
+    if (!compatible || signature.identity == (selected ? selected->identity : std::string())) {
+      compatible = &signature;
+    }
+  }
+  return compatible ? compatible : selected;
+}
+
 struct CachedSignature {
   std::string identity;
   std::size_t context = 0;
@@ -693,29 +730,21 @@ std::string parameter_label(const CompletionParameter& parameter, std::size_t in
   return parameter.name.empty() ? "arg" + std::to_string(index + 1) : parameter.name;
 }
 
-std::optional<EditorCall> displayed_call(const std::string& text, std::size_t cursor) {
-  if (auto call = editor_call_at_cursor(text, cursor)) {
-    return call;
-  }
-  // Keep a completed trailing call annotated when the caret moves past ')' or
-  // ';'. The semantic request must still end inside the call, before its ')'.
-  const auto prefix = std::string_view(text).substr(0, cursor);
-  const auto tokens = lex_cpp(prefix).tokens;
-  auto last = tokens.rbegin();
-  auto skip_comments = [&] {
-    while (last != tokens.rend() && last->kind == TokenKind::Comment) {
-      ++last;
+std::vector<std::size_t> completed_call_open_offsets(const std::string& text) {
+  std::vector<std::size_t> offsets;
+  for (const Token& token : lex_cpp(text).tokens) {
+    if (text.compare(token.begin, token.end - token.begin, "(") != 0) {
+      continue;
     }
-  };
-  skip_comments();
-  if (last != tokens.rend() && prefix.substr(last->begin, last->end - last->begin) == ";") {
-    ++last;
-    skip_comments();
+    auto call = editor_call_at_cursor(text, token.end);
+    if (!call || call->open != token.begin || !call->has_close) {
+      continue;
+    }
+    offsets.push_back(token.begin);
   }
-  if (last == tokens.rend() || prefix.substr(last->begin, last->end - last->begin) != ")") {
-    return std::nullopt;
-  }
-  return editor_call_at_cursor(text, last->begin);
+  std::sort(offsets.begin(), offsets.end(), std::greater<>());
+  offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end());
+  return offsets;
 }
 
 // Enter: submit commands and complete C++; otherwise keep editing in the same
@@ -726,12 +755,17 @@ Replxx::ACTION_RESULT on_enter(Replxx& rx, CppInterpreter& cpp,
   std::string text = state.text();
   std::size_t cursor = utf8_byte_offset(text, state.cursor_position());
   if (is_cpp_editor_payload(text, cursor) && !is_command_line(text)) {
-    auto call = displayed_call(text, cursor);
-    const std::size_t call_cursor = call ? std::min(cursor, call->close) : cursor;
-    if (call && call->has_close) {
+    const auto call_opens = completed_call_open_offsets(text);
+    for (std::size_t call_open : call_opens) {
+      auto call = editor_call_at_cursor(text, call_open + 1);
+      if (!call || call->open != call_open || !call->has_close) {
+        continue;
+      }
+      const std::size_t call_cursor =
+          cursor > call->open && cursor <= call->close ? cursor : call->close;
       const auto completion = completions_at_cursor(cpp, text, call_cursor);
       const auto* signature =
-          selected_signature(completion, selected_identity_for(*call, *selected));
+          enter_signature(completion, *call, selected_identity_for(*call, *selected));
       while (signature != nullptr && call->arguments.size() > 1) {
         const std::size_t last = call->arguments.size() - 1;
         if (last >= signature->parameters.size() || !signature->parameters[last].has_default ||
@@ -752,21 +786,26 @@ Replxx::ACTION_RESULT on_enter(Replxx& rx, CppInterpreter& cpp,
         cursor = cursor > erase_begin ? std::max(erase_begin, cursor - removed) : cursor;
         rx.set_state(Replxx::State(
             text.c_str(), static_cast<int>(utf8_length(std::string_view(text).substr(0, cursor)))));
-        call = editor_call_at_cursor(text, std::min(cursor, text.size()));
-        if (!call) {
-          call = editor_call_at_cursor(text, erase_begin);
-        }
+        call = editor_call_at_cursor(text, call_open + 1);
         if (!call || !call->has_close) {
           break;
         }
       }
       if (!call || !call->has_close) {
-        return rx.invoke(Replxx::ACTION::COMMIT_LINE, code);
+        continue;
       }
       for (std::size_t i = 0; signature != nullptr && i < signature->parameters.size(); ++i) {
         const auto& parameter = signature->parameters[i];
-        if (parameter.has_default || parameter.is_pack) {
+        if (parameter.is_pack) {
           continue;
+        }
+        bool later_argument_present = false;
+        for (std::size_t later = i + 1; later < call->arguments.size(); ++later) {
+          later_argument_present =
+              later_argument_present || call->arguments[later].begin != call->arguments[later].end;
+        }
+        if (parameter.has_default && !later_argument_present) {
+          continue; // Trailing optional parameters can keep their defaults.
         }
         std::size_t gap = call->close;
         bool append_separator = false;
