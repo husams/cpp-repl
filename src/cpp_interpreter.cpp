@@ -33,6 +33,7 @@
 #include "cpp_lexer.hpp"
 #include "cpp_symbols.hpp"
 #include "definition_shadowing.hpp"
+#include "debugger.hpp"
 #include "interpreter_symbols.hpp"
 #include "interpreter_undo.hpp"
 #include "library_manager.hpp"
@@ -290,7 +291,7 @@ CppInterpreter::CppInterpreter(std::unique_ptr<clang::Interpreter> interp,
 CppInterpreter::~CppInterpreter() = default;
 
 std::unique_ptr<CppInterpreter> CppInterpreter::create(
-    const std::vector<std::string>& args, std::string& error) {
+    const std::vector<std::string>& args, std::string& error, bool debug_info) {
   auto database = ProjectCompilationDatabase::load(error);
   if (!database) return nullptr;
   std::error_code cwd_error;
@@ -299,8 +300,11 @@ std::unique_ptr<CppInterpreter> CppInterpreter::create(
     error = cwd_error.message();
     return nullptr;
   }
-  const auto flags = normalize_compile_flags(args, directory.string(), error);
+  auto flags = normalize_compile_flags(args, directory.string(), error);
   if (!flags) return nullptr;
+  // Debug sessions retain locals and statement boundaries, including when the
+  // caller or compilation database requested optimization or stripped symbols.
+  if (debug_info) flags->insert(flags->end(), {"-O0", "-g", "-fno-limit-debug-info"});
   static std::once_flag init;
   std::call_once(init, [] {
     llvm::InitializeNativeTarget();
@@ -330,8 +334,10 @@ std::unique_ptr<CppInterpreter> CppInterpreter::create(
   }
   auto builder = std::make_unique<llvm::orc::LLJITBuilder>();
   builder->setJITTargetMachineBuilder(std::move(*target));
-  builder->setPrePlatformSetup([](llvm::orc::LLJIT& jit) {
-    llvm::consumeError(llvm::orc::enableDebuggerSupport(jit));
+  builder->setPrePlatformSetup([debug_info](llvm::orc::LLJIT& jit) -> llvm::Error {
+    auto result = llvm::orc::enableDebuggerSupport(jit);
+    if (debug_info) return result;
+    llvm::consumeError(std::move(result));
     return llvm::Error::success();
   });
   // The builder retains the callback: do not capture a stack reference.
@@ -368,8 +374,17 @@ std::unique_ptr<CppInterpreter> CppInterpreter::create(
     return nullptr;
   }
 #endif
-  return std::unique_ptr<CppInterpreter>(
+  auto result = std::unique_ptr<CppInterpreter>(
       new CppInterpreter(std::move(*interp), **jit, *flags, std::move(database)));
+  if (debug_info) {
+    result->debug_sources_ = DebugSources::create(error);
+    if (!result->debug_sources_) return nullptr;
+  }
+  return result;
+}
+
+std::string CppInterpreter::debug_source_directory() const {
+  return debug_sources_ ? debug_sources_->directory() : "";
 }
 
 // ParseAndExecute(), split up so a failed Execute can be undone.
@@ -421,7 +436,16 @@ bool CppInterpreter::run_raw(const std::string& code, clang::Value& value,
   auto capture_scope = llvm::make_scope_exit(
       [&] { capture_semicolon_expressions(*interp_->getCompilerInstance(), false); });
 #endif
-  llvm::Expected<clang::PartialTranslationUnit&> ptu = parse_input(*interp_, code);
+  std::string debug_input;
+  if (debug_sources_) {
+    std::string error;
+    if (!debug_sources_->prepare(code, debug_input, error)) {
+      llvm::errs() << "error: " << error << '\n';
+      return false;
+    }
+  }
+  llvm::Expected<clang::PartialTranslationUnit&> ptu =
+      parse_input(*interp_, debug_sources_ ? debug_input : code);
   if (!ptu) return report(ptu.takeError());
   if (ptu->TheModule) {
     const auto instrumented = hooks_.instrument(*ptu);

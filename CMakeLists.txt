@@ -80,7 +80,7 @@ if(REPLXX_NATIVE_PLATFORM_SUPPORTED)
     target_sources(cpp_interp PRIVATE src/native_runtime.cpp)
   endif()
 endif()
-target_sources(cpp_interp PRIVATE ${REPLXX_NATIVE_SOURCE} src/editor_ui.cpp src/editor_input.cpp src/editor_call.cpp
+target_sources(cpp_interp PRIVATE ${REPLXX_NATIVE_SOURCE} src/debugger.cpp src/editor_ui.cpp src/editor_input.cpp src/editor_call.cpp
   src/definition_shadowing.cpp src/source_reload.cpp src/interpreter_symbols.cpp)
 target_include_directories(cpp_interp PUBLIC src)
 target_include_directories(cpp_interp SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
@@ -107,6 +107,12 @@ target_compile_options(cpp_interp PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(cpp-repl src/main.cpp src/repl.cpp)
 target_link_libraries(cpp-repl PRIVATE cpp_interp)
+file(GENERATE OUTPUT "$<TARGET_FILE_DIR:cpp-repl>/cpp_repl_lldb.py"
+  INPUT "${CMAKE_CURRENT_SOURCE_DIR}/tools/cpp_repl_lldb.py")
+find_program(CPP_REPL_LLDB_EXECUTABLE NAMES lldb HINTS "${LLVM_TOOLS_BINARY_DIR}")
+if(CPP_REPL_LLDB_EXECUTABLE)
+  target_compile_definitions(cpp_interp PRIVATE CPP_REPL_LLDB_EXECUTABLE="${CPP_REPL_LLDB_EXECUTABLE}")
+endif()
 target_compile_options(cpp-repl PRIVATE -Wall -Wextra -Wpedantic)
 
 option(REPLXX_EXAMPLE_BUILD_TESTS "Build the unit tests" ON)
@@ -172,6 +178,25 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
   add_executable(iterative_development_test tests/iterative_development_test.cpp)
   target_link_libraries(iterative_development_test PRIVATE cpp_interp GTest::gtest_main)
   gtest_discover_tests(iterative_development_test)
+  add_executable(debugger_test tests/debugger_test.cpp)
+  target_link_libraries(debugger_test PRIVATE cpp_interp GTest::gtest_main)
+  gtest_discover_tests(debugger_test)
+  add_test(NAME debugger_launch COMMAND ${CMAKE_COMMAND}
+    -DBINARY=$<TARGET_FILE:cpp-repl> -DWORK=${CMAKE_CURRENT_BINARY_DIR}/debugger-launch
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/debugger_launch.cmake)
+  option(CPP_REPL_TEST_LLDB "Run integration tests that launch LLDB" OFF)
+  if(CPP_REPL_TEST_LLDB)
+    if(NOT CPP_REPL_LLDB_EXECUTABLE)
+      message(FATAL_ERROR "CPP_REPL_TEST_LLDB requires LLDB")
+    endif()
+    add_test(NAME debugger_lldb COMMAND ${CMAKE_COMMAND}
+      -DBINARY=$<TARGET_FILE:cpp-repl> -DLLDB=${CPP_REPL_LLDB_EXECUTABLE}
+      -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/examples/debugging/functions.cpp
+      -DSCRIPT=$<TARGET_FILE_DIR:cpp-repl>/cpp_repl_lldb.py
+      -DWORK=${CMAKE_CURRENT_BINARY_DIR}/debugger-lldb
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/debugger_lldb.cmake)
+    set_tests_properties(debugger_lldb PROPERTIES TIMEOUT 70)
+  endif()
   add_library(unresolved_virtuals_test_library SHARED tests/fixtures/unresolved_virtuals.cpp)
   target_compile_options(unresolved_virtuals_test_library PRIVATE -fno-inline)
   if(APPLE)
@@ -273,3 +298,4 @@ endif()
 
 include(GNUInstallDirs)
 install(TARGETS cpp-repl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT cpp-repl)
+install(FILES tools/cpp_repl_lldb.py DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT cpp-repl)
