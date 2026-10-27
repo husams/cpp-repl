@@ -308,6 +308,9 @@ A leading `!` selects the shell; parenthesize a C++ negation, such as `(!x)`.
   settings; warning policy, optimization, debug emission, linker options, and target code generation
   remain controlled by the running JIT. Commands for incompatible targets,
   per-file PCH, or VFS overlays report an error.
+  See the [compilation database example](examples/compilation-database/README.md)
+  for a checked demo of per-file entries, same-directory fallback, and choosing
+  an entry as the session defaults.
 - `%reload [path ...]` - reread previously added C++ files and their user
   headers, using each file's current compile options. With no arguments it
   reloads all added files. Edits are also detected automatically before the

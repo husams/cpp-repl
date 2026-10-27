@@ -1,0 +1,26 @@
+extern "C" int puts(const char*);
+%compile-opts src/beta.cpp
+%add src/beta.cpp
+%compile-opts src/alpha.cpp
+%add src/alpha.cpp
+%add other/no_defaults.cpp
+puts(alpha_value() == 111 && beta_value() == 122 && no_defaults_value() == 17 ? "PASS 1: each added file uses its own database entry" : "FAIL 1: wrong per-file options");
+%compile-opts src/unlisted.cpp
+%add src/unlisted.cpp
+%compile-opts src/beta.hpp
+%add src/beta.hpp
+puts(unlisted_value() == 112 && header_value() == 123 ? "PASS 2: unlisted files borrow same-directory entries" : "FAIL 2: wrong fallback options");
+%use-compile-opts src/beta.cpp
+%compile-opts
+static_assert(DEMO_VALUE == 22 && __cplusplus == 202002L);
+#include <prompt.hpp>
+static_assert(DEMO_VALUE + prompt_bonus == 122);
+%add other/use_beta.cpp
+puts(default_beta_value() == 122 ? "PASS: beta defaults apply to added files" : "FAIL: wrong beta defaults");
+%use-compile-opts src/alpha.cpp
+%compile-opts
+static_assert(DEMO_VALUE == 11 && __cplusplus == 201703L);
+static_assert(DEMO_VALUE + prompt_bonus == 111);
+%add other/use_alpha.cpp
+puts(default_alpha_value() == 111 && default_beta_value() == 122 ? "PASS 3: either database entry can supply session defaults" : "FAIL 3: wrong session defaults");
+%quit

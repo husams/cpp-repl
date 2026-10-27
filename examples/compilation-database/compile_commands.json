@@ -1,0 +1,12 @@
+[
+  {
+    "directory": ".",
+    "file": "src/alpha.cpp",
+    "arguments": ["clang++", "-std=c++17", "-DDEMO_VALUE=11", "-Iinclude", "-c", "src/alpha.cpp", "-o", "alpha.o"]
+  },
+  {
+    "directory": ".",
+    "file": "src/beta.cpp",
+    "arguments": ["clang++", "-std=c++20", "-DDEMO_VALUE=22", "-Iinclude", "-c", "src/beta.cpp", "-o", "beta.o"]
+  }
+]
