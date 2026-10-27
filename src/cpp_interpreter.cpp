@@ -731,8 +731,19 @@ std::vector<SemanticToken> CppInterpreter::semantic_tokens(const std::string& co
 }
 
 CppInterpreter::Completions CppInterpreter::complete(const std::string& code) {
+  return complete(code, false);
+}
+
+CppInterpreter::Completions CppInterpreter::signatures(const std::string& code) {
+  return complete(code, true);
+}
+
+CppInterpreter::Completions CppInterpreter::complete(const std::string& code,
+                                                     bool signatures_only) {
   const auto* context = interp_->getASTContext().getTranslationUnitDecl();
-  if (completion_context_ == context && completion_code_ == code && completion_args_ == args_) {
+  // A signature-only result lacks most items; it never answers complete().
+  if (completion_context_ == context && completion_code_ == code && completion_args_ == args_ &&
+      (signatures_only || !completion_signatures_only_)) {
     return completion_cache_;
   }
   Completions out;
@@ -742,7 +753,8 @@ CppInterpreter::Completions CppInterpreter::complete(const std::string& code) {
     llvm::consumeError(compiler.takeError());
     return out;
   }
-  auto analysis = analyze_editor(std::move(*compiler), *interp_->getCompilerInstance(), code, true);
+  auto analysis = analyze_editor(std::move(*compiler), *interp_->getCompilerInstance(), code, true,
+                                 signatures_only);
   if (analysis.completion_prefix) {
     out.prefix = std::move(*analysis.completion_prefix);
   }
@@ -759,6 +771,7 @@ CppInterpreter::Completions CppInterpreter::complete(const std::string& code) {
   completion_code_ = code;
   completion_args_ = args_;
   completion_cache_ = out;
+  completion_signatures_only_ = signatures_only;
   return out;
 }
 

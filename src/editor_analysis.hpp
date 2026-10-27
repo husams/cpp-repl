@@ -64,9 +64,11 @@ struct EditorAnalysis {
 };
 
 // Uses a disposable syntax-only compiler; never executes edited input.
+// `signatures_only` completion fills the signature fields; its items omit
+// session declarations that would have to be imported to be enumerated.
 EditorAnalysis analyze_editor(std::unique_ptr<clang::CompilerInstance> compiler,
                               clang::CompilerInstance& session, const std::string& code,
-                              bool completion);
+                              bool completion, bool signatures_only = false);
 const char* semantic_kind_name(SemanticKind kind);
 
 } // namespace example

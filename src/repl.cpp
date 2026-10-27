@@ -314,7 +314,7 @@ Replxx::hints_t cpp_hints(CppInterpreter& cpp, const std::string& input, int& co
   if (lex_cpp(input).open_brackets.find('(') == std::string::npos) {
     return out;
   }
-  const auto result = cpp.complete(input);
+  const auto result = cpp.signatures(input);
   if (inline_display_supported && !result.signature_items.empty()) {
     return out;
   }
@@ -409,6 +409,8 @@ std::string selected_identity_for(const EditorCall& call, const SelectedSignatur
 
 CppInterpreter::Completions completions_at_cursor(CppInterpreter& cpp, const std::string& text,
                                                   std::size_t cursor);
+CppInterpreter::Completions signatures_at_cursor(CppInterpreter& cpp, const std::string& text,
+                                                 std::size_t cursor);
 
 const CompletionItem* selected_signature(const CppInterpreter::Completions& result,
                                          const std::string& identity) {
@@ -478,7 +480,7 @@ std::vector<CompletionItem> signatures_for_call(CppInterpreter& cpp, const std::
       (cached->second.context == context || reuse_cached_context)) {
     return cached->second.signatures;
   }
-  const auto completion = completions_at_cursor(cpp, text, context);
+  const auto completion = signatures_at_cursor(cpp, text, context);
   CachedSignature entry{identity, context, completion.signature_items};
   cache[call.open] = std::move(entry);
   return cache[call.open].signatures;
@@ -696,6 +698,11 @@ bool is_trailing_call(const std::string& text, const EditorCall& call) {
 CppInterpreter::Completions completions_at_cursor(CppInterpreter& cpp, const std::string& text,
                                                   std::size_t cursor) {
   return cpp.complete(text.substr(0, cursor));
+}
+
+CppInterpreter::Completions signatures_at_cursor(CppInterpreter& cpp, const std::string& text,
+                                                 std::size_t cursor) {
+  return cpp.signatures(text.substr(0, cursor));
 }
 
 bool should_complete_argument_prefix(CppInterpreter& cpp, const std::string& text,
@@ -1238,7 +1245,7 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
     if (!frame) {
       return false;
     }
-    const auto result = completions_at_cursor(cpp, text, cursor);
+    const auto result = signatures_at_cursor(cpp, text, cursor);
     const auto* signature =
         selected_signature(result, selected_identity_for(*frame, *selected_identity));
     if (signature == nullptr || signature->parameters.empty()) {

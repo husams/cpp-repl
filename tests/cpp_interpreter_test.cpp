@@ -2184,6 +2184,71 @@ TEST_F(CppInterpreterTest, EditorSignatureHelpTracksArgumentsAndOverloads) {
   EXPECT_NE(hint.signatures.front().find("double second"), std::string::npos);
 }
 
+TEST_F(CppInterpreterTest, EditorSignatureOnlyAnalysisKeepsHintsAndNeverAnswersCompletion) {
+  ASSERT_TRUE(cpp_->execute("void editor_sig_only(int first, double second) {} "
+                            "int editor_sig_only_value = 0;"));
+  const std::string input = "editor_sig_only(editor_sig_only_v";
+  const auto hint = cpp_->signatures(input);
+  ASSERT_EQ(hint.signature_items.size(), 1u);
+  EXPECT_EQ(hint.signature_items.front().parameters.size(), 2u);
+  EXPECT_EQ(hint.active_parameter, 0u);
+  // The cached signature-only analysis must not stand in for full completion.
+  EXPECT_TRUE(has(cpp_->complete(input).names, "editor_sig_only_value"));
+  EXPECT_EQ(cpp_->signatures(input).signature_items.size(), 1u);
+}
+
+TEST_F(CppInterpreterTest, EditorImportsGlobalNamesOnLookup) {
+  ASSERT_TRUE(cpp_->execute(
+      "struct LazyResult { int lazy_member; }; struct LazyOperand {};\n"
+      "LazyResult operator+(LazyOperand, LazyOperand) { return {}; }\n"
+      "LazyResult operator\"\"_lazy(unsigned long long) { return {}; }\n"
+      "namespace lazy_space { struct LazyUsing { int using_member; }; }\n"
+      "using namespace lazy_space;\n"
+      "namespace { struct LazyAnonymous { int anonymous_member; } lazy_anonymous; }\n"
+      "template <class T> struct LazyGuided { LazyGuided(T) {} int guided_member; };"));
+  EXPECT_TRUE(has(cpp_->complete("(LazyOperand{} + LazyOperand{}).lazy_").names, "lazy_member"));
+  EXPECT_TRUE(has(cpp_->complete("(1_lazy).lazy_").names, "lazy_member"));
+  EXPECT_TRUE(has(cpp_->complete("LazyUsing{}.using_").names, "using_member"));
+  EXPECT_TRUE(has(cpp_->complete("lazy_anonymous.anonymous_").names, "anonymous_member"));
+  EXPECT_TRUE(has(cpp_->complete("LazyGuided{1}.guided_").names, "guided_member"));
+  const std::string input = "LazyUsing used; lazy_anonymous;";
+  const auto tokens = cpp_->semantic_tokens(input);
+  auto colored = [&](const std::string& text, SemanticKind kind) {
+    return std::any_of(tokens.begin(), tokens.end(), [&](const auto& token) {
+      return input.substr(token.begin, token.end - token.begin) == text && token.kind == kind;
+    });
+  };
+  EXPECT_TRUE(colored("LazyUsing", SemanticKind::Type));
+  EXPECT_TRUE(colored("lazy_anonymous", SemanticKind::Variable));
+}
+
+TEST_F(CppInterpreterTest, EditorKeepsOverloadsOfGlobalNamesImportedAsDependencies) {
+  // Importing editor_dependency_user's constexpr body imports one overload of
+  // editor_dependency first; the editor must still offer both. A header keeps
+  // the declarations directly in the global scope, outside version namespaces.
+  SourceDir dir;
+  const auto header =
+      dir.write("editor_dependency.hpp",
+                "#pragma once\n"
+                "constexpr int editor_dependency(int) { return 1; }\n"
+                "constexpr int editor_dependency(double) { return 2; }\n"
+                "constexpr int editor_dependency_user() { return editor_dependency(1); }\n");
+  ASSERT_TRUE(cpp_->execute("#include \"" + header + "\"\n"));
+  const auto hint = cpp_->signatures("editor_dependency_user(); editor_dependency(");
+  EXPECT_EQ(hint.signature_items.size(), 2u);
+}
+
+TEST_F(CppInterpreterTest, EditorAnalysisLeavesSessionFunctionBodiesIntact) {
+  // Neither function is emitted yet; the first use below needs its body after
+  // the editor imported only its declaration.
+  ASSERT_TRUE(cpp_->execute("inline int editor_kept_inline(int x) { return x * 3; }\n"
+                            "template <class T> T editor_kept_template(T t) { return t + t; }"));
+  cpp_->semantic_tokens("editor_kept_inline(2) + editor_kept_template(1)");
+  cpp_->signatures("editor_kept_template(editor_kept_inline(");
+  EXPECT_EQ(cpp_->evaluate("editor_kept_inline(2)"), "(int) 6\n");
+  EXPECT_EQ(cpp_->evaluate("editor_kept_template(21)"), "(int) 42\n");
+}
+
 TEST_F(CppInterpreterTest, EditorCachesFollowRedefinitionAndRejectedInput) {
   ASSERT_TRUE(
       cpp_->execute("struct EditorVersion { int old_field; }; EditorVersion editor_version;"));

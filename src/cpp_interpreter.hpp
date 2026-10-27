@@ -74,6 +74,9 @@ class CppInterpreter {
   // structured overloads and signature help. Imports current session declarations
   // into a disposable compiler; edited input is never executed.
   Completions complete(const std::string& code);
+  // Like complete(), but only `signatures`, `signature_items` and
+  // `active_parameter` are complete; argument hints need nothing else.
+  Completions signatures(const std::string& code);
   std::vector<SemanticToken> semantic_tokens(const std::string& code);
 
   // Parses and runs a C++ source file in the session as if it were
@@ -190,6 +193,9 @@ class CppInterpreter {
   std::string completion_code_;
   std::vector<std::string> completion_args_;
   Completions completion_cache_;
+  bool completion_signatures_only_ = false;
+
+  Completions complete(const std::string& code, bool signatures_only);
 };
 
 }  // namespace example

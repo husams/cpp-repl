@@ -102,3 +102,55 @@ and `75aede0418554848a40f5cb1ed84c3e1447725b0a974d7f96fce1ea090bfec6e`.
 Raw samples and comparison results are retained as
 `build/large-context-{macos,linux}-{before,after,comparison}-{30000,100000}.json`
 and in the isolated Linux release directory.
+
+## Large startup profile
+
+With a large startup profile (`<bits/stdc++.h>` plus project headers holding
+many global classes with inline bodies), every editor request paused input
+for hundreds of milliseconds, whatever was typed. Each request builds a
+disposable compiler, and `EditorAction` called `lookups()` on its translation
+unit. That imported every global-scope session declaration, with record
+definitions and inline function bodies, before parsing the input. Namespaces
+were already imported lazily by name; the global scope was not.
+
+Changes:
+
+- `SessionSource::FindExternalVisibleDeclsByName` serves the translation unit
+  by name: identifiers, operators, literal operators, deduction guides and the
+  using-directive name, so using-directives and anonymous namespaces stay
+  visible. `completeVisibleDeclsMap` still imports the whole global scope when
+  Clang enumerates it (unqualified completion).
+- A global declaration imported as a dependency also imports the remaining
+  declarations of its name, keeping overload sets complete when a later lookup
+  finds the existing entry.
+- Every imported namespace, including one reached only as a dependency, is
+  served lazily.
+- Bodies of non-constexpr, non-defaulted functions without a deduced return
+  type are withheld while importing; the session keeps them, and
+  `analyze_editor` restores them after a crash-recovery failure.
+- Editor compilers disable spell checking, which looked up (and imported)
+  every similar name.
+- `CppInterpreter::signatures()` runs completion without loading external
+  declarations, for argument hints and snippet navigation. It shares the
+  completion cache, but its result never answers `complete()`.
+
+Measured on Linux with LLVM 20.1 (the only LLVM available in that environment;
+the project targets 21/22, so the measurement used a local, uncommitted
+`Interpreter::create` shim). Session: `<bits/stdc++.h>` plus 1,500 global
+classes with inline methods and helper functions, in milliseconds:
+
+| Request | Before | After |
+| --- | ---: | ---: |
+| Semantic colouring, `int a = std::max(1, 2)` prefixes | 350–460 | 6–110 |
+| Signature hints at `std::max(1,` | 411 (`complete`) | 72 (`signatures`) |
+| Unqualified completion (`GlobalWidget12`) | 388 | 253–269 |
+| PTY echo per key, 400 ms apart: median / inside the call | 172 / 547 | 0 / 0 |
+
+Withholding bodies accounts for most of the colouring gain: without it, the
+same requests took 180–240 ms after lazy lookup.
+
+Requests still build a fresh compiler and importer, so they re-import the
+declarations they use (about 70 ms for `std::vector` or `std::string`), and
+unqualified completion still imports the whole global scope. A precompiled
+header for the startup profile, loaded lazily by every editor compiler, would
+remove that remaining cost.

@@ -1,6 +1,7 @@
 #include "editor_analysis.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <set>
@@ -29,6 +30,7 @@
 #include "cpp_lexer.hpp"
 #include "cpp_symbols.hpp"
 #include "definition_shadowing.hpp"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Support/CrashRecoveryContext.h"
@@ -350,14 +352,17 @@ class CompletionConsumer : public clang::CodeCompleteConsumer {
   const std::string& code_;
 
 public:
+  // Without `load_external`, Clang enumerates only declarations already in the
+  // editor AST instead of importing the whole session scope.
   CompletionConsumer(EditorAnalysis& result, clang::CompilerInstance& session,
-                     const std::string& code)
-      : CodeCompleteConsumer([] {
+                     const std::string& code, bool load_external)
+      : CodeCompleteConsumer([&] {
         clang::CodeCompleteOptions options;
         options.IncludeGlobals = true;
         options.IncludeMacros = true;
         options.IncludeCodePatterns = true;
         options.IncludeBriefComments = true;
+        options.LoadExternal = load_external;
         return options;
       }())
       , result_(result)
@@ -521,7 +526,7 @@ public:
           kind == clang::CodeCompletionContext::CCC_Other ||
           kind == clang::CodeCompletionContext::CCC_OtherWithMacros ||
           kind == clang::CodeCompletionContext::CCC_Type));
-    if (!supplement_allowed) {
+    if (!supplement_allowed || !loadExternal()) {
       return;
     }
     for (const auto& qualified : user_symbol_names(session_.getASTContext())) {
@@ -584,15 +589,48 @@ public:
   }
 };
 
+// Function bodies withheld from the editor AST, with the session body to put
+// back. A crash inside Clang skips destructors, so analyze_editor restores any
+// entry still recorded here.
+std::vector<std::tuple<clang::FunctionDecl*, clang::Stmt*, clang::SourceLocation>> withheld_bodies;
+
+void restore_withheld_bodies(std::size_t size = 0) {
+  while (withheld_bodies.size() > size) {
+    auto [function, body, end] = withheld_bodies.back();
+    withheld_bodies.pop_back();
+    function->setBody(body);
+    function->setRangeEnd(end);
+  }
+}
+
+// Editor requests parse a few input tokens; they never need the bodies of
+// ordinary session functions. Constant evaluation and return type deduction do.
+bool withholds_body(const clang::FunctionDecl& function) {
+  return function.doesThisDeclarationHaveABody() && !function.isConstexpr() &&
+         !function.isDefaulted() && !function.getReturnType()->getContainedDeducedType();
+}
+
 // Import namespace shells lazily, but complete the declarations actually used.
 // Importing every namespace member eagerly would resurrect obsolete versions
 // and make a standard-library include expensive on every editor request.
 class SessionImporter : public clang::ASTImporter {
+  std::function<void(clang::Decl*, clang::Decl*)> imported_;
+
 protected:
   llvm::Expected<clang::Decl*> ImportImpl(clang::Decl* decl) override {
     auto* space = llvm::dyn_cast<clang::NamespaceDecl>(decl);
     if (!space) {
-      return ASTImporter::ImportImpl(decl);
+      auto* function = llvm::dyn_cast<clang::FunctionDecl>(decl);
+      if (!function || !withholds_body(*function)) {
+        return ASTImporter::ImportImpl(decl);
+      }
+      // Import a declaration only; the session keeps its body.
+      const auto depth = withheld_bodies.size();
+      withheld_bodies.emplace_back(function, function->getBody(), function->getEndLoc());
+      function->setBody(nullptr);
+      auto imported = ASTImporter::ImportImpl(decl);
+      restore_withheld_bodies(depth);
+      return imported;
     }
     auto context = ImportContext(space->getDeclContext());
     if (!context) {
@@ -641,14 +679,18 @@ protected:
     return target;
   }
 
+  void Imported(clang::Decl* from, clang::Decl* to) override { imported_(from, to); }
+
 public:
-  SessionImporter(clang::CompilerInstance& child, clang::CompilerInstance& parent)
+  SessionImporter(clang::CompilerInstance& child, clang::CompilerInstance& parent,
+                  std::function<void(clang::Decl*, clang::Decl*)> imported)
       // The default importer scans declarations for every name lookup. Build its
       // dedicated lookup index so importing a large namespace stays linear.
       : ASTImporter(child.getASTContext(), child.getFileManager(), parent.getASTContext(),
                     parent.getFileManager(), false,
                     std::make_shared<clang::ASTImporterSharedState>(
-                        *child.getASTContext().getTranslationUnitDecl())) {}
+                        *child.getASTContext().getTranslationUnitDecl()))
+      , imported_(std::move(imported)) {}
 };
 
 // Like clang-repl's completion importer, use a separate AST. Complete imports
@@ -663,6 +705,11 @@ class SessionSource : public clang::ExternalASTSource {
   std::map<const clang::DeclContext*, std::vector<clang::NamespaceDecl*>> namespaces_;
   std::set<const clang::DeclContext*> loaded_namespaces_;
   std::set<std::pair<const clang::DeclContext*, std::string>> pending_lookups_;
+  // Global names are imported lazily, one lookup name at a time.
+  llvm::DenseSet<clang::DeclarationName> served_globals_;
+  std::vector<clang::DeclarationName> pending_globals_;
+  unsigned import_depth_ = 0;
+  bool publishing_ = false;
 
   void copy_session_macros(clang::Preprocessor& target) {
     auto& source = parent_.getPreprocessor();
@@ -730,7 +777,106 @@ class SessionSource : public clang::ExternalASTSource {
     }
   }
 
+  // Lookup context of a session declaration, looking through version namespaces.
+  static const clang::DeclContext* lookup_context(const clang::Decl& decl) {
+    const auto* context = decl.getDeclContext();
+    if (const auto* space = llvm::dyn_cast_or_null<clang::NamespaceDecl>(context)) {
+      if (space->getName().starts_with("__cpp_repl_version_")) {
+        context = context->getParent();
+      }
+    }
+    return context ? context->getRedeclContext() : nullptr;
+  }
+
+  void imported(clang::Decl* from, clang::Decl* to) {
+    if (auto* space = llvm::dyn_cast<clang::NamespaceDecl>(to)) {
+      auto* primary = space->getPrimaryContext();
+      auto& sources = namespaces_[primary];
+      // A namespace lookup already spans all of its redeclarations. Retaining
+      // every reopening here repeats the same lookup and, during completion,
+      // traverses the entire redeclaration chain once per reopening.
+      auto* original = llvm::cast<clang::NamespaceDecl>(from)->getCanonicalDecl();
+      if (std::find(sources.begin(), sources.end(), original) == sources.end()) {
+        sources.push_back(original);
+      }
+      primary->setHasExternalVisibleStorage(true);
+    }
+    // A dependency creates the editor's lookup entry for its name, and Clang
+    // then stops asking this source for that name. Import the remaining
+    // declarations of the name too, so every overload stays visible.
+    const auto* named = llvm::dyn_cast<clang::NamedDecl>(to);
+    const auto* context = lookup_context(*from);
+    if (named && !named->getDeclName().isEmpty() && context && context->isTranslationUnit() &&
+        !served_globals_.contains(named->getDeclName())) {
+      pending_globals_.push_back(named->getDeclName());
+    }
+  }
+
+  // Maps an editor lookup name to the session AST.
+  std::optional<clang::DeclarationName> session_name(clang::DeclarationName name) {
+    auto& context = parent_.getASTContext();
+    switch (name.getNameKind()) {
+    case clang::DeclarationName::Identifier:
+      if (const auto* identifier = name.getAsIdentifierInfo()) {
+        return clang::DeclarationName(&context.Idents.get(identifier->getName()));
+      }
+      return std::nullopt;
+    case clang::DeclarationName::CXXOperatorName:
+      return context.DeclarationNames.getCXXOperatorName(name.getCXXOverloadedOperator());
+    case clang::DeclarationName::CXXLiteralOperatorName:
+      return context.DeclarationNames.getCXXLiteralOperatorName(
+          &context.Idents.get(name.getCXXLiteralIdentifier()->getName()));
+    case clang::DeclarationName::CXXUsingDirective:
+      return clang::DeclarationName::getUsingDirectiveName();
+    case clang::DeclarationName::CXXDeductionGuideName:
+      if (const auto from = importer_.getImportedFromDecl(name.getCXXDeductionGuideTemplate())) {
+        return context.DeclarationNames.getCXXDeductionGuideName(*from);
+      }
+      return std::nullopt;
+    default:
+      return std::nullopt;
+    }
+  }
+
+  // Imports the current session declarations of one global-scope name.
+  bool import_global(clang::DeclarationName name) {
+    if (!served_globals_.insert(name).second) {
+      return false;
+    }
+    const auto parent_name = session_name(name);
+    if (!parent_name) {
+      return false;
+    }
+    bool any = false;
+    for (auto* decl : parent_.getASTContext().getTranslationUnitDecl()->lookup(*parent_name)) {
+      import(decl);
+      any = true;
+    }
+    return any;
+  }
+
+  void publish_imported_globals() {
+    if (publishing_) {
+      return;
+    }
+    publishing_ = true;
+    while (!pending_globals_.empty()) {
+      const auto name = pending_globals_.back();
+      pending_globals_.pop_back();
+      import_global(name);
+    }
+    publishing_ = false;
+  }
+
   void import(clang::Decl* decl) {
+    ++import_depth_;
+    import_declaration(decl);
+    if (--import_depth_ == 0) {
+      publish_imported_globals();
+    }
+  }
+
+  void import_declaration(clang::Decl* decl) {
     auto* named = llvm::dyn_cast<clang::NamedDecl>(decl);
     if (!named || named->isInvalidDecl()) {
       return;
@@ -759,18 +905,6 @@ class SessionSource : public clang::ExternalASTSource {
         }
       }
       context->makeDeclVisibleInContext(visible);
-      if (auto* space = llvm::dyn_cast<clang::NamespaceDecl>(visible)) {
-        auto* primary = space->getPrimaryContext();
-        auto& sources = namespaces_[primary];
-        // A namespace lookup already spans all of its redeclarations. Retaining
-        // every reopening here repeats the same lookup and, during completion,
-        // traverses the entire redeclaration chain once per reopening.
-        auto* original = llvm::cast<clang::NamespaceDecl>(named)->getCanonicalDecl();
-        if (std::find(sources.begin(), sources.end(), original) == sources.end()) {
-          sources.push_back(original);
-        }
-        primary->setHasExternalVisibleStorage(true);
-      }
     }
     if (const auto* value = llvm::dyn_cast<clang::ValueDecl>(named)) {
       define_type(value->getType());
@@ -786,7 +920,7 @@ class SessionSource : public clang::ExternalASTSource {
 
 public:
   SessionSource(clang::CompilerInstance& child, clang::CompilerInstance& parent)
-      : importer_(child, parent)
+      : importer_(child, parent, [this](clang::Decl* from, clang::Decl* to) { imported(from, to); })
       , parent_(parent)
       , child_(child.getASTContext().getTranslationUnitDecl()) {
     copy_session_macros(child.getPreprocessor());
@@ -795,6 +929,9 @@ public:
   bool FindExternalVisibleDeclsByName(const clang::DeclContext* context,
                                       clang::DeclarationName name,
                                       const clang::DeclContext*) override {
+    if (context->isTranslationUnit()) {
+      return import_global(name);
+    }
     const auto found = namespaces_.find(context->getPrimaryContext());
     if (found == namespaces_.end() || !name.isIdentifier()) {
       return false;
@@ -999,8 +1136,9 @@ public:
     child.getPreprocessor().addPPCallbacks(std::make_unique<MacroExpansionColors>(
         child.getSourceManager(), child.getLangOpts(), result_, size_));
     child.getASTContext().setExternalSource(source);
+    // Global names are imported on lookup. Enumerating the global scope, as
+    // unqualified completion does, still imports all of it.
     child.getASTContext().getTranslationUnitDecl()->setHasExternalVisibleStorage(true);
-    child.getASTContext().getTranslationUnitDecl()->lookups();
     // Keep REPL top-level statements, but terminate this finite buffer with EOF.
     // LLVM 21/22's lexer emits annot_repl_input_end whenever the language's REPL
     // extensions are enabled, independently of IncrementalProcessing. Parser
@@ -1076,7 +1214,7 @@ const char* semantic_kind_name(SemanticKind kind) {
 
 EditorAnalysis analyze_editor(std::unique_ptr<clang::CompilerInstance> compiler,
                               clang::CompilerInstance& session, const std::string& code,
-                              bool completion) {
+                              bool completion, bool signatures_only) {
   EditorAnalysis result;
   if (code.empty() || code.size() > 65536) {
     return result;
@@ -1084,6 +1222,9 @@ EditorAnalysis analyze_editor(std::unique_ptr<clang::CompilerInstance> compiler,
   DiagnosticScope diagnostics(session.getDiagnostics());
   compiler->getDiagnostics().setClient(std::make_unique<clang::IgnoringDiagConsumer>().release(),
                                        true);
+  // Diagnostics are discarded, and typo correction would look up, and so
+  // import, every similar session name.
+  compiler->getLangOpts().SpellChecking = false;
   const std::string filename = "input_line_[Editor]";
   auto buffer = llvm::MemoryBuffer::getMemBufferCopy(code + "\n;", filename);
   compiler->getPreprocessorOpts().addRemappedFile(filename, buffer.release());
@@ -1095,7 +1236,7 @@ EditorAnalysis analyze_editor(std::unique_ptr<clang::CompilerInstance> compiler,
         code.size() - (last_newline == std::string::npos ? 0 : last_newline + 1) + 1;
     compiler->getFrontendOpts().CodeCompletionAt = {filename, line, column};
     compiler->setCodeCompletionConsumer(
-        std::make_unique<CompletionConsumer>(result, session, code).release());
+        std::make_unique<CompletionConsumer>(result, session, code, !signatures_only).release());
   }
   auto action = std::make_unique<EditorAction>(session, result, code.size());
   llvm::CrashRecoveryContext::Enable();
@@ -1103,6 +1244,8 @@ EditorAnalysis analyze_editor(std::unique_ptr<clang::CompilerInstance> compiler,
   const bool completed = recovery.RunSafely([&] { compiler->ExecuteAction(*action); });
   llvm::CrashRecoveryContext::Disable();
   if (!completed) {
+    // The session must get back any function body withheld during the crash.
+    restore_withheld_bodies();
     // Clang may be partially torn down after a native crash. Avoid destructing
     // that compiler; the persistent interpreter has not parsed this buffer.
     (void)action.release();
