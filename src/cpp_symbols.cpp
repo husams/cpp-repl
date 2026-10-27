@@ -268,6 +268,26 @@ SymbolDescription describe(clang::ASTContext& context, const clang::NamedDecl* d
   if (const auto* function = llvm::dyn_cast<clang::FunctionDecl>(decl)) {
     kind = llvm::isa<clang::CXXMethodDecl>(function) ? "method" : "function";
     type = function->getType();
+    result.type_summary = "(";
+    for (unsigned i = 0; i < function->getNumParams(); ++i) {
+      if (i) result.type_summary += ", ";
+      result.type_summary += function->getParamDecl(i)->getType().getAsString(policy);
+    }
+    if (function->isVariadic()) {
+      if (function->getNumParams()) result.type_summary += ", ";
+      result.type_summary += "...";
+    }
+    result.type_summary += ")";
+    if (const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(function)) {
+      if (method->isConst()) result.type_summary += " const";
+      if (method->isVolatile()) result.type_summary += " volatile";
+      if (method->getRefQualifier() == clang::RQ_LValue) result.type_summary += " &";
+      if (method->getRefQualifier() == clang::RQ_RValue) result.type_summary += " &&";
+    }
+    if (const auto* prototype = type->getAs<clang::FunctionProtoType>();
+        prototype && prototype->isNothrow())
+      result.type_summary += " noexcept";
+    result.type_summary += " -> " + function->getReturnType().getAsString(policy);
     llvm::raw_string_ostream stream(declaration);
     function->print(stream, policy);
   } else if (const auto* value = llvm::dyn_cast<clang::ValueDecl>(decl)) {
@@ -308,7 +328,11 @@ SymbolDescription describe(clang::ASTContext& context, const clang::NamedDecl* d
   }
   add("Kind", kind);
   add("Declaration", declaration);
-  if (!type.isNull()) add("Type", type.getAsString(policy));
+  if (!type.isNull()) {
+    add("Type", type.getAsString(policy));
+    if (result.type_summary.empty()) result.type_summary = "(" + type.getAsString(policy) + ")";
+    result.type_summary = one_line(unversioned_name(result.type_summary));
+  }
   result.mangled = mangled_name(context, decl);
   if (!result.mangled.empty()) add("Mangled", result.mangled);
   add("Linkage", linkage_name(*decl));

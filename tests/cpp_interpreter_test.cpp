@@ -27,6 +27,7 @@
 #include "loaded_symbols.hpp"
 #include "native_symbol_exports.hpp"
 #include "runtime_inspection.hpp"
+#include "session_commands.hpp"
 
 namespace example {
 namespace {
@@ -51,6 +52,39 @@ class CppInterpreterTest : public ::testing::Test {
 CppInterpreter* CppInterpreterTest::cpp_ = nullptr;
 
 std::string info_field(const std::string& text, const std::string& label);
+
+TEST_F(CppInterpreterTest, TypeCommandReadsDeclaredTypesWithoutExecuting) {
+  ASSERT_TRUE(cpp_->execute("namespace type_cmd { int x = 0; const int cx = 1; "
+                           "int& ref = x; int values[3]; int* ptr = &x; int calls = 0; "
+                           "int f(int x) { ++calls; return x; } "
+                           "double f(double x) { ++calls; return x; } "
+                           "void empty(); int variadic(int, ...); "
+                           "struct S { int member; int get(double) const & noexcept; }; }"));
+  LibraryManager libs;
+  for (const auto& entry : std::vector<std::pair<std::string, std::string>>{
+           {"x", "(int)\n"}, {"cx", "(const int)\n"}, {"ref", "(int &)\n"},
+           {"values", "(int[3])\n"}, {"ptr", "(int *)\n"},
+           {"f(int)", "(int) -> int\n"}, {"empty", "() -> void\n"},
+           {"variadic", "(int, ...) -> int\n"}, {"S::member", "(int)\n"},
+           {"S::get", "(double) const & noexcept -> int\n"}}) {
+    std::ostringstream out;
+    const auto cmd = parse_command("%type 'type_cmd::" + entry.first + "'");
+    EXPECT_TRUE(execute_command(libs, *cpp_, cmd, out).ok) << out.str();
+    EXPECT_EQ(out.str(), entry.second) << entry.first;
+  }
+  std::string error = "old error";
+  const auto overloads = cpp_->symbol_type("type_cmd::f", error);
+  ASSERT_TRUE(overloads) << error;
+  EXPECT_TRUE(error.empty());
+  EXPECT_NE(overloads->find("(int) -> int\n"), std::string::npos);
+  EXPECT_NE(overloads->find("(double) -> double\n"), std::string::npos);
+  EXPECT_FALSE(cpp_->symbol_type("type_cmd::missing", error));
+  EXPECT_FALSE(error.empty());
+  EXPECT_FALSE(cpp_->symbol_type("type_cmd", error));
+  EXPECT_FALSE(cpp_->symbol_type("type_cmd::f(++type_cmd::calls)", error));
+  EXPECT_EQ(cpp_->evaluate("type_cmd::calls"), "(int) 0\n");
+  EXPECT_EQ(cpp_->evaluate("type_cmd::x"), "(int) 0\n");
+}
 
 TEST_F(CppInterpreterTest, KeepsDeclarationsAcrossInputs) {
   EXPECT_EQ(cpp_->evaluate("int twice(int x) { return x * 2; }"), "");

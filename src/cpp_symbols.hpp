@@ -15,6 +15,7 @@ namespace example {
 
 struct SymbolDescription {
   std::string name;
+  std::string type_summary;
   std::string mangled;
   std::string address_note = "not applicable";
   std::vector<std::pair<std::string, std::string>> fields;

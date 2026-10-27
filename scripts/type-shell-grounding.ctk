@@ -1,0 +1,20 @@
+// Parse with this worktree's compilation database; inspect routing and AST-only lookup.
+let commands = parse "{arg.root}/src/commands.cpp"
+let parser = match functionDecl(isDefinition(), hasName("example::parse_command")).bind("f") in commands
+foreach row in parser do print row.f.qualified_name
+let session = parse "{arg.root}/src/session_commands.cpp"
+let dispatch = match functionDecl(isDefinition(), hasName("example::execute_command")).bind("f") in session
+foreach row in dispatch do print row.f.qualified_name
+let symbols = parse "{arg.root}/src/cpp_symbols.cpp"
+let lookup = match functionDecl(isDefinition(), hasName("example::describe_symbols")).bind("f") in symbols
+foreach row in lookup do print row.f.qualified_name
+let execution = match callExpr(callee(cxxMethodDecl(ofClass(hasName("clang::Interpreter")), matchesName("(ParseAndExecute|Execute)$")))).bind("c") in lookup.f
+print execution.length
+let interpreter = parse "{arg.root}/src/cpp_interpreter.cpp"
+let type_lookup = match cxxMethodDecl(isDefinition(), hasName("example::CppInterpreter::symbol_type")).bind("f") in interpreter
+foreach row in type_lookup do print row.f.qualified_name
+let type_execution = match callExpr(callee(cxxMethodDecl(ofClass(hasName("clang::Interpreter")), matchesName("(ParseAndExecute|Execute|Parse)$")))).bind("c") in type_lookup.f
+print type_execution.length
+let shell = parse "{arg.root}/src/shell_substitution.cpp"
+let spawn = match callExpr(callee(functionDecl(hasName("posix_spawn")))).bind("c") in shell
+foreach row in spawn do print row.c.call_site.static_callee_name

@@ -87,10 +87,10 @@ Pass `-DREPLXX_EXAMPLE_BUILD_TESTS=OFF` to skip the tests (and googletest).
 ./build/cpp-repl -std=c++20 -Iinclude
 ```
 
-REPL commands start with `%`, and `$option` queries a session setting. Other
-input is C++: it is highlighted, then compiled and run by the interpreter.
+REPL commands start with `%` or `!`, and `$option` queries a session setting.
+Other input is C++: it is highlighted, then compiled and run by the interpreter.
 
-Commands other than `%set` can substitute shell output into their arguments using double
+Percent commands other than `%set` can substitute shell output into their arguments using double
 backticks. Each block launches `/bin/sh -c` in the REPL's current directory,
 with its environment, and replaces the block with captured stdout. Trailing
 newlines are removed; other newlines remain and separate arguments where the
@@ -116,6 +116,33 @@ when its output is one argument containing spaces, using the destination
 command's quoting rules. Multiple blocks run left to right. Captured output is
 never expanded again. Ordinary C++ input and existing `cpp` backtick bodies
 keep their literal contents; substitutions belong outside those bodies.
+
+`%type <symbol>` prints a declared type without evaluating the symbol. Functions
+use `(parameter types) -> return type`; a bare overloaded name prints one line
+per overload. Qualified names, members, aliases and typed overload selectors use
+the same AST lookup as `%syminfo`; quote selectors containing spaces.
+
+```text
+int x = 0;
+%type x
+(int)
+int f(int x) { return x + 1; }
+%type f
+(int) -> int
+! pwd
+/my/path
+! printf '%s\n' 'hello world' | tr a-z A-Z
+HELLO WORLD
+```
+
+`! <shell-command>` (or `!command`) runs one physical line through `/bin/sh -c`
+in the REPL's current directory and environment. Stdout and stderr stream to the
+REPL unchanged, including output produced before a failure; a nonzero exit or
+signal prints an error and returns to the prompt. Child stdin is `/dev/null`,
+so commands cannot consume later REPL input. Each command has a separate shell;
+`! cd /tmp` does not change the REPL directory. Shell quoting, pipes and redirects
+are passed through verbatim. Editing and completion never execute the command.
+A leading `!` selects the shell; parenthesize a C++ negation, such as `(!x)`.
 
 - `%clear` - clear the screen and return to the prompt, preserving the session.
 - `%lib [path ...]` - `dlopen` zero or more shared libraries, separated by
@@ -536,6 +563,8 @@ restore   := "%restore" [ signature [ "in" signature ] ]
 hooks     := "%hooks"
 info      := "%info" symbol
 syminfo   := "%syminfo" symbol
+type      := "%type" symbol
+shell     := "!" shell-command                 single physical line
 demangle  := "%demangle" symbol
 define    := "%define" (symbol | signature) "cpp`" (initializer | body) "`"
 symbols   := "%symbols" [ "all" ] [ "undefined" ] [ "lib" regex ] [ "name" regex ]

@@ -516,6 +516,10 @@ const std::vector<CommandInfo>& command_table() {
        "show symbol declarations, types, locations and JIT addresses"},
       {"%syminfo", CommandKind::Info, " <symbol>",
        "show symbol definitions, imports and reference sites"},
+      {"%type", CommandKind::Type, " <symbol>",
+       "print a symbol's declared type (functions: (parameters) -> result)"},
+      {"!", CommandKind::Shell, " <shell-command>",
+       "run one shell line and print stdout and stderr"},
       {"%demangle", CommandKind::Demangle, " <symbol>",
        "print a readable C++ symbol name without loading its library"},
       {"%define", CommandKind::DefineVariable, " <symbol or signature> cpp`<initializer or body>`",
@@ -556,6 +560,22 @@ ParsedCommand parse_command(std::string_view text, bool allow_shell) {
   ParsedCommand cmd;
   const std::size_t start = text.find_first_not_of(kBlank);
   if (start == std::string_view::npos) {
+    return cmd;
+  }
+  if (text[start] == '!') {
+    cmd.kind = CommandKind::Shell;
+    cmd.name = "!";
+    cmd.name_begin = start;
+    cmd.name_end = start + 1;
+    const auto argument = text.find_first_not_of(" \t", start + 1);
+    cmd.arg_begin = argument == std::string_view::npos ? text.size() : argument;
+    cmd.code = Operand{std::string(text.substr(cmd.arg_begin)), {cmd.arg_begin, text.size()}};
+    if (cmd.code->value.empty())
+      set_error(cmd, "missing shell command", {text.size(), text.size()});
+    else if (cmd.code->value.find_first_of("\r\n") != std::string::npos)
+      set_error(cmd, "shell commands must fit on one line", cmd.code->span);
+    else if (cmd.code->value.find('\0') != std::string::npos)
+      set_error(cmd, "shell command contains a NUL byte", cmd.code->span);
     return cmd;
   }
   if (text[start] == '$') {
@@ -628,6 +648,7 @@ ParsedCommand parse_command(std::string_view text, bool allow_shell) {
   switch (cmd.kind) {
     case CommandKind::Cpp:
     case CommandKind::OptionValue:
+    case CommandKind::Shell:
       break;
     case CommandKind::Unknown:
       set_error(cmd, "unknown command '" + cmd.name + "' (try %help)", {start, end});
@@ -659,6 +680,7 @@ ParsedCommand parse_command(std::string_view text, bool allow_shell) {
       parse_members(text, cmd);
       break;
     case CommandKind::Info:
+    case CommandKind::Type:
     case CommandKind::Demangle:
     case CommandKind::LibInfo:
       parse_inspection_operand(text, cmd, true, cmd.arg_begin);
@@ -707,7 +729,8 @@ ParsedCommand parse_command(std::string_view text, bool allow_shell) {
 
 bool is_command_line(std::string_view text) {
   const std::size_t start = text.find_first_not_of(kBlank);
-  return start != std::string_view::npos && (text[start] == '%' || text[start] == '$');
+  return start != std::string_view::npos &&
+         (text[start] == '%' || text[start] == '$' || text[start] == '!');
 }
 
 bool wants_more_input(std::string_view text) {
@@ -734,6 +757,13 @@ bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out,
       break;
     case CommandKind::Quit:
       return false;
+    case CommandKind::Shell: {
+      std::string error;
+      const bool success = execute_shell(cmd.code->value, out, error);
+      if (ok) *ok = success;
+      if (!success) out << "error: " << error << '\n';
+      break;
+    }
     case CommandKind::Clear:
       out << "\x1b[2J\x1b[H" << std::flush;
       break;
@@ -803,6 +833,7 @@ bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out,
     case CommandKind::Methods:
     case CommandKind::Fields:
     case CommandKind::Info:
+    case CommandKind::Type:
     case CommandKind::Libs:
     case CommandKind::LibInfo:
     case CommandKind::Symbols:

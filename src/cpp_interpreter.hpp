@@ -113,6 +113,8 @@ class CppInterpreter {
   // Symbol metadata (all overloads for a name) and available JIT addresses.
   // Does not parse/evaluate user expressions or call the inspected symbol.
   std::optional<std::string> symbol_info(const std::string& name, std::string& error);
+  // Declared types only: no expression evaluation or JIT/native lookup.
+  std::optional<std::string> symbol_type(const std::string& name, std::string& error);
   std::vector<std::string> symbol_names();
   // Define missing storage and publish it to the native loader before %lib.
   // Existing session/library definitions are never replaced.

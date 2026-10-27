@@ -9,6 +9,7 @@
 
 #include <array>
 #include <optional>
+#include <ostream>
 #include <string>
 
 #ifdef __APPLE__
@@ -37,7 +38,8 @@ private:
 };
 
 std::optional<std::string> capture_shell(const std::string &script,
-                                         std::string &error) {
+                                         std::string &error,
+                                         std::ostream* destination = nullptr) {
   int pipe_fds[2];
   if (pipe(pipe_fds) != 0) {
     error = "could not create shell output pipe: " +
@@ -53,13 +55,15 @@ std::optional<std::string> capture_shell(const std::string &script,
         "could not prepare shell process: " + std::string(std::strerror(code));
     return std::nullopt;
   }
-  // Child stdin cannot consume subsequent piped REPL commands. Stderr stays
-  // attached to the REPL; only stdout becomes command text.
+  // Child stdin cannot consume subsequent piped REPL commands. Substitutions
+  // capture stdout and retain stderr; direct commands stream both outputs.
   code = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null",
                                           O_RDONLY, 0);
   if (code == 0)
     code =
         posix_spawn_file_actions_adddup2(&actions, writer.get(), STDOUT_FILENO);
+  if (code == 0 && destination)
+    code = posix_spawn_file_actions_adddup2(&actions, writer.get(), STDERR_FILENO);
   if (code == 0)
     code = posix_spawn_file_actions_addclose(&actions, reader.get());
   if (code == 0)
@@ -95,7 +99,12 @@ std::optional<std::string> capture_shell(const std::string &script,
           "could not read shell output: " + std::string(std::strerror(errno));
       break;
     }
-    output.append(buffer.data(), static_cast<std::size_t>(count));
+    if (destination) {
+      destination->write(buffer.data(), count);
+      destination->flush();
+    } else {
+      output.append(buffer.data(), static_cast<std::size_t>(count));
+    }
   }
   reader.reset();
   int status = 0;
@@ -124,6 +133,12 @@ std::optional<std::string> capture_shell(const std::string &script,
 }
 
 } // namespace
+
+bool execute_shell(const std::string& script, std::ostream& out, std::string& error) {
+  error.clear();
+  out.flush();
+  return capture_shell(script, error, &out).has_value();
+}
 
 ParsedCommand expand_shell_substitutions(const ParsedCommand &command) {
   if (!command.error.empty() || command.shell_commands.empty())

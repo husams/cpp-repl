@@ -146,6 +146,12 @@ CommandResult execute_command(LibraryManager& libs, CppInterpreter& cpp,
                             inspection_colors_enabled());
     return {true, result.has_value()};
   }
+  if (cmd.kind == CommandKind::Type && cmd.error.empty()) {
+    std::string error;
+    const auto type = cpp.symbol_type(cmd.symbol->value, error);
+    out << (type ? *type : "error: " + error + '\n');
+    return {true, type.has_value()};
+  }
   if (cmd.kind == CommandKind::Info && cmd.error.empty()) {
     std::string error;
     if (const auto info = cpp.symbol_info(cmd.symbol->value, error))

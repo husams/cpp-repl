@@ -28,7 +28,12 @@ syn region cppReplCommandLine keepend start="^\s*\ze%" end="$"
 
 syn match cppReplUnknownCommand contained "^\s*\zs%[-A-Za-z_0-9]*"
 syn match cppReplCommand contained
-      \ "^\s*\zs%\%(lib\|libs\|libinfo\|paths\|add-path\|add\|reload\|compile-opts\|add-compile-opt\|set-compile-opts\|use-compile-opts\|class\|methods\|fields\|info\|demangle\|define\|symbols\|mock\|pre\|post\|restore\|hooks\|clear\|help\|quit\)\ze\%(\s\|$\)"
+      \ "^\s*\zs%\%(lib\|libs\|libinfo\|paths\|add-path\|add\|reload\|compile-opts\|add-compile-opt\|set-compile-opts\|use-compile-opts\|class\|methods\|fields\|info\|type\|demangle\|define\|symbols\|mock\|pre\|post\|restore\|hooks\|clear\|help\|quit\)\ze\%(\s\|$\)"
+
+" Bang commands contain a single shell line, with literal shell quoting.
+syn region cppReplShellLine keepend start="^\s*\ze!" end="$"
+      \ contains=@cppReplShell,cppReplCommand
+syn match cppReplCommand contained "^\s*\zs!"
 
 " Argument words; standalone only, so paths such as lib/foo.so stay plain.
 syn match cppReplKeyword contained

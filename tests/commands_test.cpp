@@ -31,6 +31,64 @@ TEST(ParseCommand, KnownCommandWithArgument) {
   EXPECT_TRUE(cmd.error.empty());
 }
 
+TEST(Grammar, TypeSelectsNamesAndTypedOverloads) {
+  for (const char* input : {"%type x", "%type ns::value", "%type 'ns::f(int, double)'"}) {
+    const auto cmd = parse_command(input);
+    EXPECT_EQ(cmd.kind, CommandKind::Type);
+    EXPECT_TRUE(cmd.error.empty()) << cmd.error;
+    ASSERT_TRUE(cmd.symbol);
+  }
+  EXPECT_FALSE(parse_command("%type").error.empty());
+  EXPECT_FALSE(parse_command("%type x y").error.empty());
+}
+
+TEST(Grammar, BangPreservesRawShellTextAndNeverContinues) {
+  const std::string script = "printf '%s' \"$PWD\" | cat; printf '%s' '`literal`'";
+  const auto cmd = parse_command("  ! " + script);
+  EXPECT_EQ(cmd.kind, CommandKind::Shell);
+  EXPECT_EQ(cmd.name_begin, 2u);
+  ASSERT_TRUE(cmd.code);
+  EXPECT_EQ(cmd.code->value, script);
+  EXPECT_TRUE(cmd.shell_commands.empty());
+  EXPECT_TRUE(cmd.error.empty());
+  EXPECT_TRUE(is_command_line(" !pwd"));
+  EXPECT_FALSE(wants_more_input("! echo '"));
+  EXPECT_FALSE(wants_more_input("! if ("));
+  EXPECT_FALSE(parse_command("! ").error.empty());
+  EXPECT_FALSE(parse_command("! echo a\necho b").error.empty());
+  EXPECT_FALSE(parse_command("!\necho a").error.empty());
+  EXPECT_FALSE(parse_command("! \r\necho a").error.empty());
+  EXPECT_FALSE(parse_command(std::string("! echo a\0b", 10)).error.empty());
+  EXPECT_EQ(parse_command("(!true)").kind, CommandKind::Cpp);
+}
+
+TEST(Dispatch, BangStreamsBothOutputsAndReportsFailureAfterOutput) {
+  LibraryManager libs;
+  std::ostringstream out;
+  bool ok = false;
+  EXPECT_TRUE(dispatch(parse_command("! printf 'out\\n\\n'; printf err >&2; exit 7"),
+                       libs, out, &ok));
+  EXPECT_FALSE(ok);
+  EXPECT_EQ(out.str(), "out\n\nerrerror: shell process failed with exit status 7\n");
+  out.str("");
+  dispatch(parse_command("! printf '%s' 'a b' | tr a-z A-Z"), libs, out, &ok);
+  EXPECT_TRUE(ok);
+  EXPECT_EQ(out.str(), "A B");
+  out.str("");
+  dispatch(parse_command("! cat; printf 'done\\n'"), libs, out, &ok);
+  EXPECT_TRUE(ok);
+  EXPECT_EQ(out.str(), "done\n");
+  out.str("");
+  dispatch(parse_command("! i=0; while [ $i -lt 10000 ]; do printf abcdefgh; i=$((i+1)); done"),
+           libs, out, &ok);
+  EXPECT_TRUE(ok);
+  EXPECT_EQ(out.str().size(), 80000u);
+  out.str("");
+  dispatch(parse_command("! kill -TERM $$"), libs, out, &ok);
+  EXPECT_FALSE(ok);
+  EXPECT_NE(out.str().find("terminated by signal"), std::string::npos);
+}
+
 TEST(ParseCommand, LeadingWhitespaceAndNoArgument) {
   const ParsedCommand cmd = parse_command("  %help");
   EXPECT_EQ(cmd.kind, CommandKind::Help);
@@ -724,7 +782,7 @@ TEST(Dispatch, QuitStopsAndHelpListsCommands) {
   for (const std::string& name : command_names()) {
     EXPECT_NE(out.str().find(name), std::string::npos) << name;
   }
-  EXPECT_EQ(command_names().size(), 28u);
+  EXPECT_EQ(command_names().size(), 30u);
 }
 
 TEST(Dispatch, PathsShowsConfiguredDirectoriesAndLoaderSettings) {
