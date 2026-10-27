@@ -21,6 +21,35 @@ bool has(const std::vector<std::string>& names, const std::string& name) {
   return std::find(names.begin(), names.end(), name) != names.end();
 }
 
+TEST(EditorContextTest, CompletesStatementKeywordsInsideFunctions) {
+  std::string error;
+  auto cpp = CppInterpreter::create({}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  const struct {
+    const char* input;
+    const char* prefix;
+    const char* keyword;
+  } cases[] = {{"int keyword_return() { ret", "ret", "return"},
+               {"int keyword_return() {\n  ret", "ret", "return"},
+               {"void keyword_return() { ret", "ret", "return"},
+               {"int keyword_lambda() { auto f = [] { ret", "ret", "return"},
+               {"void keyword_loop() { whi", "whi", "while"},
+               {"void keyword_loop() { fo", "fo", "for"},
+               {"void keyword_condition() { if", "if", "if"}};
+  for (const auto& entry : cases) {
+    const auto result = cpp->complete(entry.input);
+    EXPECT_EQ(result.prefix, entry.prefix) << entry.input;
+    const auto item = std::find_if(result.items.begin(), result.items.end(),
+                                   [&](const auto& candidate) { return candidate.text == entry.keyword; });
+    ASSERT_NE(item, result.items.end()) << entry.input;
+    EXPECT_EQ(item->kind, SemanticKind::Keyword);
+    EXPECT_EQ(item->label, entry.keyword);
+    EXPECT_FALSE(item->insert_call);
+  }
+  EXPECT_TRUE(cpp->execute("int keyword_after_completion = 42;"));
+  EXPECT_EQ(cpp->evaluate("keyword_after_completion"), "(int) 42\n");
+}
+
 struct IncludeTree {
   std::filesystem::path root = std::filesystem::temp_directory_path() /
                                ("cpp-repl-editor-context-" + std::to_string(getpid()));
