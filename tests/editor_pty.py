@@ -38,6 +38,11 @@ with tempfile.TemporaryDirectory() as cwd:
             ("middle_initializer", struct_line + initializer_cursor + b"\t"),
             ("cancel_middle_initializer", b"\x03\x03", True),
             ("after_middle_initializer", b"21 * 2\r", True),
+            ("keyword_open", b"int keyword_pty() {\r"),
+            ("keyword_return", b"  ret\t"),
+            ("keyword_body", b" 42;\r"),
+            ("keyword_close", b"}\r", True),
+            ("keyword_value", b"keyword_pty()\r", True),
             ("quit", b"%quit\r"),
         ],
     )
@@ -66,6 +71,10 @@ with tempfile.TemporaryDirectory() as cwd:
           "define [keyword]" not in plain(out["include_prefix"]))
     check("Tab inside a field initializer leaves the editor responsive",
           "(int) 42" in plain(out["after_middle_initializer"]) and status == 0)
+    check("ret plus Tab completes return inside a multiline function",
+          "return" in plain(out["keyword_return"]) and
+          "error:" not in plain(out["keyword_close"]) and
+          "(int) 42" in plain(out["keyword_value"]))
     if helpers["failures"]:
         for key, value in out.items():
             print(f"{key}: {plain(value)}")

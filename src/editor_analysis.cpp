@@ -432,15 +432,17 @@ public:
         item.text = item.label = candidate.Macro->getName().str();
         item.kind = SemanticKind::Macro;
         item.priority = candidate.Priority;
-      } else if (preprocessor_context &&
-                 candidate.Kind == clang::CodeCompletionResult::RK_Pattern) {
+      } else if (candidate.Kind == clang::CodeCompletionResult::RK_Pattern) {
         auto* completion =
             candidate.CreateCodeCompletionString(sema, context, allocator_, info_, true);
         if (!completion || !completion->getTypedText()) {
           continue;
         }
+        // Statement keywords such as return arrive as code patterns too. Insert
+        // only their typed text; placeholders belong to Clang's snippet model.
         item.text = item.label = completion->getTypedText();
         item.kind = SemanticKind::Keyword;
+        item.insert_call = false;
         item.priority = completion->getPriority();
       } else {
         continue;

@@ -19,7 +19,8 @@ let overlay = match functionDecl(isDefinition(), hasName("example::highlight_edi
 let color_calls = match callExpr(callee(functionDecl(matchesName("(highlight_input|semantic_tokens|lex_cpp|semantic_color)$")))).bind("c") in overlay.f
 foreach row in color_calls do print row.c.call_site.static_callee_name
 // Completion must retain Clang's contextual pattern text before any session
-// symbol supplement (notably preprocessor directive and macro-name requests).
+// symbol supplement, including statement keywords such as return as well as
+// preprocessor directive and macro-name requests.
 let completion = match cxxMethodDecl(isDefinition(), matchesName("CompletionConsumer::ProcessCodeCompleteResults$")).bind("f") in engine
 print completion.length
 let context_calls = match callExpr(callee(functionDecl(matchesName("(getKind|getTypedText|getCodeCompletionFilter|LookupName)$")))).bind("c") in completion.f
