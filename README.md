@@ -44,6 +44,74 @@ problems:
 replxx is fetched with CMake `FetchContent`, pinned to commit
 `2b248467112cbbc16f63fde38230fd7c7ffc55f1` (tag `release-0.0.4`).
 
+## Debugging with LLDB
+
+Start `cpp-repl --debug [compiler flags...]` to open LLDB with JIT debugging
+enabled; the launch option must precede compiler flags. LLDB is discovered at
+build time (preferring the selected LLVM installation), with `lldb` on PATH as
+the fallback. Set `CPP_REPL_LLDB=/path/to/lldb` to choose another executable.
+Automatic wrapper skipping uses LLDB's Python scripting support and the bundled
+`cpp_repl_lldb.py` companion beside the executable. CMake installs both files;
+keep them together if moving the binary. cpp-repl does not link against LLDB.
+
+```text
+$ cpp-repl --debug
+(lldb) breakpoint set -f functions.cpp -l 7
+(lldb) run
+cpp-repl> %add examples/debugging/functions.cpp
+cpp-repl> debug_twice(21)
+... stopped at functions.cpp:7 ...
+(lldb) next
+(lldb) frame variable doubled
+(int) doubled = 42
+(lldb) step
+(lldb) frame variable value
+(int) value = 42
+(lldb) next
+(lldb) frame variable result
+(int) result = 43
+(lldb) bt
+(lldb) continue
+(int) 43
+cpp-repl> %quit
+(lldb) quit
+```
+
+Run this example from the repository root. See
+[examples/debugging](examples/debugging/README.md) for the full walkthrough.
+`next` steps over a statement, `step` enters a call, `finish` returns from the
+current frame, and `continue` resumes the REPL. Ctrl+C while the program is
+running returns control to LLDB. Native crashes also stop in LLDB for inspection.
+
+Source `step` and `finish` commands automatically cross cpp-repl's hook
+dispatchers, so one `step` enters the actual function body. Explicit breakpoints,
+watchpoints, signals and instruction stepping remain inspectable.
+Name breakpoints (`breakpoint set -n debug_twice`) can stop at both the dispatcher
+and body; file/line breakpoints select the executable statement directly.
+Hooks remain available in debug sessions.
+
+Debug sessions force `-O0 -g -fno-limit-debug-info` at interpreter creation, so
+startup optimization flags do not hide locals. Prompt inputs are written into a
+private temporary directory as `input-N.cpp`, with source locations matching the
+saved text; `%add` uses the original source file. These temporary files are removed
+on normal interpreter shutdown; a killed or crashed process may leave them behind.
+Loaded libraries need their own debug information for source-level inspection.
+Redefinition and reload retain older compiled bodies, so a breakpoint may have
+multiple locations; inspect `breakpoint list` and use the desired file/line.
+
+Use `cpp-repl --debug-info [compiler flags...]` to enable debug information and
+prompt source files when launching from an existing LLDB session or attaching an
+external debugger. Enable `settings set plugin.jit-loader.gdb.enable on` before
+running the REPL, then import the companion with
+`command script import /path/to/cpp_repl_lldb.py` to enable automatic dispatcher
+skipping in that debugger. Launching from LLDB is preferable where the OS restricts attach.
+The REPL and LLDB use separate prompts; debugger commands are entered at `(lldb)`.
+Debug startup fails explicitly if JIT debug registration is unavailable.
+
+The opt-in integration test needs an installed LLDB and permission to debug child
+processes: configure with `-DCPP_REPL_TEST_LLDB=ON`, then run
+`ctest --test-dir build -R debugger_lldb --output-on-failure`.
+
 ## Build and test
 
 Requires CMake >= 3.25 (presets), Ninja, Python 3 for the pty test, and LLVM/Clang

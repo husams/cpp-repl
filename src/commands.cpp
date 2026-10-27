@@ -799,7 +799,9 @@ bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out,
              "methods use self/this, post uses result.\n"
              "Keys: Tab complete, Ctrl+J newline, Ctrl+L clear screen, "
              "Ctrl+C cancel, Ctrl+D exit\n"
-             "Overload menu: Up/Down select, Tab accept, Escape close.\n";
+             "Overload menu: Up/Down select, Tab accept, Escape close.\n"
+             "Debugger: launch cpp-repl --debug for LLDB; use --debug-info "
+             "when launching from an existing debugger.\n";
       break;
     }
     case CommandKind::AddPath:

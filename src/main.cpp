@@ -9,6 +9,7 @@
 
 #include "commands.hpp"
 #include "cpp_interpreter.hpp"
+#include "debugger.hpp"
 #include "library_manager.hpp"
 #include "repl.hpp"
 #include "replxx.hxx"
@@ -21,11 +22,15 @@ constexpr const char* kPrompt = "\033[1;32mcpp-repl\033[0m> ";
 
 }  // namespace
 
-// Usage: cpp-repl [compiler flags...], e.g. cpp-repl -std=c++20 -Iinclude
+// Usage: cpp-repl [--debug | --debug-info] [compiler flags...]
 int main(int argc, char** argv) {
+  const bool debug = argc > 1 && std::string(argv[1]) == "--debug";
+  const bool debug_info = argc > 1 && std::string(argv[1]) == "--debug-info";
+  const std::vector<std::string> flags(argv + (debug || debug_info ? 2 : 1), argv + argc);
+  if (debug) return example::launch_debugger(argv[0], flags);
   std::string error;
   const std::unique_ptr<example::CppInterpreter> cpp =
-      example::CppInterpreter::create(std::vector<std::string>(argv + 1, argv + argc), error);
+      example::CppInterpreter::create(flags, error, debug_info);
   if (!cpp) {
     std::cerr << "cpp-repl: cannot create the interpreter: " << error << '\n';
     return EXIT_FAILURE;

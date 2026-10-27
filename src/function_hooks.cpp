@@ -24,6 +24,7 @@
 #include "interpreter_undo.hpp"
 #include "native_call_patch.hpp"
 #include "llvm/Config/llvm-config.h"
+#include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Error.h"
@@ -85,7 +86,22 @@ std::string symbol_name(clang::ASTContext& context, const clang::FunctionDecl& d
 void dispatch_through_slot(llvm::Function& function, llvm::Constant* original,
                            const std::string& slot_name, bool define_slot) {
   auto& module = *function.getParent();
+  const auto* debug = function.getSubprogram();
   function.deleteBody();
+  if (debug) {
+    // Keep the user's scope on the cloned body. Give dispatchers a synthetic
+    // filename so LLDB can skip source stepping stops without hiding user code.
+    llvm::DIBuilder metadata(module, true);
+    auto* thunk = metadata.createFunction(
+        debug->getScope(), "__cpp_repl_dispatch", function.getName(),
+        metadata.createFile("__cpp_repl_dispatch", ""), 1, debug->getType(), 1,
+        llvm::DINode::FlagArtificial | llvm::DINode::FlagThunk,
+        llvm::DISubprogram::SPFlagDefinition, nullptr, nullptr, nullptr, nullptr,
+        llvm::cast<llvm::Function>(original)->getName());
+    thunk->replaceUnit(debug->getUnit());
+    function.setSubprogram(thunk);
+    metadata.finalize();
+  }
   function.setMemoryEffects(llvm::MemoryEffects::unknown());
   for (auto attr :
        {llvm::Attribute::NoUnwind, llvm::Attribute::NoFree, llvm::Attribute::NoSync,
@@ -102,6 +118,9 @@ void dispatch_through_slot(llvm::Function& function, llvm::Constant* original,
   const auto alignment = module.getDataLayout().getPointerABIAlignment(0);
   slot->setAlignment(alignment);
   llvm::IRBuilder<> builder(llvm::BasicBlock::Create(module.getContext(), "entry", &function));
+  if (auto* thunk = function.getSubprogram())
+    builder.SetCurrentDebugLocation(llvm::DILocation::get(
+        module.getContext(), thunk->getLine(), 0, thunk));
   auto* replacement = builder.CreateLoad(pointer, slot);
   replacement->setAlignment(alignment);
   replacement->setAtomic(llvm::AtomicOrdering::Acquire);
@@ -115,11 +134,13 @@ void dispatch_through_slot(llvm::Function& function, llvm::Constant* original,
   // A byval argument lives in the incoming stack frame. A musttail transfer
   // can copy it across the return address on x86_64 (LLVM 21), corrupting the
   // caller's stack. Let normal call lowering allocate a fresh outgoing copy.
+  // Keep a real call in debug builds as well: stepping over a tail dispatcher
+  // skips the user's body, since the dispatcher never returns to its caller.
   bool has_byval = false;
   for (const auto& arg : function.args()) {
     has_byval |= arg.hasByValAttr();
   }
-  if (!has_byval) {
+  if (!has_byval && !debug) {
     call->setTailCallKind(llvm::CallInst::TCK_MustTail);
   }
   if (function.getReturnType()->isVoidTy()) builder.CreateRetVoid();

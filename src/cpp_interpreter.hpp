@@ -22,6 +22,7 @@ namespace example {
 class ProjectCompilationDatabase;
 class NativeSymbolExports;
 class SourceReload;
+class DebugSources;
 struct SourceCompileOptions;
 
 // The clang-repl engine behind the REPL: clang::Interpreter parses each input
@@ -30,9 +31,10 @@ struct SourceCompileOptions;
 class CppInterpreter {
  public:
   // `args` are extra compiler flags (e.g. -std=c++20, -I<dir>). Returns
-  // nullptr and sets `error` on failure.
+  // nullptr and sets `error` on failure. debug_info emits unoptimized debug
+  // information and saves prompt sources for an external debugger.
   static std::unique_ptr<CppInterpreter> create(
-      const std::vector<std::string>& args, std::string& error);
+      const std::vector<std::string>& args, std::string& error, bool debug_info = false);
 
   ~CppInterpreter();
   CppInterpreter(const CppInterpreter&) = delete;
@@ -136,6 +138,9 @@ class CppInterpreter {
   // "LLVM <version>" of the linked Clang.
   static std::string version();
 
+  // Empty outside debug mode; prompt source files live until this object dies.
+  std::string debug_source_directory() const;
+
  private:
   CppInterpreter(std::unique_ptr<clang::Interpreter> interp, llvm::orc::LLJIT& jit,
                  std::vector<std::string> args,
@@ -165,6 +170,7 @@ class CppInterpreter {
   std::unique_ptr<NativeSymbolExports> native_exports_;
   // The preprocessor callbacks refer to this state until interpreter shutdown.
   std::unique_ptr<SourceReload> source_reload_;
+  std::unique_ptr<DebugSources> debug_sources_;
   std::unique_ptr<clang::Interpreter> interp_;
   llvm::orc::LLJIT& jit_;  // Owned by interp_'s incremental executor.
   FunctionHooks hooks_;

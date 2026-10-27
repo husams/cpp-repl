@@ -16,8 +16,10 @@ not stock `clang-repl`, CTK, or a general-purpose C++ MCP server.
   build such as `./build/cpp-repl` or `./build-linux/cpp-repl`. Keep the binary's
   absolute path when changing directories. Do not assume it matches the checkout.
 - Record the startup LLVM version, working directory, arguments and `%help`.
-  Startup arguments are **compiler flags**; do not invent application flags such
-  as `--no-startup`, `--version`, or `--script`.
+  Startup arguments are **compiler flags**, optionally preceded by `--debug`
+  (launch LLDB) or `--debug-info` (prepare for an external debugger) on builds
+  supporting them; check the matching README. Do not invent application flags
+  such as `--no-startup`, `--version`, or `--script`.
 - Check relevant startup scripts before reproducing: numbered `<n>-<name>.repl`
   files in `~/.cpp-repl/`, followed by the nearest project `.cpp-repl/` directory.
   Both can run C++, load libraries and alter flags. A temporary working directory
@@ -58,6 +60,7 @@ project history when the project's launch directory is needed.
 | Question | Commands / action |
 | --- | --- |
 | What settings compile this file? | `%compile-opts path.cpp`; `%use-compile-opts path.cpp` to apply its settings to later prompt input |
+| How do I step through code? | Launch `cpp-repl --debug`; at `(lldb)` set a file/line breakpoint, `run`, then submit C++ at `cpp-repl>`. At a stop use `next`, `step`, `frame variable`, `bt`, and `continue`; the bundled LLDB companion automatically skips hook dispatchers on source `step` and `finish`. |
 | What source is in this session? | `%add` lists it; `%add path.cpp` parses and executes it |
 | What classes or layouts are available? | `%class`, then `%class ns::Type` |
 | What are a record's private or inherited members? | If listed in `%help`: `%methods ns::Type access private include-parents true` and `%fields ns::Type access all include-parents true` |
