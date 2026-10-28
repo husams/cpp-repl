@@ -22,6 +22,7 @@ namespace example {
 class ProjectCompilationDatabase;
 class NativeSymbolExports;
 class SourceReload;
+class EditorPchCache;
 struct SourceCompileOptions;
 
 // The clang-repl engine behind the REPL: clang::Interpreter parses each input
@@ -74,7 +75,14 @@ class CppInterpreter {
   // structured overloads and signature help. Imports current session declarations
   // into a disposable compiler; edited input is never executed.
   Completions complete(const std::string& code);
+  // Signature metadata without enumerating the entire external symbol table.
+  Completions signatures(const std::string& code);
   std::vector<SemanticToken> semantic_tokens(const std::string& code);
+  // Prepare the startup-header cache before accepting interactive input.
+  void prepare_editor();
+  // Cache diagnostics; the path is empty when the editor uses session imports.
+  std::string editor_pch_path() const;
+  std::string editor_pch_status() const;
 
   // Parses and runs a C++ source file in the session as if it were
   // #included, so diagnostics point into the file and its own #include "..."
@@ -150,6 +158,9 @@ class CppInterpreter {
   bool update_compile_options(const std::vector<std::string>& flags,
                               bool replace, const std::string& file,
                               std::string& error);
+  Completions complete_editor(const std::string& code, bool signatures_only);
+  EditorAnalysis analyze_editor_input(const std::string& code, bool completion,
+                                      bool signatures_only = false);
 
   struct FileCompileOptions {
     bool replace_database = false;
@@ -165,6 +176,7 @@ class CppInterpreter {
   std::unique_ptr<NativeSymbolExports> native_exports_;
   // The preprocessor callbacks refer to this state until interpreter shutdown.
   std::unique_ptr<SourceReload> source_reload_;
+  std::unique_ptr<EditorPchCache> editor_pch_;
   std::unique_ptr<clang::Interpreter> interp_;
   llvm::orc::LLJIT& jit_;  // Owned by interp_'s incremental executor.
   FunctionHooks hooks_;
@@ -190,6 +202,7 @@ class CppInterpreter {
   std::string completion_code_;
   std::vector<std::string> completion_args_;
   Completions completion_cache_;
+  bool completion_signatures_only_ = false;
 };
 
 }  // namespace example

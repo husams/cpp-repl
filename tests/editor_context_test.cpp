@@ -144,6 +144,9 @@ TEST(EditorContextTest, LargeHeaderSessionAnalysisAvoidsRepeatedNamespaceImports
   auto cpp = CppInterpreter::create({"-I" + tree.quoted.string()}, error);
   ASSERT_NE(cpp, nullptr) << error;
   ASSERT_TRUE(cpp->execute("#include \"large_editor.hpp\""));
+  // Interactive startup prepares the header cache before accepting keystrokes.
+  cpp->prepare_editor();
+  ASSERT_FALSE(cpp->editor_pch_path().empty()) << cpp->editor_pch_status();
   const auto start = std::chrono::steady_clock::now();
   const auto completion = cpp->complete("editor_large::symbol_2999");
   const auto completed = std::chrono::steady_clock::now();

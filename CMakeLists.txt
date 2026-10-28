@@ -55,7 +55,7 @@ target_include_directories(example_core SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
 target_link_libraries(example_core PUBLIC replxx ${CMAKE_DL_LIBS} PRIVATE LLVM)
 target_compile_options(example_core PRIVATE -Wall -Wextra -Wpedantic)
 
-add_library(cpp_interp STATIC src/cpp_interpreter.cpp src/editor_analysis.cpp src/cpp_inspect.cpp src/cpp_symbols.cpp src/function_hooks.cpp src/loaded_symbols.cpp src/runtime_inspection.cpp src/project_compilation_database.cpp src/source_compile_options.cpp src/startup_files.cpp src/session_commands.cpp src/native_symbol_exports.cpp)
+add_library(cpp_interp STATIC src/cpp_interpreter.cpp src/editor_analysis.cpp src/editor_pch.cpp src/cpp_inspect.cpp src/cpp_symbols.cpp src/function_hooks.cpp src/loaded_symbols.cpp src/runtime_inspection.cpp src/project_compilation_database.cpp src/source_compile_options.cpp src/startup_files.cpp src/session_commands.cpp src/native_symbol_exports.cpp)
 find_program(CPP_REPL_CLANG_EXECUTABLE NAMES clang
   HINTS "${LLVM_TOOLS_BINARY_DIR}" "${LLVM_INSTALL_PREFIX}/bin" REQUIRED)
 set(REPLXX_NATIVE_SOURCE src/native_call_patch.cpp)
@@ -167,7 +167,7 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
   gtest_discover_tests(library_dependency_test)
 
   add_executable(cpp_interpreter_test tests/cpp_interpreter_test.cpp tests/template_callables_test.cpp
-    tests/editor_context_test.cpp tests/editor_input_test.cpp tests/editor_call_test.cpp
+    tests/editor_context_test.cpp tests/editor_pch_test.cpp tests/editor_input_test.cpp tests/editor_call_test.cpp
     tests/expression_values_test.cpp tests/repl_options_session_test.cpp)
   add_executable(iterative_development_test tests/iterative_development_test.cpp)
   target_link_libraries(iterative_development_test PRIVATE cpp_interp GTest::gtest_main)

@@ -9,6 +9,7 @@
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/ASTImporter.h"
+#include "clang/AST/ASTImportError.h"
 #include "clang/AST/ASTImporterSharedState.h"
 #include "clang/AST/DeclLookups.h"
 #include "clang/AST/DeclTemplate.h"
@@ -25,14 +26,18 @@
 #include "clang/Lex/PreprocessorOptions.h"
 #include "clang/Sema/CodeCompleteConsumer.h"
 #include "clang/Sema/Lookup.h"
+#include "clang/Sema/MultiplexExternalSemaSource.h"
 #include "clang/Sema/Sema.h"
+#include "clang/Serialization/ASTReader.h"
 #include "cpp_lexer.hpp"
 #include "cpp_symbols.hpp"
 #include "definition_shadowing.hpp"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Support/CrashRecoveryContext.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/ADT/SmallString.h"
 
 namespace example {
 namespace {
@@ -348,21 +353,27 @@ class CompletionConsumer : public clang::CodeCompleteConsumer {
   EditorAnalysis& result_;
   clang::CompilerInstance& session_;
   const std::string& code_;
+  bool signatures_only_;
 
 public:
   CompletionConsumer(EditorAnalysis& result, clang::CompilerInstance& session,
-                     const std::string& code)
-      : CodeCompleteConsumer([] {
+                     const std::string& code, bool signatures_only)
+      : CodeCompleteConsumer([signatures_only] {
         clang::CodeCompleteOptions options;
         options.IncludeGlobals = true;
-        options.IncludeMacros = true;
+        // Clang's default macro enumeration deserializes every macro from the
+        // PCH before applying the completion prefix. We add matching macros
+        // from the live/session and edited-buffer preprocessor state below.
+        options.IncludeMacros = false;
         options.IncludeCodePatterns = true;
         options.IncludeBriefComments = true;
+        options.LoadExternal = !signatures_only;
         return options;
       }())
       , result_(result)
       , session_(session)
-      , code_(code) {}
+      , code_(code)
+      , signatures_only_(signatures_only) {}
 
   clang::CodeCompletionAllocator& getAllocator() override { return allocator_; }
 
@@ -370,6 +381,9 @@ public:
 
   void ProcessCodeCompleteResults(clang::Sema& sema, clang::CodeCompletionContext context,
                                   clang::CodeCompletionResult* results, unsigned count) override {
+    if (signatures_only_) {
+      return;
+    }
     const auto prefix = sema.getPreprocessor().getCodeCompletionFilter();
     const auto kind = context.getKind();
     const bool include_context = kind == clang::CodeCompletionContext::CCC_IncludedFile;
@@ -479,13 +493,52 @@ public:
       }
       result_.items.push_back(std::move(item));
     }
-    if (macro_context) {
+    const bool ordinary_macro_context =
+        !preprocessor_context && context.getBaseType().isNull() &&
+        !context.getCXXScopeSpecifier() &&
+        (kind == clang::CodeCompletionContext::CCC_TopLevel ||
+         kind == clang::CodeCompletionContext::CCC_ClassStructUnion ||
+         kind == clang::CodeCompletionContext::CCC_Other ||
+         kind == clang::CodeCompletionContext::CCC_OtherWithMacros ||
+         kind == clang::CodeCompletionContext::CCC_Statement ||
+         kind == clang::CodeCompletionContext::CCC_Expression ||
+         kind == clang::CodeCompletionContext::CCC_ParenthesizedExpression ||
+         kind == clang::CodeCompletionContext::CCC_Type ||
+         kind == clang::CodeCompletionContext::CCC_Recovery ||
+         kind == clang::CodeCompletionContext::CCC_TopLevelOrExpression);
+    if (macro_context || ordinary_macro_context) {
       auto& preprocessor = sema.getPreprocessor();
-      for (const auto& entry : preprocessor.macros()) {
-        const auto* identifier = entry.first;
-        const auto name = identifier->getName();
+      // Gather names before resolving any external/PCH identifiers: resolving
+      // one can update the preprocessor's macro table and invalidate iterators.
+      std::set<std::string> macro_names;
+      for (const auto& entry : session_.getPreprocessor().macros(false)) {
+        macro_names.insert(entry.first->getName().str());
+      }
+      for (const auto& entry : preprocessor.macros(false)) {
+        macro_names.insert(entry.first->getName().str());
+      }
+      const bool include_undefined =
+          kind == clang::CodeCompletionContext::CCC_PreprocessorExpression;
+      const auto preferred = context.getPreferredType();
+      const bool preferred_pointer =
+          !preferred.isNull() &&
+          (preferred->isAnyPointerType() || preferred->isMemberPointerType() ||
+           preferred->isBlockPointerType());
+      for (const auto& name : macro_names) {
         if (!llvm::StringRef(name).starts_with(prefix) ||
-            !preprocessor.getMacroDefinition(identifier).getMacroInfo()) {
+            (!macro_context && name.rfind("__", 0) == 0)) {
+          continue;
+        }
+        auto* identifier = &sema.getASTContext().Idents.get(name);
+        if (identifier->isOutOfDate()) {
+          if (auto* external = preprocessor.getExternalSource()) {
+            external->updateOutOfDateIdentifier(*identifier);
+          }
+        }
+        const auto definition = preprocessor.getMacroDefinition(identifier);
+        const auto* macro = definition.getMacroInfo();
+        if ((!macro && !include_undefined) ||
+            (macro && macro->isUsedForHeaderGuard() && !macro_context)) {
           continue;
         }
         const auto duplicate =
@@ -493,8 +546,10 @@ public:
                          [&](const auto& existing) { return existing.text == name; });
         if (duplicate == result_.items.end()) {
           CompletionItem item;
-          item.text = item.label = name.str();
+          item.text = item.label = name;
           item.kind = SemanticKind::Macro;
+          item.priority = clang::getMacroUsagePriority(name, sema.getLangOpts(),
+                                                       preferred_pointer);
           result_.items.push_back(std::move(item));
         }
       }
@@ -522,6 +577,9 @@ public:
           kind == clang::CodeCompletionContext::CCC_OtherWithMacros ||
           kind == clang::CodeCompletionContext::CCC_Type));
     if (!supplement_allowed) {
+      return;
+    }
+    if (signatures_only_) {
       return;
     }
     for (const auto& qualified : user_symbol_names(session_.getASTContext())) {
@@ -588,10 +646,448 @@ public:
 // Importing every namespace member eagerly would resurrect obsolete versions
 // and make a standard-library include expensive on every editor request.
 class SessionImporter : public clang::ASTImporter {
+  const std::set<std::string>& pch_headers_;
+  clang::ASTReader* pch_reader_;
+  std::map<std::pair<const clang::SourceManager*, unsigned>, std::string> canonical_paths_;
+  std::set<std::pair<const clang::DeclContext*, clang::DeclarationName>> pending_namespace_lookups_;
+  std::set<clang::DeclarationName> imported_global_names_;
+
+  static bool is_specialization(const clang::Decl* decl) {
+    if (llvm::isa<clang::ClassTemplateSpecializationDecl,
+                  clang::VarTemplateSpecializationDecl>(decl)) {
+      return true;
+    }
+    if (const auto* function = llvm::dyn_cast<clang::FunctionDecl>(decl)) {
+      return function->getTemplateSpecializationKind() != clang::TSK_Undeclared;
+    }
+    return false;
+  }
+
+  std::optional<std::pair<std::string, unsigned>> file_location(
+      const clang::SourceManager& source, clang::SourceLocation location) {
+    if (location.isInvalid() || !location.isFileID()) {
+      return std::nullopt;
+    }
+    const auto key = std::make_pair(&source, source.getFileID(location).getHashValue());
+    auto found = canonical_paths_.find(key);
+    if (found == canonical_paths_.end()) {
+      llvm::SmallString<256> canonical;
+      const auto filename = source.getFilename(location);
+      if (filename.empty() || llvm::sys::fs::real_path(filename, canonical)) {
+        return std::nullopt;
+      }
+      found = canonical_paths_.emplace(key, canonical.str().str()).first;
+    }
+    return std::make_pair(found->second, source.getFileOffset(location));
+  }
+
+  std::optional<std::pair<std::string, std::string>> canonical_spelling_location(
+      const clang::Decl* decl) {
+    const auto& source = decl->getASTContext().getSourceManager();
+    auto location = decl->getLocation();
+    std::string header;
+    std::string identity;
+    // Include every expansion site: repeated (and nested) macro invocations
+    // share their spelling token but can declare different overloads/types.
+    for (;;) {
+      const auto anchor = file_location(source, source.getSpellingLoc(location));
+      if (!anchor) {
+        return std::nullopt;
+      }
+      if (header.empty()) {
+        header = anchor->first;
+      }
+      identity += anchor->first;
+      identity.push_back('\0');
+      identity += std::to_string(anchor->second);
+      identity.push_back('\0');
+      if (!location.isMacroID()) {
+        break;
+      }
+      location = source.getImmediateMacroCallerLoc(location);
+    }
+    return std::make_pair(std::move(header), std::move(identity));
+  }
+
+  static clang::NamedDecl* template_pattern(clang::NamedDecl* decl) {
+    if (auto* templ = llvm::dyn_cast<clang::FunctionTemplateDecl>(decl)) {
+      return templ->getTemplatedDecl();
+    }
+    if (auto* templ = llvm::dyn_cast<clang::ClassTemplateDecl>(decl)) {
+      return templ->getTemplatedDecl();
+    }
+    if (auto* templ = llvm::dyn_cast<clang::TypeAliasTemplateDecl>(decl)) {
+      return templ->getTemplatedDecl();
+    }
+    if (auto* templ = llvm::dyn_cast<clang::VarTemplateDecl>(decl)) {
+      return templ->getTemplatedDecl();
+    }
+    return decl;
+  }
+
+  clang::NamedDecl* find_pch_equivalent(clang::NamedDecl* source) {
+    if (pch_headers_.empty() || !source || source->getDeclName().isEmpty()) {
+      return nullptr;
+    }
+    if (auto* function = llvm::dyn_cast<clang::FunctionDecl>(source)) {
+      if (function->getTemplateSpecializationKind() == clang::TSK_ExplicitSpecialization ||
+          function->getPrimaryTemplate() || source->getDeclContext()->isFunctionOrMethod()) {
+        return nullptr;
+      }
+      auto* pattern = function->getInstantiatedFromMemberFunction();
+      if (pattern) {
+        const auto pattern_location = canonical_spelling_location(pattern);
+        if (!pattern_location || !pch_headers_.count(pattern_location->first)) {
+          return nullptr;
+        }
+        auto* imported_owner = GetAlreadyImportedOrNull(
+            clang::Decl::castFromDeclContext(source->getDeclContext()));
+        auto* target_context = imported_owner
+                                  ? clang::Decl::castToDeclContext(imported_owner)
+                                  : nullptr;
+        if (!target_context) {
+          return nullptr;
+        }
+        auto* target_specialization =
+            llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(imported_owner);
+        if (!target_specialization ||
+            !target_specialization->getSpecializedTemplate()->isFromASTFile()) {
+          return nullptr;
+        }
+        for (auto* candidate : target_context->decls()) {
+          auto* target_function = llvm::dyn_cast<clang::FunctionDecl>(candidate);
+          if (!target_function || target_function->getKind() != function->getKind()) {
+            continue;
+          }
+          auto* target_pattern = target_function->getInstantiatedFromMemberFunction();
+          const auto target_location = target_pattern
+                                           ? canonical_spelling_location(target_pattern)
+                                           : std::nullopt;
+          if (target_pattern && target_location &&
+              *target_location == *pattern_location) {
+            return target_function;
+          }
+        }
+        return nullptr;
+      }
+    }
+    if (is_specialization(source)) {
+      return nullptr;
+    }
+    if (source->getDeclContext()->isFunctionOrMethod()) {
+      return nullptr;
+    }
+    const auto source_location = canonical_spelling_location(source);
+    if (!source_location || !pch_headers_.count(source_location->first)) {
+      return nullptr;
+    }
+    clang::DeclContext* target_context = nullptr;
+    auto* owner = source->getDeclContext();
+    if (owner->isFileContext()) {
+      auto imported_context = ImportContext(owner);
+      if (!imported_context) {
+        llvm::consumeError(imported_context.takeError());
+        return nullptr;
+      }
+      target_context = *imported_context;
+    } else if (auto* imported_owner =
+                   GetAlreadyImportedOrNull(clang::Decl::castFromDeclContext(owner))) {
+      target_context = clang::Decl::castToDeclContext(imported_owner);
+    } else {
+      // Parameters and template arguments can be imported before their owner
+      // is mapped. Importing that owner here would recursively import this decl.
+      return nullptr;
+    }
+    clang::DeclarationName target_name = name_in(source->getDeclName(), getToContext());
+    if (target_name.isEmpty()) {
+      return nullptr;
+    }
+    auto candidates = target_context->noload_lookup(target_name);
+    // An imported forward declaration can make lookup nonempty while the
+    // matching PCH redeclaration is still external. Ask the reader for this
+    // one name even in that case, with a per-context/name reentrancy guard.
+    const auto key = std::make_pair(static_cast<const clang::DeclContext*>(target_context),
+                                    target_name);
+    auto* primary_context = target_context->getPrimaryContext();
+    if (pch_reader_ && primary_context->hasExternalVisibleStorage() &&
+        pending_namespace_lookups_.insert(key).second) {
+      pch_reader_->FindExternalVisibleDeclsByName(primary_context, target_name, target_context);
+      candidates = target_context->noload_lookup(target_name);
+      pending_namespace_lookups_.erase(key);
+    }
+    for (auto* candidate : candidates) {
+      auto* named = llvm::dyn_cast<clang::NamedDecl>(candidate);
+      if (!named || !named->isFromASTFile() || is_specialization(named)) {
+        continue;
+      }
+      // Lookup can return friend-injected declarations whose lexical owner is
+      // a record even though their semantic context is this namespace. Only
+      // record members that ASTImporter may reorder need exact lexical-owner
+      // membership here.
+      if ((llvm::isa<clang::FieldDecl>(named) ||
+           llvm::isa<clang::IndirectFieldDecl>(named)) &&
+          (named->getLexicalDeclContext() != target_context ||
+           !target_context->containsDeclAndLoad(named))) {
+        continue;
+      }
+      for (auto* pattern : {named, template_pattern(named)}) {
+        if (!pattern || is_specialization(pattern) || pattern->getKind() != source->getKind()) {
+          continue;
+        }
+        const auto target_location = canonical_spelling_location(pattern);
+        if (target_location && *target_location == *source_location) {
+          return pattern;
+        }
+      }
+      if (auto* templ = llvm::dyn_cast<clang::ClassTemplateDecl>(named)) {
+        for (auto* redeclaration : templ->redecls()) {
+          if (!redeclaration->isFromASTFile()) {
+            continue;
+          }
+          auto* templated_record = redeclaration->getTemplatedDecl();
+          if (source->getKind() == redeclaration->getKind()) {
+            const auto redeclaration_location = canonical_spelling_location(redeclaration);
+            if (redeclaration_location && *redeclaration_location == *source_location) {
+              return redeclaration;
+            }
+          }
+          if (source->getKind() == templated_record->getKind()) {
+            const auto record_location = canonical_spelling_location(templated_record);
+            if (templated_record->isFromASTFile() && record_location &&
+                *record_location == *source_location) {
+              return templated_record;
+            }
+          }
+        }
+        if (auto* definition = templ->getTemplatedDecl()->getDefinition()) {
+          const auto definition_location = canonical_spelling_location(definition);
+          if (definition_location && *definition_location == *source_location) {
+            if (source->getKind() == templ->getKind()) {
+              auto* definition_template = definition->getDescribedClassTemplate();
+              if (definition_template && definition_template->isFromASTFile()) {
+                return definition_template;
+              }
+            }
+            if (source->getKind() == definition->getKind() && definition->isFromASTFile()) {
+              return definition;
+            }
+          }
+        }
+      }
+    }
+    return nullptr;
+  }
+
+  clang::ClassTemplateSpecializationDecl* import_pch_implicit_specialization(
+      clang::ClassTemplateSpecializationDecl* source) {
+    if (!source || source->getSpecializationKind() != clang::TSK_ImplicitInstantiation) {
+      return nullptr;
+    }
+    const auto instantiated_from = source->getInstantiatedFrom();
+    clang::NamedDecl* selected_pattern = nullptr;
+    if (llvm::isa<clang::ClassTemplateDecl*>(instantiated_from)) {
+      selected_pattern = llvm::cast<clang::ClassTemplateDecl*>(instantiated_from);
+    } else if (llvm::isa<clang::ClassTemplatePartialSpecializationDecl*>(instantiated_from)) {
+      selected_pattern =
+          llvm::cast<clang::ClassTemplatePartialSpecializationDecl*>(instantiated_from);
+    }
+    const auto pattern_location =
+        selected_pattern ? canonical_spelling_location(selected_pattern) : std::nullopt;
+    if (!pattern_location || !pch_headers_.count(pattern_location->first)) {
+      return nullptr;
+    }
+    auto* source_template = source->getSpecializedTemplate();
+    if (!find_pch_equivalent(source_template)) {
+      return nullptr;
+    }
+    auto imported_template = Import(source_template);
+    if (!imported_template) {
+      llvm::consumeError(imported_template.takeError());
+      return nullptr;
+    }
+    auto* target_template = llvm::dyn_cast<clang::ClassTemplateDecl>(*imported_template);
+    if (!target_template) {
+      return nullptr;
+    }
+    std::vector<clang::TemplateArgument> arguments;
+    for (const auto& argument : source->getTemplateArgs().asArray()) {
+      if (argument.getKind() != clang::TemplateArgument::Type) {
+        return nullptr;
+      }
+      auto imported_type = Import(argument.getAsType());
+      if (!imported_type) {
+        llvm::consumeError(imported_type.takeError());
+        return nullptr;
+      }
+      arguments.emplace_back(getToContext().getCanonicalType(*imported_type));
+    }
+    void* insert_position = nullptr;
+    auto* target = target_template->findSpecialization(arguments, insert_position);
+    if (target) {
+      auto* definition = llvm::dyn_cast_or_null<clang::ClassTemplateSpecializationDecl>(
+          target->getDefinition());
+      if (!definition || !definition->isCompleteDefinition()) {
+        return nullptr;
+      }
+      // findSpecialization can return a forward redeclaration while the PCH
+      // definition lives in a later redeclaration. Map to the definition so
+      // member lookup and ASTImporter see the definition's lexical context.
+      target = definition;
+      auto* target_pattern = target->getTemplateInstantiationPattern();
+      const auto target_pattern_location =
+          target_pattern ? canonical_spelling_location(target_pattern) : std::nullopt;
+      if (!target_pattern || !target_pattern->isFromASTFile() || !target_pattern_location ||
+          *target_pattern_location != *pattern_location) {
+        return nullptr;
+      }
+      if (auto* already = GetAlreadyImportedOrNull(source);
+          already && already != target) {
+        return nullptr;
+      }
+      MapImported(source, target);
+      return target;
+    }
+    return target;
+  }
+
+  clang::FriendDecl* find_pch_equivalent_friend(clang::FriendDecl* source) {
+    const auto source_location = canonical_spelling_location(source);
+    auto* source_owner_decl = clang::Decl::castFromDeclContext(source->getDeclContext());
+    auto* source_owner_record = llvm::dyn_cast<clang::CXXRecordDecl>(source_owner_decl);
+    auto* source_owner = llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(
+        source_owner_record);
+    if (!source_owner_record ||
+        (source_owner &&
+         source_owner->getSpecializationKind() != clang::TSK_ImplicitInstantiation)) {
+      return nullptr;
+    }
+    if (!source_location || !pch_headers_.count(source_location->first)) {
+      return nullptr;
+    }
+
+    auto* target_owner = llvm::dyn_cast_or_null<clang::CXXRecordDecl>(
+        GetAlreadyImportedOrNull(source_owner_record));
+    if (source_owner) {
+      auto* exact_target = import_pch_implicit_specialization(source_owner);
+      if (!exact_target ||
+          (target_owner && target_owner != exact_target)) {
+        return nullptr;
+      }
+      target_owner = exact_target;
+    } else {
+      auto* equivalent = llvm::dyn_cast_or_null<clang::CXXRecordDecl>(
+          find_pch_equivalent(source_owner_record));
+      const auto source_owner_location = canonical_spelling_location(source_owner_record);
+      const auto target_owner_location =
+          equivalent ? canonical_spelling_location(equivalent) : std::nullopt;
+      if (!equivalent || !equivalent->isFromASTFile() || !source_owner_location ||
+          !target_owner_location || *source_owner_location != *target_owner_location) {
+        return nullptr;
+      }
+      if (target_owner && target_owner != equivalent) {
+        return nullptr;
+      }
+      target_owner = equivalent;
+      if (!GetAlreadyImportedOrNull(source_owner_record)) {
+        MapImported(source_owner_record, target_owner);
+      }
+    }
+    auto* target_specialization =
+        llvm::dyn_cast_or_null<clang::ClassTemplateSpecializationDecl>(target_owner);
+    if (!target_owner ||
+        (source_owner &&
+         (!target_specialization ||
+          !target_specialization->getSpecializedTemplate()->isFromASTFile()))) {
+      return nullptr;
+    }
+    if (source_owner) {
+      auto* source_pattern = source_owner->getTemplateInstantiationPattern();
+      auto* target_pattern = target_owner->getTemplateInstantiationPattern();
+      const auto source_pattern_location =
+          source_pattern ? canonical_spelling_location(source_pattern) : std::nullopt;
+      const auto target_pattern_location =
+          target_pattern ? canonical_spelling_location(target_pattern) : std::nullopt;
+      if (!source_pattern_location || !target_pattern || !target_pattern->isFromASTFile() ||
+          !target_pattern_location ||
+          *source_pattern_location != *target_pattern_location) {
+        return nullptr;
+      }
+    }
+
+    for (auto* target_friend : target_owner->friends()) {
+      if (target_friend->getLexicalDeclContext() != target_owner ||
+          (target_friend->getFriendType() != nullptr) !=
+              (source->getFriendType() != nullptr) ||
+          target_friend->isPackExpansion() != source->isPackExpansion() ||
+          !target_owner->containsDeclAndLoad(target_friend)) {
+        continue;
+      }
+      const auto target_location = canonical_spelling_location(target_friend);
+      if (target_location && *target_location == *source_location) {
+        return target_friend;
+      }
+    }
+    return nullptr;
+  }
+
 protected:
   llvm::Expected<clang::Decl*> ImportImpl(clang::Decl* decl) override {
+    if (auto* source = llvm::dyn_cast<clang::RequiresExprBodyDecl>(decl)) {
+      // Requires-expression bodies are scoped under the function whose
+      // constraints they evaluate. Importing that parent can revisit this body
+      // before ASTImporter creates its usual placeholder. Install a child-AST
+      // shell first so the recursive parent import can resolve it.
+      auto location = Import(source->getLocation());
+      if (!location) {
+        return location.takeError();
+      }
+      auto* target = clang::RequiresExprBodyDecl::Create(
+          getToContext(), getToContext().getTranslationUnitDecl(), *location);
+      target->setImplicit(source->isImplicit());
+      // ImportDeclContext may re-enter this declaration while importing its
+      // parent function and will detach it from its provisional context.
+      getToContext().getTranslationUnitDecl()->addDeclInternal(target);
+      MapImported(source, target);
+
+      auto context = ImportContext(source->getDeclContext());
+      if (!context) {
+        return context.takeError();
+      }
+      auto lexical_context = ImportContext(source->getLexicalDeclContext());
+      if (!lexical_context) {
+        return lexical_context.takeError();
+      }
+      auto* provisional_context = getToContext().getTranslationUnitDecl();
+      if (target->getLexicalDeclContext() == provisional_context) {
+        provisional_context->removeDecl(target);
+      }
+      if (target->getDeclContext() != *context) {
+        target->setDeclContext(*context);
+      }
+      target->setLexicalDeclContext(*lexical_context);
+      (*lexical_context)->addDeclInternal(target);
+      return target;
+    }
+    if (auto* specialization =
+            llvm::dyn_cast<clang::ClassTemplateSpecializationDecl>(decl)) {
+      if (auto* imported = import_pch_implicit_specialization(specialization)) {
+        return imported;
+      }
+    }
+    if (auto* source_friend = llvm::dyn_cast<clang::FriendDecl>(decl)) {
+      if (auto* existing = find_pch_equivalent_friend(source_friend)) {
+        MapImported(decl, existing);
+        return existing;
+      }
+    }
     auto* space = llvm::dyn_cast<clang::NamespaceDecl>(decl);
     if (!space) {
+      if (auto* named = llvm::dyn_cast<clang::NamedDecl>(decl)) {
+        if (auto* existing = find_pch_equivalent(named)) {
+          MapImported(decl, existing);
+          return existing;
+        }
+      }
       return ASTImporter::ImportImpl(decl);
     }
     auto context = ImportContext(space->getDeclContext());
@@ -613,6 +1109,20 @@ protected:
       for (auto* candidate : (*context)->noload_lookup(clang::DeclarationName(identifier))) {
         if ((target = llvm::dyn_cast<clang::NamespaceDecl>(candidate))) {
           break;
+        }
+      }
+      if (!target) {
+        const auto key = std::make_pair(static_cast<const clang::DeclContext*>(*context),
+                                        clang::DeclarationName(identifier));
+        if (pch_reader_ && pending_namespace_lookups_.insert(key).second) {
+          pch_reader_->FindExternalVisibleDeclsByName(*context, clang::DeclarationName(identifier),
+                                                     *context);
+          for (auto* candidate : (*context)->noload_lookup(clang::DeclarationName(identifier))) {
+            if ((target = llvm::dyn_cast<clang::NamespaceDecl>(candidate))) {
+              break;
+            }
+          }
+          pending_namespace_lookups_.erase(key);
         }
       }
     } else if (auto* unit = llvm::dyn_cast<clang::TranslationUnitDecl>(*context)) {
@@ -642,29 +1152,96 @@ protected:
   }
 
 public:
-  SessionImporter(clang::CompilerInstance& child, clang::CompilerInstance& parent)
-      // The default importer scans declarations for every name lookup. Build its
-      // dedicated lookup index so importing a large namespace stays linear.
+  void Imported(clang::Decl* from, clang::Decl*) override {
+    auto* named = llvm::dyn_cast_or_null<clang::NamedDecl>(from);
+    if (named && !llvm::isa<clang::UsingDirectiveDecl>(named) &&
+        named->getDeclContext()->isTranslationUnit() && !named->getDeclName().isEmpty()) {
+      imported_global_names_.insert(named->getDeclName());
+    }
+  }
+
+  SessionImporter(clang::CompilerInstance& child, clang::CompilerInstance& parent,
+                  const std::set<std::string>& pch_headers)
+      // Seed an empty index, then let imports populate it. Indexing the real TU
+      // here would deserialize the entire PCH before the first name lookup.
+      // PCH declarations are resolved by find_pch_equivalent above.
       : ASTImporter(child.getASTContext(), child.getFileManager(), parent.getASTContext(),
                     parent.getFileManager(), false,
                     std::make_shared<clang::ASTImporterSharedState>(
-                        *child.getASTContext().getTranslationUnitDecl())) {}
+                        *clang::TranslationUnitDecl::Create(child.getASTContext())))
+      , pch_headers_(pch_headers)
+      , pch_reader_(child.getASTReader().get()) {}
+
+  clang::DeclarationName name_in(clang::DeclarationName name, clang::ASTContext& context) const {
+    switch (name.getNameKind()) {
+    case clang::DeclarationName::Identifier:
+      return clang::DeclarationName(&context.Idents.get(name.getAsString()));
+    case clang::DeclarationName::CXXOperatorName:
+      return context.DeclarationNames.getCXXOperatorName(name.getCXXOverloadedOperator());
+    case clang::DeclarationName::CXXLiteralOperatorName:
+      return context.DeclarationNames.getCXXLiteralOperatorName(
+          &context.Idents.get(name.getCXXLiteralIdentifier()->getName()));
+    case clang::DeclarationName::CXXUsingDirective:
+      return clang::DeclarationName::getUsingDirectiveName();
+    default:
+      return {};
+    }
+  }
+
+  std::set<clang::DeclarationName> take_imported_global_names() {
+    std::set<clang::DeclarationName> names;
+    names.swap(imported_global_names_);
+    return names;
+  }
 };
 
 // Like clang-repl's completion importer, use a separate AST. Complete imports
 // are needed for instantiated standard-library types (minimal imports conflict).
 // Publish only current definitions and retain every overload. Version namespaces
 // are implementation details; their current members also need ordinary lookup.
-class SessionSource : public clang::ExternalASTSource {
+class SessionSource : public clang::ExternalSemaSource {
   SessionImporter importer_;
+  const EditorPchCache::DeclSnapshot* decl_snapshot_;
   clang::CompilerInstance& parent_;
   clang::TranslationUnitDecl* child_;
   bool loaded_ = false;
+  unsigned import_depth_ = 0;
+  bool draining_global_overloads_ = false;
   std::map<const clang::DeclContext*, std::vector<clang::NamespaceDecl*>> namespaces_;
+  std::vector<clang::NamespaceDecl*> version_namespaces_;
   std::set<const clang::DeclContext*> loaded_namespaces_;
   std::set<std::pair<const clang::DeclContext*, std::string>> pending_lookups_;
+  std::set<clang::DeclarationName> drained_global_names_;
 
-  void copy_session_macros(clang::Preprocessor& target) {
+  bool already_in_pch_prefix(const clang::Decl* decl) const {
+    return decl_snapshot_ && decl_snapshot_->count(decl) &&
+           !llvm::isa<clang::NamespaceDecl, clang::UsingDirectiveDecl>(decl);
+  }
+
+  void drain_global_overloads() {
+    if (draining_global_overloads_) {
+      return;
+    }
+    draining_global_overloads_ = true;
+    auto pending = importer_.take_imported_global_names();
+    while (!pending.empty()) {
+      const auto name = *pending.begin();
+      pending.erase(pending.begin());
+      if (!drained_global_names_.insert(name).second) {
+        continue;
+      }
+      for (auto* decl : parent_.getASTContext().getTranslationUnitDecl()->getPrimaryContext()->lookup(
+               name)) {
+        import(decl);
+      }
+      auto newly_imported = importer_.take_imported_global_names();
+      pending.insert(newly_imported.begin(), newly_imported.end());
+    }
+    draining_global_overloads_ = false;
+  }
+
+  void copy_session_macros(clang::Preprocessor& target,
+                           const EditorPchCache::MacroSnapshot* macro_snapshot) {
     auto& source = parent_.getPreprocessor();
     auto& manager = parent_.getSourceManager();
     auto predefines = target.getPredefines();
@@ -680,7 +1257,18 @@ class SessionSource : public clang::ExternalASTSource {
       if (origin == "<built-in>" || origin == "<command line>") {
         continue;
       }
-      const auto* macro = source.getMacroDefinition(id).getMacroInfo();
+      const auto definition = source.getMacroDefinition(id);
+      // A visible module macro can change without changing the local directive
+      // history. Skip replay only when both the captured and current definition
+      // have no module-provided or ambiguous state.
+      if (macro_snapshot && definition.getModuleMacros().empty() &&
+          !definition.isAmbiguous()) {
+        const auto captured = macro_snapshot->find(id);
+        if (captured != macro_snapshot->end() && captured->second == latest) {
+          continue;
+        }
+      }
+      const auto* macro = definition.getMacroInfo();
       if (macro && macro->isBuiltinMacro()) {
         continue;
       }
@@ -714,23 +1302,60 @@ class SessionSource : public clang::ExternalASTSource {
     target.setPredefines(predefines);
   }
 
+  void define_record(clang::CXXRecordDecl* record) {
+    if (!record || !record->hasDefinition()) {
+      return;
+    }
+    auto imported = importer_.Import(record);
+    if (imported) {
+      if (auto* target = llvm::dyn_cast<clang::CXXRecordDecl>(*imported)) {
+        if (auto* definition = target->getDefinition();
+            definition && definition->isCompleteDefinition()) {
+          return;
+        }
+      }
+    } else {
+      llvm::consumeError(imported.takeError());
+    }
+    if (auto error = importer_.ImportDefinition(record->getDefinition())) {
+      llvm::consumeError(std::move(error));
+    }
+  }
+
   void define_type(clang::QualType type) {
     type = type.getNonReferenceType();
     while (!type.isNull() && type->isPointerType()) {
       type = type->getPointeeType();
     }
     if (!type.isNull()) {
-      if (auto* record = type->getAsCXXRecordDecl()) {
-        if (record->hasDefinition()) {
-          if (auto error = importer_.ImportDefinition(record->getDefinition())) {
-            llvm::consumeError(std::move(error));
-          }
-        }
-      }
+      define_record(type->getAsCXXRecordDecl());
     }
   }
 
+  void register_namespace(clang::NamespaceDecl* source, clang::NamespaceDecl* target) {
+    if (!source || !target) {
+      return;
+    }
+    auto* primary = target->getPrimaryContext();
+    auto& sources = namespaces_[primary];
+    auto* original = source->getCanonicalDecl();
+    if (std::find(sources.begin(), sources.end(), original) == sources.end()) {
+      sources.push_back(original);
+    }
+    primary->setHasExternalVisibleStorage(true);
+  }
+
   void import(clang::Decl* decl) {
+    ++import_depth_;
+#if LLVM_VERSION_MAJOR >= 22
+    const llvm::scope_exit finish([&] {
+#else
+    const auto finish = llvm::make_scope_exit([&] {
+#endif
+      if (--import_depth_ == 0) {
+        drain_global_overloads();
+      }
+    });
     auto* named = llvm::dyn_cast<clang::NamedDecl>(decl);
     if (!named || named->isInvalidDecl()) {
       return;
@@ -760,43 +1385,86 @@ class SessionSource : public clang::ExternalASTSource {
       }
       context->makeDeclVisibleInContext(visible);
       if (auto* space = llvm::dyn_cast<clang::NamespaceDecl>(visible)) {
-        auto* primary = space->getPrimaryContext();
-        auto& sources = namespaces_[primary];
-        // A namespace lookup already spans all of its redeclarations. Retaining
-        // every reopening here repeats the same lookup and, during completion,
-        // traverses the entire redeclaration chain once per reopening.
-        auto* original = llvm::cast<clang::NamespaceDecl>(named)->getCanonicalDecl();
-        if (std::find(sources.begin(), sources.end(), original) == sources.end()) {
-          sources.push_back(original);
+        register_namespace(llvm::cast<clang::NamespaceDecl>(named), space);
+      } else if (auto* source_using = llvm::dyn_cast<clang::UsingDirectiveDecl>(named)) {
+        if (auto* target_using = llvm::dyn_cast<clang::UsingDirectiveDecl>(visible)) {
+          register_namespace(source_using->getNominatedNamespace(),
+                             target_using->getNominatedNamespace());
         }
-        primary->setHasExternalVisibleStorage(true);
       }
     }
     if (const auto* value = llvm::dyn_cast<clang::ValueDecl>(named)) {
       define_type(value->getType());
     }
     if (auto* record = llvm::dyn_cast<clang::CXXRecordDecl>(named)) {
-      if (record->hasDefinition()) {
-        if (auto error = importer_.ImportDefinition(record->getDefinition())) {
-          llvm::consumeError(std::move(error));
+      define_record(record);
+    }
+  }
+
+public:
+  SessionSource(clang::CompilerInstance& child, clang::CompilerInstance& parent,
+                const std::set<std::string>& pch_headers,
+                const EditorPchCache::MacroSnapshot* macro_snapshot,
+                const EditorPchCache::DeclSnapshot* decl_snapshot)
+      : importer_(child, parent, pch_headers)
+      , decl_snapshot_(decl_snapshot)
+      , parent_(parent)
+      , child_(child.getASTContext().getTranslationUnitDecl()) {
+    copy_session_macros(child.getPreprocessor(), macro_snapshot);
+  }
+
+  void initialize() {
+    for (auto* unit = parent_.getASTContext().getTranslationUnitDecl(); unit;
+         unit = unit->getPreviousDecl()) {
+      for (auto* decl : unit->decls()) {
+        if (llvm::isa<clang::UsingDirectiveDecl>(decl)) {
+          import(decl);
+        }
+        if (auto* space = llvm::dyn_cast<clang::NamespaceDecl>(decl);
+            space && space->getName().starts_with("__cpp_repl_version_")) {
+          version_namespaces_.push_back(space);
         }
       }
     }
   }
 
-public:
-  SessionSource(clang::CompilerInstance& child, clang::CompilerInstance& parent)
-      : importer_(child, parent)
-      , parent_(parent)
-      , child_(child.getASTContext().getTranslationUnitDecl()) {
-    copy_session_macros(child.getPreprocessor());
-  }
-
   bool FindExternalVisibleDeclsByName(const clang::DeclContext* context,
                                       clang::DeclarationName name,
                                       const clang::DeclContext*) override {
+    if (context->isTranslationUnit()) {
+      const auto key = std::make_pair(context->getPrimaryContext(), name.getAsString());
+      if (!pending_lookups_.insert(key).second) {
+        return false;
+      }
+#if LLVM_VERSION_MAJOR >= 22
+      const llvm::scope_exit cleanup([&] { pending_lookups_.erase(key); });
+#else
+      const auto cleanup = llvm::make_scope_exit([&] { pending_lookups_.erase(key); });
+#endif
+      bool any = false;
+      const auto parent_name = importer_.name_in(name, parent_.getASTContext());
+      if (!parent_name.isEmpty()) {
+        for (auto* decl : parent_.getASTContext().getTranslationUnitDecl()->getPrimaryContext()->lookup(
+                 parent_name)) {
+          import(decl);
+          any = true;
+        }
+        // Versioned public declarations are stored under private namespace
+        // shells; check those shells by name while keeping obsolete versions
+        // out of ordinary lookup.
+        for (auto* version : version_namespaces_) {
+          for (auto* member : version->lookup(parent_name)) {
+            if (is_current_definition(*member)) {
+              import(member);
+              any = true;
+            }
+          }
+        }
+      }
+      return any;
+    }
     const auto found = namespaces_.find(context->getPrimaryContext());
-    if (found == namespaces_.end() || !name.isIdentifier()) {
+    if (found == namespaces_.end()) {
       return false;
     }
     // Publishing an imported declaration can ask this source for that same
@@ -811,10 +1479,12 @@ public:
 #else
     const auto cleanup = llvm::make_scope_exit([&] { pending_lookups_.erase(key); });
 #endif
-    const auto parent_name =
-        clang::DeclarationName(&parent_.getASTContext().Idents.get(name.getAsString()));
     bool any = false;
     const auto sources = found->second;
+    const auto parent_name = importer_.name_in(name, parent_.getASTContext());
+    if (parent_name.isEmpty()) {
+      return false;
+    }
     for (auto* space : sources) {
       for (auto* decl : space->lookup(parent_name)) {
         import(decl);
@@ -838,7 +1508,9 @@ public:
       for (auto* space : sources) {
         for (auto* previous : space->redecls()) {
           for (auto* decl : previous->decls()) {
-            import(decl);
+            if (!already_in_pch_prefix(decl)) {
+              import(decl);
+            }
           }
         }
       }
@@ -852,7 +1524,9 @@ public:
     for (auto* unit = parent_.getASTContext().getTranslationUnitDecl(); unit;
          unit = unit->getPreviousDecl()) {
       for (auto* decl : unit->decls()) {
-        import(decl);
+        if (!already_in_pch_prefix(decl)) {
+          import(decl);
+        }
       }
     }
     child_->setHasExternalVisibleStorage(false);
@@ -981,12 +1655,21 @@ class EditorAction : public clang::SyntaxOnlyAction {
   clang::CompilerInstance& parent_;
   EditorAnalysis& result_;
   std::size_t size_;
+  const std::set<std::string>& pch_headers_;
+  const EditorPchCache::MacroSnapshot* macro_snapshot_;
+  const EditorPchCache::DeclSnapshot* decl_snapshot_;
 
 public:
-  EditorAction(clang::CompilerInstance& parent, EditorAnalysis& result, std::size_t size)
+  EditorAction(clang::CompilerInstance& parent, EditorAnalysis& result, std::size_t size,
+               const std::set<std::string>& pch_headers,
+               const EditorPchCache::MacroSnapshot* macro_snapshot,
+               const EditorPchCache::DeclSnapshot* decl_snapshot)
       : parent_(parent)
       , result_(result)
-      , size_(size) {}
+      , size_(size)
+      , pch_headers_(pch_headers)
+      , macro_snapshot_(macro_snapshot)
+      , decl_snapshot_(decl_snapshot) {}
 
   std::unique_ptr<clang::ASTConsumer> CreateASTConsumer(clang::CompilerInstance&,
                                                         llvm::StringRef) override {
@@ -995,12 +1678,27 @@ public:
 
   void ExecuteAction() override {
     auto& child = getCompilerInstance();
-    auto source = llvm::makeIntrusiveRefCnt<SessionSource>(child, parent_);
+    result_.pch_loaded = static_cast<bool>(child.getASTReader());
+    auto source = llvm::makeIntrusiveRefCnt<SessionSource>(
+        child, parent_, pch_headers_, result_.pch_loaded ? macro_snapshot_ : nullptr,
+        result_.pch_loaded ? decl_snapshot_ : nullptr);
     child.getPreprocessor().addPPCallbacks(std::make_unique<MacroExpansionColors>(
         child.getSourceManager(), child.getLangOpts(), result_, size_));
-    child.getASTContext().setExternalSource(source);
+    auto existing = child.getASTContext().getExternalSourcePtr();
+    if (existing) {
+      auto* sema_source = llvm::dyn_cast<clang::ExternalSemaSource>(existing.get());
+      if (sema_source) {
+        auto multiplexed = llvm::makeIntrusiveRefCnt<clang::MultiplexExternalSemaSource>(
+            llvm::IntrusiveRefCntPtr<clang::ExternalSemaSource>(sema_source), source);
+        child.getASTContext().setExternalSource(multiplexed);
+      } else {
+        child.getASTContext().setExternalSource(source);
+      }
+    } else {
+      child.getASTContext().setExternalSource(source);
+    }
+    source->initialize();
     child.getASTContext().getTranslationUnitDecl()->setHasExternalVisibleStorage(true);
-    child.getASTContext().getTranslationUnitDecl()->lookups();
     // Keep REPL top-level statements, but terminate this finite buffer with EOF.
     // LLVM 21/22's lexer emits annot_repl_input_end whenever the language's REPL
     // extensions are enabled, independently of IncrementalProcessing. Parser
@@ -1046,6 +1744,22 @@ public:
   }
 };
 
+class EditorDiagnostics : public clang::DiagnosticConsumer {
+  EditorAnalysis& result_;
+
+public:
+  explicit EditorDiagnostics(EditorAnalysis& result) : result_(result) {}
+  void HandleDiagnostic(clang::DiagnosticsEngine::Level level,
+                        const clang::Diagnostic& diagnostic) override {
+    if (level >= clang::DiagnosticsEngine::Error && !result_.pch_loaded &&
+        result_.pch_error.empty()) {
+      llvm::SmallString<256> message;
+      diagnostic.FormatDiagnostic(message);
+      result_.pch_error = message.str().str();
+    }
+  }
+};
+
 } // namespace
 
 const char* semantic_kind_name(SemanticKind kind) {
@@ -1076,18 +1790,22 @@ const char* semantic_kind_name(SemanticKind kind) {
 
 EditorAnalysis analyze_editor(std::unique_ptr<clang::CompilerInstance> compiler,
                               clang::CompilerInstance& session, const std::string& code,
-                              bool completion) {
+                              bool completion, bool signatures_only,
+                              const std::set<std::string>& pch_headers,
+                              const EditorPchCache::MacroSnapshot* macro_snapshot,
+                              const EditorPchCache::DeclSnapshot* decl_snapshot) {
   EditorAnalysis result;
   if (code.empty() || code.size() > 65536) {
     return result;
   }
   DiagnosticScope diagnostics(session.getDiagnostics());
-  compiler->getDiagnostics().setClient(std::make_unique<clang::IgnoringDiagConsumer>().release(),
+  compiler->getDiagnostics().setClient(std::make_unique<EditorDiagnostics>(result).release(),
                                        true);
   const std::string filename = "input_line_[Editor]";
   auto buffer = llvm::MemoryBuffer::getMemBufferCopy(code + "\n;", filename);
   compiler->getPreprocessorOpts().addRemappedFile(filename, buffer.release());
   compiler->getFrontendOpts().Inputs = {clang::FrontendInputFile(filename, clang::Language::CXX)};
+  compiler->getInvocation().getLangOpts().SpellChecking = false;
   if (completion) {
     const auto last_newline = code.rfind('\n');
     const unsigned line = std::count(code.begin(), code.end(), '\n') + 1;
@@ -1095,9 +1813,11 @@ EditorAnalysis analyze_editor(std::unique_ptr<clang::CompilerInstance> compiler,
         code.size() - (last_newline == std::string::npos ? 0 : last_newline + 1) + 1;
     compiler->getFrontendOpts().CodeCompletionAt = {filename, line, column};
     compiler->setCodeCompletionConsumer(
-        std::make_unique<CompletionConsumer>(result, session, code).release());
+        std::make_unique<CompletionConsumer>(result, session, code, signatures_only).release());
   }
-  auto action = std::make_unique<EditorAction>(session, result, code.size());
+  auto action =
+      std::make_unique<EditorAction>(session, result, code.size(), pch_headers,
+                                     macro_snapshot, decl_snapshot);
   llvm::CrashRecoveryContext::Enable();
   llvm::CrashRecoveryContext recovery;
   const bool completed = recovery.RunSafely([&] { compiler->ExecuteAction(*action); });
@@ -1107,7 +1827,9 @@ EditorAnalysis analyze_editor(std::unique_ptr<clang::CompilerInstance> compiler,
     // that compiler; the persistent interpreter has not parsed this buffer.
     (void)action.release();
     (void)compiler.release();
-    return {};
+    EditorAnalysis failed;
+    failed.pch_error = "editor analysis crashed while using the cached compiler";
+    return failed;
   }
   std::sort(result.items.begin(), result.items.end(), [](const auto& a, const auto& b) {
     return std::tie(a.priority, a.text, a.label, a.detail) <

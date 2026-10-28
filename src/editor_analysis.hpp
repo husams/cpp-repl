@@ -3,8 +3,11 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
+
+#include "editor_pch.hpp"
 
 namespace clang {
 class CompilerInstance;
@@ -53,6 +56,8 @@ struct SemanticToken {
 };
 
 struct EditorAnalysis {
+  bool pch_loaded = false;
+  std::string pch_error;
   std::vector<CompletionItem> items;
   std::vector<std::string> signatures;
   std::vector<CompletionItem> signature_items;
@@ -66,7 +71,10 @@ struct EditorAnalysis {
 // Uses a disposable syntax-only compiler; never executes edited input.
 EditorAnalysis analyze_editor(std::unique_ptr<clang::CompilerInstance> compiler,
                               clang::CompilerInstance& session, const std::string& code,
-                              bool completion);
+                              bool completion, bool signatures_only = false,
+                              const std::set<std::string>& pch_headers = {},
+                              const EditorPchCache::MacroSnapshot* macro_snapshot = nullptr,
+                              const EditorPchCache::DeclSnapshot* decl_snapshot = nullptr);
 const char* semantic_kind_name(SemanticKind kind);
 
 } // namespace example
