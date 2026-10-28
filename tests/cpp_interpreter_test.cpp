@@ -2,6 +2,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -50,6 +51,105 @@ class CppInterpreterTest : public ::testing::Test {
 };
 
 CppInterpreter* CppInterpreterTest::cpp_ = nullptr;
+
+#ifdef __APPLE__
+class ScopedEnvironmentVariable {
+ public:
+  ScopedEnvironmentVariable(const char* name, std::optional<std::string> value)
+      : name_(name) {
+    if (const char* previous = std::getenv(name)) previous_ = previous;
+    if (value) setenv(name, value->c_str(), 1);
+    else unsetenv(name);
+  }
+  ~ScopedEnvironmentVariable() {
+    if (previous_) setenv(name_.c_str(), previous_->c_str(), 1);
+    else unsetenv(name_.c_str());
+  }
+
+ private:
+  std::string name_;
+  std::optional<std::string> previous_;
+};
+
+TEST(SdkPathCacheTest, ReusesSuccessfulDiscoveryAndHonorsEnvironmentAndOverrides) {
+  const auto root = std::filesystem::temp_directory_path() /
+      ("cpp_repl_sdk_cache_" + std::to_string(::getpid()));
+  std::error_code ec;
+  std::filesystem::remove_all(root, ec);
+  const auto bin = root / "bin";
+  const auto sdk = root / "sdk";
+  const auto fail_lookup = root / "fail-xcrun";
+  std::filesystem::create_directories(bin);
+  std::filesystem::create_directories(sdk);
+  const auto counter = root / "xcrun-count";
+  const auto script = bin / "xcrun";
+  {
+    std::ofstream out(script);
+    out << "#!/bin/sh\n"
+        << "printf x >> '" << counter.string() << "'\n"
+        << "if [ -f '" << fail_lookup.string() << "' ]; then exit 7; fi\n"
+        << "printf '%s\\n' '" << sdk.string() << "'\n";
+  }
+  std::filesystem::permissions(
+      script, std::filesystem::perms::owner_read |
+                  std::filesystem::perms::owner_write |
+                  std::filesystem::perms::owner_exec,
+      std::filesystem::perm_options::replace);
+
+  ScopedEnvironmentVariable path("PATH", bin.string());
+  ScopedEnvironmentVariable developer_dir("DEVELOPER_DIR", (root / "toolchain-a").string());
+  ScopedEnvironmentVariable sdkroot("SDKROOT", sdk.string());
+  ScopedEnvironmentVariable toolchains("TOOLCHAINS", "sdk-cache-test-toolchain-a");
+
+  std::string error;
+  std::ofstream(fail_lookup) << "fail once\n";
+  auto first = CppInterpreter::create({}, error);
+  ASSERT_NE(first, nullptr) << error;
+  EXPECT_EQ(std::filesystem::file_size(counter), 1u);
+  // A failed xcrun result was not cached: the same environment retries and
+  // stores the subsequent successful path.
+  std::filesystem::remove(fail_lookup);
+  first->complete("int sdk_cache_first_");
+  first->complete("int sdk_cache_second_");
+  EXPECT_EQ(std::filesystem::file_size(counter), 2u);
+
+  // A changed SDK-selection environment forms a separate cache entry.
+  ScopedEnvironmentVariable changed_developer_dir(
+      "DEVELOPER_DIR", (root / "toolchain-b").string());
+  auto second = CppInterpreter::create({}, error);
+  ASSERT_NE(second, nullptr) << error;
+  EXPECT_EQ(std::filesystem::file_size(counter), 3u);
+
+  // xcrun toolchain selection also participates in the cache key.
+  ScopedEnvironmentVariable changed_toolchains("TOOLCHAINS", "sdk-cache-test-toolchain-b");
+  auto third = CppInterpreter::create({}, error);
+  ASSERT_NE(third, nullptr) << error;
+  EXPECT_EQ(std::filesystem::file_size(counter), 4u);
+
+  // Unset and empty environment values are distinct xcrun inputs.
+  ScopedEnvironmentVariable empty_sdkroot("SDKROOT", std::string());
+  auto empty_sdkroot_session = CppInterpreter::create({}, error);
+  ASSERT_NE(empty_sdkroot_session, nullptr) << error;
+  EXPECT_EQ(std::filesystem::file_size(counter), 5u);
+  ScopedEnvironmentVariable unset_sdkroot("SDKROOT", std::nullopt);
+  auto unset_sdkroot_session = CppInterpreter::create({}, error);
+  ASSERT_NE(unset_sdkroot_session, nullptr) << error;
+  EXPECT_EQ(std::filesystem::file_size(counter), 6u);
+
+  // Explicit sysroot forms are authoritative and avoid xcrun altogether.
+  auto explicit_sysroot = CppInterpreter::create({"-isysroot", sdk.string()}, error);
+  ASSERT_NE(explicit_sysroot, nullptr) << error;
+  auto explicit_sysroot_equals =
+      CppInterpreter::create({"--sysroot=" + sdk.string()}, error);
+  ASSERT_NE(explicit_sysroot_equals, nullptr) << error;
+  auto explicit_joined_sysroot =
+      CppInterpreter::create({"-isysroot" + sdk.string()}, error);
+  ASSERT_NE(explicit_joined_sysroot, nullptr) << error;
+  EXPECT_EQ(std::filesystem::file_size(counter), 6u);
+
+  std::filesystem::remove_all(root, ec);
+}
+#endif
 
 std::string info_field(const std::string& text, const std::string& label);
 

@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -11,9 +12,11 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <regex>
 #include <set>
 #include <sstream>
+#include <tuple>
 #include <utility>
 
 #ifdef __linux__
@@ -33,6 +36,7 @@
 #include "cpp_lexer.hpp"
 #include "cpp_symbols.hpp"
 #include "definition_shadowing.hpp"
+#include "editor_pch.hpp"
 #include "interpreter_symbols.hpp"
 #include "interpreter_undo.hpp"
 #include "library_manager.hpp"
@@ -134,13 +138,41 @@ bool report(llvm::Error error) {
 
 #ifdef __APPLE__
 std::string sdk_path() {
+  // xcrun's default SDK is stable for a process under the same toolchain
+  // environment. Key by every environment variable that can change its
+  // result; successful entries live for this process, while failures are
+  // retried on the next compiler construction.
+  using EnvironmentValue = std::optional<std::string>;
+  using SdkEnvironment = std::tuple<EnvironmentValue, EnvironmentValue,
+                                    EnvironmentValue, EnvironmentValue,
+                                    std::string>;
+  const auto environment_value = [](const char* name) {
+    const char* value = std::getenv(name);
+    return value ? EnvironmentValue(std::string(value)) : std::nullopt;
+  };
+  std::error_code cwd_error;
+  const std::string working_directory =
+      std::filesystem::current_path(cwd_error).string();
+  const SdkEnvironment key{environment_value("DEVELOPER_DIR"),
+                           environment_value("SDKROOT"),
+                           environment_value("TOOLCHAINS"),
+                           environment_value("PATH"),
+                           cwd_error ? std::string() : working_directory};
+  static std::mutex cache_mutex;
+  static std::map<SdkEnvironment, std::string> cache;
+  const std::lock_guard<std::mutex> lock(cache_mutex);
+  const auto found = cache.find(key);
+  if (found != cache.end()) return found->second;
+
   std::string out;
   if (FILE* p = popen("xcrun --show-sdk-path 2>/dev/null", "r")) {
     char buf[1024];
     while (fgets(buf, sizeof buf, p) != nullptr) out += buf;
-    pclose(p);
+    const int status = pclose(p);
+    if (status != 0) out.clear();
   }
   while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+  if (!out.empty()) return cache.emplace(key, std::move(out)).first->second;
   return out;
 }
 #endif
@@ -148,12 +180,20 @@ std::string sdk_path() {
 // clang-repl derives these from its own location in the LLVM install; an
 // embedding executable has to name them: Clang's builtin headers, and on macOS
 // LLVM's libc++ headers plus the SDK for the C library headers.
-std::vector<std::string> platform_args() {
+std::vector<std::string> platform_args(
+    [[maybe_unused]] const std::vector<std::string>& user_args) {
   std::vector<std::string> args = {"-resource-dir", CPP_REPL_RESOURCE_DIR};
 #ifdef __APPLE__
   args.insert(args.end(), {"-nostdinc++", "-isystem", CPP_REPL_LLVM_PREFIX "/include/c++/v1"});
-  const std::string sdk = sdk_path();
-  if (!sdk.empty()) args.insert(args.end(), {"-isysroot", sdk});
+  const bool user_set_sysroot = std::any_of(
+      user_args.begin(), user_args.end(), [](const std::string& arg) {
+        return arg == "-isysroot" || arg == "--sysroot" ||
+               arg.rfind("-isysroot", 0) == 0 || arg.rfind("--sysroot=", 0) == 0;
+      });
+  if (!user_set_sysroot) {
+    const std::string sdk = sdk_path();
+    if (!sdk.empty()) args.insert(args.end(), {"-isysroot", sdk});
+  }
 #endif
   if (isatty(STDERR_FILENO)) args.emplace_back("-fcolor-diagnostics");
   return args;
@@ -161,7 +201,7 @@ std::vector<std::string> platform_args() {
 
 std::vector<std::string> compiler_arguments(
     const std::vector<std::string>& args) {
-  auto all = platform_args();
+  auto all = platform_args(args);
   all.insert(all.end(), args.begin(), args.end());
   // Preserve call boundaries for hooks, including optimized sessions.
   all.insert(all.end(), {"-fno-inline", "-fno-inline-functions"});
@@ -285,6 +325,7 @@ CppInterpreter::CppInterpreter(std::unique_ptr<clang::Interpreter> interp,
       interp_(std::move(interp)), jit_(jit), hooks_(*interp_, jit_), args_(std::move(args)),
       database_(std::move(database)) {
   source_reload_ = std::make_unique<SourceReload>(*interp_->getCompilerInstance());
+  editor_pch_ = std::make_unique<EditorPchCache>();
 }
 
 CppInterpreter::~CppInterpreter() = default;
@@ -404,10 +445,20 @@ bool CppInterpreter::run_raw(const std::string& code, clang::Value& value,
   DefinitionTransaction definitions(*interp_->getCompilerInstance());
   bool source_committed = false;
 #if LLVM_VERSION_MAJOR >= 22
-  auto source_scope = llvm::scope_exit([&] { source_reload_->finish(source_committed); });
+  auto source_scope = llvm::scope_exit([&] {
 #else
-  auto source_scope = llvm::make_scope_exit([&] { source_reload_->finish(source_committed); });
+  auto source_scope = llvm::make_scope_exit([&] {
 #endif
+    source_reload_->finish(source_committed);
+    // Per-file compilation can use settings different from args_. Keep those
+    // additions in the session importer instead of replaying them in a PCH.
+    editor_pch_->observe_input(source_input_.empty() ? code : std::string(), args_,
+                               source_committed && source_input_.empty(),
+                               interp_->getCompilerInstance());
+    // Failed inputs can still change preprocessor state without changing the TU.
+    semantic_context_ = nullptr;
+    completion_context_ = nullptr;
+  });
   std::string source_error;
   if (!source_reload_->begin(source_input_, reloading_source_, source_error)) {
     llvm::errs() << "error: " << source_error << '\n';
@@ -712,17 +763,58 @@ std::string CppInterpreter::load_library(const std::string& path) {
   return "";
 }
 
-std::vector<SemanticToken> CppInterpreter::semantic_tokens(const std::string& code) {
-  const auto* context = interp_->getASTContext().getTranslationUnitDecl();
-  if (semantic_context_ == context && semantic_code_ == code && semantic_args_ == args_) {
-    return semantic_cache_;
+void CppInterpreter::prepare_editor() {
+  auto compiler = make_compiler(args_, false);
+  if (!compiler) {
+    llvm::consumeError(compiler.takeError());
+    return;
   }
+  editor_pch_->prepare(**compiler, args_);
+}
+
+std::string CppInterpreter::editor_pch_path() const {
+  return editor_pch_->active() ? editor_pch_->cache_path() : std::string();
+}
+
+std::string CppInterpreter::editor_pch_status() const {
+  return editor_pch_->status();
+}
+
+EditorAnalysis CppInterpreter::analyze_editor_input(const std::string& code,
+                                                    bool completion,
+                                                    bool signatures_only) {
+  if (code.empty() || code.size() > 65536) return {};
   auto compiler = make_compiler(args_, false);
   if (!compiler) {
     llvm::consumeError(compiler.takeError());
     return {};
   }
-  auto result = analyze_editor(std::move(*compiler), *interp_->getCompilerInstance(), code, false);
+  const bool cached = editor_pch_->prepare(**compiler, args_);
+  auto result = analyze_editor(std::move(*compiler), *interp_->getCompilerInstance(), code,
+                               completion, signatures_only, editor_pch_->headers(),
+                               cached ? &editor_pch_->macro_snapshot() : nullptr,
+                               cached ? &editor_pch_->decl_snapshot() : nullptr);
+  if (!cached || result.pch_loaded) return result;
+
+  // Cache rejection must never take away editor functionality. Retry with a
+  // fresh compiler and leave the persistent interpreter untouched.
+  editor_pch_->invalidate("Clang rejected the cached startup PCH" +
+                          (result.pch_error.empty() ? std::string() : ": " + result.pch_error));
+  compiler = make_compiler(args_, false);
+  if (!compiler) {
+    llvm::consumeError(compiler.takeError());
+    return {};
+  }
+  return analyze_editor(std::move(*compiler), *interp_->getCompilerInstance(), code,
+                         completion, signatures_only);
+}
+
+std::vector<SemanticToken> CppInterpreter::semantic_tokens(const std::string& code) {
+  const auto* context = interp_->getASTContext().getTranslationUnitDecl();
+  if (semantic_context_ == context && semantic_code_ == code && semantic_args_ == args_) {
+    return semantic_cache_;
+  }
+  auto result = analyze_editor_input(code, false);
   semantic_context_ = context;
   semantic_code_ = code;
   semantic_args_ = args_;
@@ -731,18 +823,23 @@ std::vector<SemanticToken> CppInterpreter::semantic_tokens(const std::string& co
 }
 
 CppInterpreter::Completions CppInterpreter::complete(const std::string& code) {
+  return complete_editor(code, false);
+}
+
+CppInterpreter::Completions CppInterpreter::signatures(const std::string& code) {
+  return complete_editor(code, true);
+}
+
+CppInterpreter::Completions CppInterpreter::complete_editor(const std::string& code,
+                                                          bool signatures_only) {
   const auto* context = interp_->getASTContext().getTranslationUnitDecl();
-  if (completion_context_ == context && completion_code_ == code && completion_args_ == args_) {
+  if (completion_context_ == context && completion_code_ == code && completion_args_ == args_ &&
+      (!completion_signatures_only_ || signatures_only)) {
     return completion_cache_;
   }
   Completions out;
   out.prefix = std::string(trailing_identifier(code));
-  auto compiler = make_compiler(args_, false);
-  if (!compiler) {
-    llvm::consumeError(compiler.takeError());
-    return out;
-  }
-  auto analysis = analyze_editor(std::move(*compiler), *interp_->getCompilerInstance(), code, true);
+  auto analysis = analyze_editor_input(code, true, signatures_only);
   if (analysis.completion_prefix) {
     out.prefix = std::move(*analysis.completion_prefix);
   }
@@ -758,6 +855,7 @@ CppInterpreter::Completions CppInterpreter::complete(const std::string& code) {
   completion_context_ = context;
   completion_code_ = code;
   completion_args_ = args_;
+  completion_signatures_only_ = signatures_only;
   completion_cache_ = out;
   return out;
 }

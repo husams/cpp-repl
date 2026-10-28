@@ -44,6 +44,7 @@ int main(int argc, char** argv) {
     std::cout << "Compile options: " << cpp->compilation_database_path() << '\n';
   }
   if (example::load_startup_directories(libs, *cpp, std::cout).quit) return EXIT_SUCCESS;
+  if (isatty(STDIN_FILENO)) cpp->prepare_editor();
 
   std::string pending;
 

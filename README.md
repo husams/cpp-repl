@@ -874,6 +874,15 @@ session's global scope and accesses members using ordinary C++ access rules.
 - Semantic colors and parameter hints appear after a short pause in typing;
   lexical colors remain immediate and Tab completion runs on demand. Function
   addresses and `using` declarations complete names without inserting a call.
+- Before the interactive prompt, the editor caches the initial sequence of
+  successful preprocessor-only inputs (such as startup `#include` directives)
+  as a precompiled header. Later session declarations are imported on demand,
+  and parameter hints request signatures without enumerating all symbols.
+  The cache lives in `$XDG_CACHE_HOME/cpp-repl/editor-pch`, or
+  `~/.cache/cpp-repl/editor-pch` when `XDG_CACHE_HOME` is unset. Compiler settings,
+  working directory and header contents identify the cache. If a captured header
+  changes during a session or Clang rejects the cache, the editor falls back to
+  importing the existing session declarations. Editor analysis remains synchronous.
 - History persists in `./.replxx_history`; Ctrl+L clears the screen; Ctrl+D
   (or `%quit`) exits.
 

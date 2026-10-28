@@ -314,7 +314,7 @@ Replxx::hints_t cpp_hints(CppInterpreter& cpp, const std::string& input, int& co
   if (lex_cpp(input).open_brackets.find('(') == std::string::npos) {
     return out;
   }
-  const auto result = cpp.complete(input);
+  const auto result = cpp.signatures(input);
   if (inline_display_supported && !result.signature_items.empty()) {
     return out;
   }
@@ -478,7 +478,7 @@ std::vector<CompletionItem> signatures_for_call(CppInterpreter& cpp, const std::
       (cached->second.context == context || reuse_cached_context)) {
     return cached->second.signatures;
   }
-  const auto completion = completions_at_cursor(cpp, text, context);
+  const auto completion = cpp.signatures(text.substr(0, context));
   CachedSignature entry{identity, context, completion.signature_items};
   cache[call.open] = std::move(entry);
   return cache[call.open].signatures;
@@ -1238,7 +1238,7 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
     if (!frame) {
       return false;
     }
-    const auto result = completions_at_cursor(cpp, text, cursor);
+    const auto result = cpp.signatures(text.substr(0, cursor));
     const auto* signature =
         selected_signature(result, selected_identity_for(*frame, *selected_identity));
     if (signature == nullptr || signature->parameters.empty()) {
