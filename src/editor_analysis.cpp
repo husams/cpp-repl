@@ -1030,6 +1030,42 @@ class SessionImporter : public clang::ASTImporter {
     return nullptr;
   }
 
+  bool map_described_function_template(clang::FunctionDecl* source,
+                                       clang::FunctionDecl* target) {
+    auto* source_template = source ? source->getDescribedFunctionTemplate() : nullptr;
+    auto* target_template = target ? target->getDescribedFunctionTemplate() : nullptr;
+    if (!source_template && !target_template) {
+      return true;
+    }
+    if (!source_template || !target_template ||
+        source_template->getTemplatedDecl() != source ||
+        target_template->getTemplatedDecl() != target || !target_template->isFromASTFile() ||
+        source_template->getDeclContext() != source->getDeclContext() ||
+        target_template->getDeclContext() != target->getDeclContext()) {
+      return false;
+    }
+
+    const auto source_location = canonical_spelling_location(source_template);
+    const auto target_location = canonical_spelling_location(target_template);
+    if (!source_location || !target_location ||
+        !pch_headers_.count(source_location->first) || *source_location != *target_location) {
+      return false;
+    }
+
+    auto* imported_function = GetAlreadyImportedOrNull(source);
+    auto* imported_template = GetAlreadyImportedOrNull(source_template);
+    if ((imported_function && imported_function != target) ||
+        (imported_template && imported_template != target_template)) {
+      return false;
+    }
+
+    // A templated method and its wrapper are one imported entity. Mapping both
+    // lets ASTImporter find the PCH wrapper when it visits it after the method.
+    MapImported(source, target);
+    MapImported(source_template, target_template);
+    return true;
+  }
+
 protected:
   llvm::Expected<clang::Decl*> ImportImpl(clang::Decl* decl) override {
     if (auto* source = llvm::dyn_cast<clang::RequiresExprBodyDecl>(decl)) {
@@ -1084,6 +1120,13 @@ protected:
     if (!space) {
       if (auto* named = llvm::dyn_cast<clang::NamedDecl>(decl)) {
         if (auto* existing = find_pch_equivalent(named)) {
+          auto* source_function = llvm::dyn_cast<clang::FunctionDecl>(named);
+          auto* target_function = llvm::dyn_cast<clang::FunctionDecl>(existing);
+          if ((source_function || target_function) &&
+              (!source_function || !target_function ||
+               !map_described_function_template(source_function, target_function))) {
+            return ASTImporter::ImportImpl(decl);
+          }
           MapImported(decl, existing);
           return existing;
         }
@@ -1557,7 +1600,7 @@ public:
       , size_(size) {}
 
   bool TraverseDecl(clang::Decl* decl) {
-    if (decl && !llvm::isa<clang::TranslationUnitDecl>(decl) && decl->getLocation().isValid() &&
+    if (decl && decl->getLocation().isValid() &&
         !context_.getSourceManager().isWrittenInMainFile(decl->getLocation())) {
       return true;
     }
@@ -1616,7 +1659,12 @@ public:
 
   void HandleTranslationUnit(clang::ASTContext& context) override {
     TokenVisitor visitor(context, result_, size_);
-    visitor.TraverseDecl(context.getTranslationUnitDecl());
+    // Traversing the TU asks DeclContext::decls() for external lexical
+    // declarations, which can deserialize the entire PCH. The already-loaded
+    // roots include parser declarations and synthetic top-level statements.
+    for (auto* decl : context.getTranslationUnitDecl()->noload_decls()) {
+      visitor.TraverseDecl(decl);
+    }
   }
 };
 
@@ -1655,25 +1703,31 @@ class EditorAction : public clang::SyntaxOnlyAction {
   clang::CompilerInstance& parent_;
   EditorAnalysis& result_;
   std::size_t size_;
+  bool collect_tokens_;
   const std::set<std::string>& pch_headers_;
   const EditorPchCache::MacroSnapshot* macro_snapshot_;
   const EditorPchCache::DeclSnapshot* decl_snapshot_;
 
 public:
   EditorAction(clang::CompilerInstance& parent, EditorAnalysis& result, std::size_t size,
+               bool collect_tokens,
                const std::set<std::string>& pch_headers,
                const EditorPchCache::MacroSnapshot* macro_snapshot,
                const EditorPchCache::DeclSnapshot* decl_snapshot)
       : parent_(parent)
       , result_(result)
       , size_(size)
+      , collect_tokens_(collect_tokens)
       , pch_headers_(pch_headers)
       , macro_snapshot_(macro_snapshot)
       , decl_snapshot_(decl_snapshot) {}
 
   std::unique_ptr<clang::ASTConsumer> CreateASTConsumer(clang::CompilerInstance&,
                                                         llvm::StringRef) override {
-    return std::make_unique<TokenConsumer>(result_, size_);
+    if (collect_tokens_) {
+      return std::make_unique<TokenConsumer>(result_, size_);
+    }
+    return std::make_unique<clang::ASTConsumer>();
   }
 
   void ExecuteAction() override {
@@ -1682,18 +1736,25 @@ public:
     auto source = llvm::makeIntrusiveRefCnt<SessionSource>(
         child, parent_, pch_headers_, result_.pch_loaded ? macro_snapshot_ : nullptr,
         result_.pch_loaded ? decl_snapshot_ : nullptr);
-    child.getPreprocessor().addPPCallbacks(std::make_unique<MacroExpansionColors>(
-        child.getSourceManager(), child.getLangOpts(), result_, size_));
+    if (collect_tokens_) {
+      child.getPreprocessor().addPPCallbacks(std::make_unique<MacroExpansionColors>(
+          child.getSourceManager(), child.getLangOpts(), result_, size_));
+    }
+#if LLVM_VERSION_MAJOR >= 22
     auto existing = child.getASTContext().getExternalSourcePtr();
-    if (existing) {
-      auto* sema_source = llvm::dyn_cast<clang::ExternalSemaSource>(existing.get());
-      if (sema_source) {
-        auto multiplexed = llvm::makeIntrusiveRefCnt<clang::MultiplexExternalSemaSource>(
-            llvm::IntrusiveRefCntPtr<clang::ExternalSemaSource>(sema_source), source);
-        child.getASTContext().setExternalSource(multiplexed);
-      } else {
-        child.getASTContext().setExternalSource(source);
-      }
+    auto* existing_source = existing.get();
+#else
+    auto* existing_source = child.getASTContext().getExternalSource();
+#endif
+    if (auto* sema_source = llvm::dyn_cast_or_null<clang::ExternalSemaSource>(existing_source)) {
+#if LLVM_VERSION_MAJOR >= 22
+      auto multiplexed = llvm::makeIntrusiveRefCnt<clang::MultiplexExternalSemaSource>(
+          llvm::IntrusiveRefCntPtr<clang::ExternalSemaSource>(sema_source), source);
+#else
+      auto multiplexed = llvm::makeIntrusiveRefCnt<clang::MultiplexExternalSemaSource>(
+          sema_source, source.get());
+#endif
+      child.getASTContext().setExternalSource(multiplexed);
     } else {
       child.getASTContext().setExternalSource(source);
     }
@@ -1816,8 +1877,8 @@ EditorAnalysis analyze_editor(std::unique_ptr<clang::CompilerInstance> compiler,
         std::make_unique<CompletionConsumer>(result, session, code, signatures_only).release());
   }
   auto action =
-      std::make_unique<EditorAction>(session, result, code.size(), pch_headers,
-                                     macro_snapshot, decl_snapshot);
+      std::make_unique<EditorAction>(session, result, code.size(), !completion,
+                                     pch_headers, macro_snapshot, decl_snapshot);
   llvm::CrashRecoveryContext::Enable();
   llvm::CrashRecoveryContext recovery;
   const bool completed = recovery.RunSafely([&] { compiler->ExecuteAction(*action); });

@@ -279,6 +279,92 @@ TEST(EditorPchTest, StandardLibraryTemplatesCombineWithLaterSessionDeclarations)
   EXPECT_FALSE(cpp->editor_pch_path().empty()) << cpp->editor_pch_status();
 }
 
+TEST(EditorPchTest, ExplicitPolicySpecializationKeepsTemplateMembersAvailable) {
+  ScratchTree tree;
+  const auto header = tree.root / "editor_pch_template_policy.hpp";
+  {
+    std::ofstream out(header);
+    out << "#pragma once\n"
+           "namespace editor_pch_template_policy {\n"
+           "template <typename T> struct DestroyPolicy {\n"
+           "  template <typename U> static int destroy(U* value) { return value != nullptr; }\n"
+           "};\n"
+           "template <> struct DestroyPolicy<int> {\n"
+           "  template <typename U> static int destroy(U* value) { return value != nullptr; }\n"
+           "};\n"
+           "template <typename T> struct Retained {\n"
+           "  int field = 37;\n"
+           "  ~Retained() { DestroyPolicy<T>::template destroy<T>(static_cast<T*>(nullptr)); }\n"
+           "};\n"
+           "}\n";
+  }
+
+  std::string error;
+  auto cpp = CppInterpreter::create({"-I" + tree.root.string()}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("#include \"editor_pch_template_policy.hpp\""));
+  cpp->prepare_editor();
+  ASSERT_FALSE(cpp->editor_pch_path().empty()) << cpp->editor_pch_status();
+  ASSERT_TRUE(cpp->execute(
+      "editor_pch_template_policy::Retained<int> editor_pch_template_retained;"));
+
+  EXPECT_TRUE(has(cpp->complete("editor_pch_template_retained.fi").names, "field"));
+  const auto signatures = cpp->signatures(
+      "editor_pch_template_policy::DestroyPolicy<int>::destroy(");
+  EXPECT_FALSE(signatures.signature_items.empty());
+  EXPECT_EQ(cpp->evaluate("editor_pch_template_retained.field"), "(int) 37\n");
+  EXPECT_FALSE(cpp->editor_pch_path().empty()) << cpp->editor_pch_status();
+}
+
+TEST(EditorPchTest, SemanticColoringVisitsMainFileRootsWithLargePreparedPch) {
+  ScratchTree tree;
+  const auto header = tree.root / "editor_pch_semantic_colors.hpp";
+  {
+    std::ofstream out(header);
+    out << "#pragma once\n"
+           "#define EDITOR_PCH_COLOR_MACRO(value) (value)\n"
+           "template <typename T> struct EditorPchColorBox { T value; };\n";
+    for (int i = 0; i < 20000; ++i) {
+      out << "int editor_pch_unused_" << i << "(int);\n";
+    }
+  }
+
+  std::string error;
+  auto cpp = CppInterpreter::create({"-I" + tree.root.string()}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("#include \"editor_pch_semantic_colors.hpp\""));
+  cpp->prepare_editor();
+  ASSERT_FALSE(cpp->editor_pch_path().empty()) << cpp->editor_pch_status();
+
+  const std::string input =
+      "namespace editor_color_outer { struct Widget { int field; "
+      "int method(int value) { return value; } }; }\n"
+      "template <typename T> T editor_color_identity(T value) { return value; }\n"
+      "int editor_color_function() { EditorPchColorBox<int> box; "
+      "editor_color_outer::Widget object; "
+      "box.value = editor_color_identity(EDITOR_PCH_COLOR_MACRO(object.field)); "
+      "return object.method(box.value); }\n"
+      "editor_color_outer::Widget editor_color_global;\n"
+      "editor_color_global.field;";
+  const auto tokens = cpp->semantic_tokens(input);
+
+  EXPECT_TRUE(has_token(tokens, input, "editor_color_outer", SemanticKind::Namespace));
+  EXPECT_TRUE(has_token(tokens, input, "Widget", SemanticKind::Type));
+  EXPECT_TRUE(has_token(tokens, input, "field", SemanticKind::Field));
+  EXPECT_TRUE(has_token(tokens, input, "method", SemanticKind::Method));
+  EXPECT_TRUE(has_token(tokens, input, "editor_color_function", SemanticKind::Function));
+  EXPECT_TRUE(has_token(tokens, input, "editor_color_identity", SemanticKind::Function));
+  EXPECT_TRUE(has_token(tokens, input, "EditorPchColorBox", SemanticKind::Type));
+  EXPECT_TRUE(has_token(tokens, input, "EDITOR_PCH_COLOR_MACRO", SemanticKind::Macro));
+  const auto global_occurrences = std::count_if(
+      tokens.begin(), tokens.end(), [&](const SemanticToken& token) {
+        return input.substr(token.begin, token.end - token.begin) == "editor_color_global" &&
+               token.kind == SemanticKind::Variable;
+      });
+  EXPECT_EQ(global_occurrences, 2u);
+  EXPECT_FALSE(cpp->editor_pch_path().empty()) << cpp->editor_pch_status();
+}
+
 TEST(EditorPchTest, NestedHeaderChangeInvalidatesCacheAndPreservesSessionAst) {
   ScratchTree tree;
   const auto dependency = tree.root / "editor_pch_nested.hpp";

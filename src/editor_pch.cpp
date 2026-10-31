@@ -27,6 +27,7 @@
 #include <llvm/Config/llvm-config.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/SHA256.h>
+#include <llvm/Support/VirtualFileSystem.h>
 #include <llvm/Support/raw_ostream.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -577,14 +578,14 @@ bool EditorPchCache::prepare(clang::CompilerInstance& compiler,
     preprocessor.addRemappedFile(
         virtual_source_path_,
         llvm::MemoryBuffer::getMemBufferCopy(source, virtual_source_path_).release());
-#if LLVM_VERSION_MAJOR >= 22
     clang::CompilerInstance builder(invocation);
-#else
-    clang::CompilerInstance builder;
-    builder.setInvocation(invocation);
-#endif
     clang::IgnoringDiagConsumer diagnostics;
+#if LLVM_VERSION_MAJOR >= 22
     builder.createDiagnostics(&diagnostics, false);
+#else
+    auto vfs = llvm::vfs::getRealFileSystem();
+    builder.createDiagnostics(*vfs, &diagnostics, false);
+#endif
     EditorPchAction action;
     const bool built = builder.ExecuteAction(action);
     if (!built || !fs::is_regular_file(temp_pch, fs_error) || fs_error) {

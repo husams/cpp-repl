@@ -242,6 +242,9 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
     add_test(NAME editor_committed_hints_pty
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/editor_committed_hints_pty.py
                      $<TARGET_FILE:cpp-repl>)
+    add_test(NAME editor_cached_hints_pty
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/editor_cached_hints_pty.py
+                     $<TARGET_FILE:cpp-repl>)
     add_test(NAME editor_large_session_pty
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/editor_large_session_pty.py
                      $<TARGET_FILE:cpp-repl> $<TARGET_FILE:hook_test_library>)
@@ -251,6 +254,10 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
     add_test(NAME editor_latency_pty
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/editor_latency_pty.py
                      $<TARGET_FILE:cpp-repl>)
+    add_test(NAME editor_typing_lag_pty
+             COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/editor_typing_lag_pty.py
+                     $<TARGET_FILE:cpp-repl>)
+    set_tests_properties(editor_typing_lag_pty PROPERTIES RUN_SERIAL TRUE TIMEOUT 180)
     add_test(NAME editor_review_regressions_pty
              COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/editor_review_regressions_pty.py
                      $<TARGET_FILE:cpp-repl>)
