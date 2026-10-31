@@ -35,6 +35,8 @@ with tempfile.TemporaryDirectory() as cwd:
         send_until("include", b"#include <string>\r", b"cpp-repl> ")
         send_until("definitions", b'int int_probe(int first) { return 11; } '
                    b'int str_probe(const char *text) { return 22; } '
+                   b'int enter_cache_probe(int required, int optional = 5) '
+                   b'{ return required + optional; } '
                    b'int dbl_probe(double real) { return 33; }\r', b"cpp-repl> ")
 
         line = b"int_probe(7) + int_probe(2) + dbl_probe(3.0) + 0"
@@ -63,6 +65,14 @@ with tempfile.TemporaryDirectory() as cwd:
         send_until("new_prompt", b"int_probe(4)\r", b"cpp-repl> ")
         send_until("redefine", b"int int_probe(int first) { return 44; }\r", b"cpp-repl> ")
         send_until("after_redefinition", b"int_probe(1)\r", b"cpp-repl> ")
+
+        # The first Enter removes the trailing optional slot and leaves the
+        # required argument gap. The second Enter arrives before an idle hint
+        # refresh, so Enter must retain enough metadata to revisit this call.
+        repl.drain(quiet=0.03)
+        repl.send(b"enter_cache_probe(, ) + 1\r\r7\r")
+        out["rapid_enter_after_trim"] = repl.read_until(b"cpp-repl> ", timeout=15)
+        repl.drain(quiet=0.03)
     finally:
         repl.close()
 
@@ -89,6 +99,9 @@ with tempfile.TemporaryDirectory() as cwd:
           b"^C" in out["cancel"] and b"(int) 11" in visible(out["new_prompt"]))
     check("a redefined function is used at the next prompt",
           b"(int) 44" in visible(out["after_redefinition"]))
+    check("rapid second Enter after trimming keeps the required-argument call active",
+          b"(int) 13" in visible(out["rapid_enter_after_trim"]) and
+          b"error:" not in visible(out["rapid_enter_after_trim"]))
     check("REPL exits normally", repl.closed)
     if failures:
         for key, value in out.items():

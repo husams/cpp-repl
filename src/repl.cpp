@@ -835,6 +835,16 @@ Replxx::ACTION_RESULT on_enter(Replxx& rx, CppInterpreter& cpp,
         if (!call || !call->has_close) {
           break;
         }
+        const std::size_t updated_call_cursor =
+            cursor > call->open && cursor <= call->close ? cursor : call->close;
+        signatures = signatures_for_call(cpp, text, *call, updated_call_cursor, *selected,
+                                         signature_cache);
+        completion.signature_items = std::move(signatures);
+        selected_item = enter_signature(
+            completion, *call, selected_identity_for(*call, *selected));
+        signature = selected_item == nullptr
+                        ? std::nullopt
+                        : std::optional<CompletionItem>(*selected_item);
       }
       if (!call || !call->has_close) {
         continue;
