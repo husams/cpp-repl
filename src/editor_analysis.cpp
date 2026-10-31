@@ -1684,16 +1684,21 @@ public:
         result_.pch_loaded ? decl_snapshot_ : nullptr);
     child.getPreprocessor().addPPCallbacks(std::make_unique<MacroExpansionColors>(
         child.getSourceManager(), child.getLangOpts(), result_, size_));
+#if LLVM_VERSION_MAJOR >= 22
     auto existing = child.getASTContext().getExternalSourcePtr();
-    if (existing) {
-      auto* sema_source = llvm::dyn_cast<clang::ExternalSemaSource>(existing.get());
-      if (sema_source) {
-        auto multiplexed = llvm::makeIntrusiveRefCnt<clang::MultiplexExternalSemaSource>(
-            llvm::IntrusiveRefCntPtr<clang::ExternalSemaSource>(sema_source), source);
-        child.getASTContext().setExternalSource(multiplexed);
-      } else {
-        child.getASTContext().setExternalSource(source);
-      }
+    auto* existing_source = existing.get();
+#else
+    auto* existing_source = child.getASTContext().getExternalSource();
+#endif
+    if (auto* sema_source = llvm::dyn_cast_or_null<clang::ExternalSemaSource>(existing_source)) {
+#if LLVM_VERSION_MAJOR >= 22
+      auto multiplexed = llvm::makeIntrusiveRefCnt<clang::MultiplexExternalSemaSource>(
+          llvm::IntrusiveRefCntPtr<clang::ExternalSemaSource>(sema_source), source);
+#else
+      auto multiplexed = llvm::makeIntrusiveRefCnt<clang::MultiplexExternalSemaSource>(
+          sema_source, source.get());
+#endif
+      child.getASTContext().setExternalSource(multiplexed);
     } else {
       child.getASTContext().setExternalSource(source);
     }
