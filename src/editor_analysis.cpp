@@ -1030,6 +1030,42 @@ class SessionImporter : public clang::ASTImporter {
     return nullptr;
   }
 
+  bool map_described_function_template(clang::FunctionDecl* source,
+                                       clang::FunctionDecl* target) {
+    auto* source_template = source ? source->getDescribedFunctionTemplate() : nullptr;
+    auto* target_template = target ? target->getDescribedFunctionTemplate() : nullptr;
+    if (!source_template && !target_template) {
+      return true;
+    }
+    if (!source_template || !target_template ||
+        source_template->getTemplatedDecl() != source ||
+        target_template->getTemplatedDecl() != target || !target_template->isFromASTFile() ||
+        source_template->getDeclContext() != source->getDeclContext() ||
+        target_template->getDeclContext() != target->getDeclContext()) {
+      return false;
+    }
+
+    const auto source_location = canonical_spelling_location(source_template);
+    const auto target_location = canonical_spelling_location(target_template);
+    if (!source_location || !target_location ||
+        !pch_headers_.count(source_location->first) || *source_location != *target_location) {
+      return false;
+    }
+
+    auto* imported_function = GetAlreadyImportedOrNull(source);
+    auto* imported_template = GetAlreadyImportedOrNull(source_template);
+    if ((imported_function && imported_function != target) ||
+        (imported_template && imported_template != target_template)) {
+      return false;
+    }
+
+    // A templated method and its wrapper are one imported entity. Mapping both
+    // lets ASTImporter find the PCH wrapper when it visits it after the method.
+    MapImported(source, target);
+    MapImported(source_template, target_template);
+    return true;
+  }
+
 protected:
   llvm::Expected<clang::Decl*> ImportImpl(clang::Decl* decl) override {
     if (auto* source = llvm::dyn_cast<clang::RequiresExprBodyDecl>(decl)) {
@@ -1084,6 +1120,13 @@ protected:
     if (!space) {
       if (auto* named = llvm::dyn_cast<clang::NamedDecl>(decl)) {
         if (auto* existing = find_pch_equivalent(named)) {
+          auto* source_function = llvm::dyn_cast<clang::FunctionDecl>(named);
+          auto* target_function = llvm::dyn_cast<clang::FunctionDecl>(existing);
+          if ((source_function || target_function) &&
+              (!source_function || !target_function ||
+               !map_described_function_template(source_function, target_function))) {
+            return ASTImporter::ImportImpl(decl);
+          }
           MapImported(decl, existing);
           return existing;
         }

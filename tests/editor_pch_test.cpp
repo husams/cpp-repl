@@ -279,6 +279,43 @@ TEST(EditorPchTest, StandardLibraryTemplatesCombineWithLaterSessionDeclarations)
   EXPECT_FALSE(cpp->editor_pch_path().empty()) << cpp->editor_pch_status();
 }
 
+TEST(EditorPchTest, ExplicitPolicySpecializationKeepsTemplateMembersAvailable) {
+  ScratchTree tree;
+  const auto header = tree.root / "editor_pch_template_policy.hpp";
+  {
+    std::ofstream out(header);
+    out << "#pragma once\n"
+           "namespace editor_pch_template_policy {\n"
+           "template <typename T> struct DestroyPolicy {\n"
+           "  template <typename U> static int destroy(U* value) { return value != nullptr; }\n"
+           "};\n"
+           "template <> struct DestroyPolicy<int> {\n"
+           "  template <typename U> static int destroy(U* value) { return value != nullptr; }\n"
+           "};\n"
+           "template <typename T> struct Retained {\n"
+           "  int field = 37;\n"
+           "  ~Retained() { DestroyPolicy<T>::template destroy<T>(static_cast<T*>(nullptr)); }\n"
+           "};\n"
+           "}\n";
+  }
+
+  std::string error;
+  auto cpp = CppInterpreter::create({"-I" + tree.root.string()}, error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("#include \"editor_pch_template_policy.hpp\""));
+  cpp->prepare_editor();
+  ASSERT_FALSE(cpp->editor_pch_path().empty()) << cpp->editor_pch_status();
+  ASSERT_TRUE(cpp->execute(
+      "editor_pch_template_policy::Retained<int> editor_pch_template_retained;"));
+
+  EXPECT_TRUE(has(cpp->complete("editor_pch_template_retained.fi").names, "field"));
+  const auto signatures = cpp->signatures(
+      "editor_pch_template_policy::DestroyPolicy<int>::destroy(");
+  EXPECT_FALSE(signatures.signature_items.empty());
+  EXPECT_EQ(cpp->evaluate("editor_pch_template_retained.field"), "(int) 37\n");
+  EXPECT_FALSE(cpp->editor_pch_path().empty()) << cpp->editor_pch_status();
+}
+
 TEST(EditorPchTest, SemanticColoringVisitsMainFileRootsWithLargePreparedPch) {
   ScratchTree tree;
   const auto header = tree.root / "editor_pch_semantic_colors.hpp";
