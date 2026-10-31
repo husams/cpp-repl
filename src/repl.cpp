@@ -461,25 +461,36 @@ const CompletionItem* enter_signature(const CppInterpreter::Completions& result,
 
 struct CachedSignature {
   std::string identity;
-  std::size_t context = 0;
+  std::string prefix;
   std::vector<CompletionItem> signatures;
 };
 
 using SignatureCache = std::unordered_map<std::size_t, CachedSignature>;
 
+void prune_signature_cache(SignatureCache& cache, const std::string& text) {
+  for (auto it = cache.begin(); it != cache.end();) {
+    const auto& prefix = it->second.prefix;
+    if (prefix.size() > text.size() || text.compare(0, prefix.size(), prefix) != 0) {
+      it = cache.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 std::vector<CompletionItem> signatures_for_call(CppInterpreter& cpp, const std::string& text,
                                                 const EditorCall& call, std::size_t context,
                                                 const SelectedSignatures& selected,
-                                                SignatureCache& cache,
-                                                bool reuse_cached_context = false) {
+                                                SignatureCache& cache) {
   const std::string identity = selected_identity_for(call, selected);
+  const std::string prefix = text.substr(0, context);
   const auto cached = cache.find(call.open);
   if (cached != cache.end() && cached->second.identity == identity &&
-      (cached->second.context == context || reuse_cached_context)) {
+      cached->second.prefix == prefix) {
     return cached->second.signatures;
   }
-  const auto completion = cpp.signatures(text.substr(0, context));
-  CachedSignature entry{identity, context, completion.signature_items};
+  const auto completion = cpp.signatures(prefix);
+  CachedSignature entry{identity, prefix, completion.signature_items};
   cache[call.open] = std::move(entry);
   return cache[call.open].signatures;
 }
@@ -767,7 +778,7 @@ Replxx::ACTION_RESULT on_enter(Replxx& rx, CppInterpreter& cpp,
   std::size_t cursor = utf8_byte_offset(text, state.cursor_position());
   if (is_cpp_editor_payload(text, cursor) && !is_command_line(text)) {
     if (signature_cache_text != text) {
-      signature_cache.clear();
+      prune_signature_cache(signature_cache, text);
       signature_cache_text = text;
     }
     const auto call_opens = completed_call_open_offsets(text);
@@ -791,14 +802,13 @@ Replxx::ACTION_RESULT on_enter(Replxx& rx, CppInterpreter& cpp,
       const std::size_t call_cursor =
           cursor > call->open && cursor <= call->close ? cursor : call->close;
       auto signatures = signatures_for_call(cpp, text, *call, call_cursor, *selected,
-                                            signature_cache, has_cached_metadata);
+                                            signature_cache);
       CppInterpreter::Completions completion;
       completion.signature_items = std::move(signatures);
       const auto* selected_item =
           enter_signature(completion, *call, selected_identity_for(*call, *selected));
       std::optional<CompletionItem> signature =
           selected_item == nullptr ? std::nullopt : std::optional<CompletionItem>(*selected_item);
-      bool source_changed = false;
       while (signature && call->arguments.size() > 1) {
         const std::size_t last = call->arguments.size() - 1;
         if (last >= signature->parameters.size() || !signature->parameters[last].has_default ||
@@ -817,10 +827,9 @@ Replxx::ACTION_RESULT on_enter(Replxx& rx, CppInterpreter& cpp,
         const std::size_t removed = call->close - erase_begin;
         text.erase(erase_begin, removed);
         cursor = cursor > erase_begin ? std::max(erase_begin, cursor - removed) : cursor;
-        source_changed = true;
         rx.set_state(Replxx::State(
             text.c_str(), static_cast<int>(utf8_length(std::string_view(text).substr(0, cursor)))));
-        signature_cache.clear();
+        prune_signature_cache(signature_cache, text);
         signature_cache_text = text;
         call = editor_call_at_cursor(text, call_open + 1);
         if (!call || !call->has_close) {
@@ -829,12 +838,6 @@ Replxx::ACTION_RESULT on_enter(Replxx& rx, CppInterpreter& cpp,
       }
       if (!call || !call->has_close) {
         continue;
-      }
-      if (source_changed && signature) {
-        const std::size_t context =
-            cursor > call->open && cursor <= call->close ? cursor : call->close;
-        signature_cache[call_open] = {
-            selected_identity_for(*call, *selected), context, {*signature}};
       }
       for (std::size_t i = 0; signature && i < signature->parameters.size(); ++i) {
         const auto& parameter = signature->parameters[i];
@@ -933,6 +936,7 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
                                      &rx](const std::string&, const std::string& display) {
     const auto state = rx.get_state();
     const auto buffer = state.text();
+    prune_signature_cache(*signature_cache, buffer);
     sync_selected_signatures(selected_identity, selected_text, buffer);
     const auto cursor = utf8_byte_offset(buffer, state.cursor_position());
     auto call = editor_call_at_cursor(buffer, cursor);
@@ -981,9 +985,10 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
   auto seed_accepted_signature = [signature_cache, signature_cache_text, selected_text, last_input,
                                   last_edit](const std::string& source, std::size_t call_open,
                                              const CompletionItem& signature) {
-    signature_cache->clear();
+    prune_signature_cache(*signature_cache, source);
     *signature_cache_text = source;
-    (*signature_cache)[call_open] = {signature.identity, call_open + 1, {signature}};
+    (*signature_cache)[call_open] = {
+        signature.identity, source.substr(0, call_open + 1), {signature}};
     *selected_text = source;
     *last_input = source;
     *last_edit = std::chrono::steady_clock::now() - std::chrono::milliseconds(200);
@@ -995,7 +1000,7 @@ void configure(Replxx& rx, CppInterpreter& cpp) {
     const auto state = rx.get_state();
     const std::string full_input = state.text();
     if (*signature_cache_text != full_input) {
-      signature_cache->clear();
+      prune_signature_cache(*signature_cache, full_input);
       *signature_cache_text = full_input;
     }
     if (*committing && !cpp.options().keep_hints) {

@@ -1557,7 +1557,7 @@ public:
       , size_(size) {}
 
   bool TraverseDecl(clang::Decl* decl) {
-    if (decl && !llvm::isa<clang::TranslationUnitDecl>(decl) && decl->getLocation().isValid() &&
+    if (decl && decl->getLocation().isValid() &&
         !context_.getSourceManager().isWrittenInMainFile(decl->getLocation())) {
       return true;
     }
@@ -1616,7 +1616,12 @@ public:
 
   void HandleTranslationUnit(clang::ASTContext& context) override {
     TokenVisitor visitor(context, result_, size_);
-    visitor.TraverseDecl(context.getTranslationUnitDecl());
+    // Traversing the TU asks DeclContext::decls() for external lexical
+    // declarations, which can deserialize the entire PCH. The already-loaded
+    // roots include parser declarations and synthetic top-level statements.
+    for (auto* decl : context.getTranslationUnitDecl()->noload_decls()) {
+      visitor.TraverseDecl(decl);
+    }
   }
 };
 
@@ -1655,25 +1660,31 @@ class EditorAction : public clang::SyntaxOnlyAction {
   clang::CompilerInstance& parent_;
   EditorAnalysis& result_;
   std::size_t size_;
+  bool collect_tokens_;
   const std::set<std::string>& pch_headers_;
   const EditorPchCache::MacroSnapshot* macro_snapshot_;
   const EditorPchCache::DeclSnapshot* decl_snapshot_;
 
 public:
   EditorAction(clang::CompilerInstance& parent, EditorAnalysis& result, std::size_t size,
+               bool collect_tokens,
                const std::set<std::string>& pch_headers,
                const EditorPchCache::MacroSnapshot* macro_snapshot,
                const EditorPchCache::DeclSnapshot* decl_snapshot)
       : parent_(parent)
       , result_(result)
       , size_(size)
+      , collect_tokens_(collect_tokens)
       , pch_headers_(pch_headers)
       , macro_snapshot_(macro_snapshot)
       , decl_snapshot_(decl_snapshot) {}
 
   std::unique_ptr<clang::ASTConsumer> CreateASTConsumer(clang::CompilerInstance&,
                                                         llvm::StringRef) override {
-    return std::make_unique<TokenConsumer>(result_, size_);
+    if (collect_tokens_) {
+      return std::make_unique<TokenConsumer>(result_, size_);
+    }
+    return std::make_unique<clang::ASTConsumer>();
   }
 
   void ExecuteAction() override {
@@ -1682,8 +1693,10 @@ public:
     auto source = llvm::makeIntrusiveRefCnt<SessionSource>(
         child, parent_, pch_headers_, result_.pch_loaded ? macro_snapshot_ : nullptr,
         result_.pch_loaded ? decl_snapshot_ : nullptr);
-    child.getPreprocessor().addPPCallbacks(std::make_unique<MacroExpansionColors>(
-        child.getSourceManager(), child.getLangOpts(), result_, size_));
+    if (collect_tokens_) {
+      child.getPreprocessor().addPPCallbacks(std::make_unique<MacroExpansionColors>(
+          child.getSourceManager(), child.getLangOpts(), result_, size_));
+    }
 #if LLVM_VERSION_MAJOR >= 22
     auto existing = child.getASTContext().getExternalSourcePtr();
     auto* existing_source = existing.get();
@@ -1821,8 +1834,8 @@ EditorAnalysis analyze_editor(std::unique_ptr<clang::CompilerInstance> compiler,
         std::make_unique<CompletionConsumer>(result, session, code, signatures_only).release());
   }
   auto action =
-      std::make_unique<EditorAction>(session, result, code.size(), pch_headers,
-                                     macro_snapshot, decl_snapshot);
+      std::make_unique<EditorAction>(session, result, code.size(), !completion,
+                                     pch_headers, macro_snapshot, decl_snapshot);
   llvm::CrashRecoveryContext::Enable();
   llvm::CrashRecoveryContext recovery;
   const bool completed = recovery.RunSafely([&] { compiler->ExecuteAction(*action); });
