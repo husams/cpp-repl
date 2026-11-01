@@ -249,6 +249,103 @@ TEST_F(IterativeDevelopment, FailedRetryRefreshesChangedSkippedHeader) {
   EXPECT_EQ(cpp->evaluate("old_caller()"), "(int) 1\n");
 }
 
+TEST_F(IterativeDevelopment, RetryFindsEditedTransitiveSkippedHeader) {
+  SourceFiles files;
+  files.write("g.hpp", "#pragma once\n#include \"h.hpp\"\nint one() { return 1; }\n");
+  const auto header = files.write("h.hpp", "#pragma once\n#include \"g.hpp\"\n");
+  ASSERT_TRUE(cpp->execute("#include \"" + header + "\"\n"));
+  const auto source = files.write("m.cpp", "#include \"h.hpp\"\nint use() { return two(); }\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  files.write("g.hpp", "#pragma once\n#include \"h.hpp\"\n"
+                       "int one() { return 1; } int two() { return 2; }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("use()"), "(int) 2\n");
+}
+
+TEST_F(IterativeDevelopment, TransitiveHeaderChangesReloadEverySharingSource) {
+  SourceFiles files;
+  files.write("h.hpp", "#pragma once\nstruct Config { int v = 1; };\n");
+  files.write("a.hpp", "#pragma once\n#include \"h.hpp\"\n");
+  const auto first = files.write("a.cpp", "#include \"a.hpp\"\nint first() { return Config{}.v; }\n");
+  const auto second = files.write("b.cpp", "#include \"a.hpp\"\nint use() { return Config{}.v; }\n");
+  ASSERT_TRUE(cpp->add_source(first).ok);
+  ASSERT_TRUE(cpp->add_source(second).ok);
+  EXPECT_EQ(cpp->evaluate("use() + first()"), "(int) 2\n");
+  files.write("h.hpp", "#pragma once\nstruct Config { int v = 2; };\n");
+  EXPECT_EQ(cpp->evaluate("use() + first()"), "(int) 4\n");
+}
+
+TEST_F(IterativeDevelopment, StartupHeadersRetainTransitiveRetryDependencies) {
+  SourceFiles files;
+  files.write("g.hpp", "#pragma once\nint one() { return 1; }\n");
+  const auto header = files.write("h.hpp", "#pragma once\n#include \"g.hpp\"\n");
+  std::string error;
+  auto startup = CppInterpreter::create({"-include", header}, error);
+  ASSERT_TRUE(startup) << error;
+  EXPECT_EQ(startup->evaluate("one()"), "(int) 1\n");
+  const auto source = files.write("m.cpp", "#include \"h.hpp\"\nint use() { return two(); }\n");
+  EXPECT_FALSE(startup->add_source(source).ok);
+  files.write("g.hpp", "#pragma once\nint one() { return 1; } int two() { return 2; }\n");
+  ASSERT_TRUE(startup->add_source(source).ok);
+  EXPECT_EQ(startup->evaluate("use()"), "(int) 2\n");
+}
+
+TEST_F(IterativeDevelopment, RetryDiagnosesDeletedTransitiveHeaderOnlyWhenStillIncluded) {
+  SourceFiles files;
+  const auto leaf = files.write("g.hpp", "#pragma once\nint one() { return 1; }\n");
+  const auto header = files.write("h.hpp", "#pragma once\n#include \"g.hpp\"\n");
+  ASSERT_TRUE(cpp->execute("#include \"" + header + "\"\n"));
+  const auto source = files.write("m.cpp", "#include \"h.hpp\"\nint use() { return two(); }\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  ASSERT_TRUE(std::filesystem::remove(leaf));
+  files.write("m.cpp", "#include \"h.hpp\"\nint use() { return one(); }\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  files.write("m.cpp", "int use() { return one(); }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("use()"), "(int) 1\n");
+}
+
+TEST_F(IterativeDevelopment, RetryKeepsEditedHeaderThatIsNoLongerIncluded) {
+  SourceFiles files;
+  const auto header = files.write("h.hpp", "#pragma once\n#define KEPT_VALUE 1\n"
+      "int one() { return KEPT_VALUE; }\n");
+  ASSERT_TRUE(cpp->execute("#include \"" + header + "\"\n"));
+  const auto source = files.write("m.cpp", "#include \"h.hpp\"\nint broken = missing;\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  files.write("h.hpp", "#pragma once\n#define KEPT_VALUE 2\nint one() { return KEPT_VALUE; }\n");
+  files.write("m.cpp", "int answer() { return 42; }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("one()"), "(int) 1\n");
+  EXPECT_EQ(cpp->evaluate("KEPT_VALUE"), "(int) 1\n");
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 42\n");
+}
+
+TEST_F(IterativeDevelopment, RetryAllowsDeletedSkippedHeaderThatIsNoLongerIncluded) {
+  SourceFiles files;
+  const auto header = files.write("h.hpp", "#pragma once\nint one() { return 1; }\n");
+  ASSERT_TRUE(cpp->execute("#include \"" + header + "\"\n"));
+  const auto source = files.write("m.cpp", "#include \"h.hpp\"\nint broken = missing;\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  ASSERT_TRUE(std::filesystem::remove(header));
+  files.write("m.cpp", "int answer() { return 42; }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("one() + answer()"), "(int) 43\n");
+}
+
+TEST_F(IterativeDevelopment, RetryRejectsDeletedHeaderThatIsStillIncludedAndRecovers) {
+  SourceFiles files;
+  const auto header = files.write("h.hpp", "#pragma once\nint one() { return 1; }\n");
+  ASSERT_TRUE(cpp->execute("#include \"" + header + "\"\n"));
+  const auto source = files.write("m.cpp", "#include \"h.hpp\"\nint use() { return two(); }\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  ASSERT_TRUE(std::filesystem::remove(header));
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("one()"), "(int) 1\n");
+  files.write("h.hpp", "#pragma once\nint one() { return 1; } int two() { return 2; }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("use()"), "(int) 2\n");
+}
+
 TEST_F(IterativeDevelopment, FailedChangedSkippedHeaderRestoresEarlierDefinitions) {
   SourceFiles files;
   const auto header = files.write("h.hpp", "#pragma once\nint one() { return 1; }\n");

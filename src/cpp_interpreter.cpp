@@ -36,6 +36,7 @@
 #include "cpp_lexer.hpp"
 #include "cpp_symbols.hpp"
 #include "definition_shadowing.hpp"
+#include "diagnostic_scope.hpp"
 #include "editor_pch.hpp"
 #include "interpreter_symbols.hpp"
 #include "interpreter_undo.hpp"
@@ -74,6 +75,39 @@
 namespace example {
 
 namespace {
+
+class SourceSetupDiagnostics : public clang::ForwardingDiagnosticConsumer {
+  std::string source_;
+  std::size_t prefix_size_;
+ public:
+  bool failed = false;
+  SourceSetupDiagnostics(clang::DiagnosticConsumer& client, std::string source,
+                         std::size_t prefix_size)
+      : clang::ForwardingDiagnosticConsumer(client), source_(std::move(source)),
+        prefix_size_(prefix_size) {}
+  void HandleDiagnostic(clang::DiagnosticsEngine::Level level,
+                        const clang::Diagnostic& diagnostic) override {
+    clang::ForwardingDiagnosticConsumer::HandleDiagnostic(level, diagnostic);
+    if (level < clang::DiagnosticsEngine::Error || source_.empty() ||
+        !prefix_size_ || diagnostic.getLocation().isInvalid())
+      return;
+    auto& manager = diagnostic.getSourceManager();
+    auto location = manager.getExpansionLoc(diagnostic.getLocation());
+    if (manager.getBufferName(location).starts_with("input_line_") &&
+        manager.getFileOffset(location) < prefix_size_) {
+      failed = true;
+      return;
+    }
+    bool header = false;
+    for (; location.isValid(); location = manager.getIncludeLoc(manager.getFileID(location))) {
+      const auto file = manager.getFilename(location);
+      if (file == source_)
+        return; // An error in the source or a header it includes.
+      header |= !file.empty() && !file.starts_with("input_line_") && !file.starts_with("<");
+    }
+    failed |= header;
+  }
+};
 
 void print_value(const clang::Value& value, llvm::raw_ostream& out) {
 #if LLVM_VERSION_MAJOR >= 22
@@ -430,7 +464,7 @@ bool CppInterpreter::run(const std::string& code, clang::Value& value,
   std::string error;
   if (!reference_directory_.empty()) options.directory = reference_directory_;
   const bool result = with_compile_options(
-      options, [&] { return run_raw(code, value, nullptr, capture_semicolon_expression); }, error);
+      options, [&](const std::string&) { return run_raw(code, value, nullptr, capture_semicolon_expression); }, error);
   if (!error.empty()) llvm::errs() << "error: " << error << '\n';
   return result;
 }
@@ -472,9 +506,7 @@ bool CppInterpreter::run_raw(const std::string& code, clang::Value& value,
   auto capture_scope = llvm::make_scope_exit(
       [&] { capture_semicolon_expressions(*interp_->getCompilerInstance(), false); });
 #endif
-  llvm::Expected<clang::PartialTranslationUnit&> ptu =
-      source_prefix_.empty() ? parse_input(*interp_, code)
-                             : parse_input(*interp_, source_prefix_ + code);
+  llvm::Expected<clang::PartialTranslationUnit&> ptu = parse_input(*interp_, code);
   if (!ptu) return report(ptu.takeError());
   if (ptu->TheModule) {
     const auto instrumented = hooks_.instrument(*ptu);
@@ -552,7 +584,7 @@ bool CppInterpreter::set_hook(HookKind kind, const std::string& signature,
   if (global_options_changed_ && !compile_scope_active_) {
     return with_compile_options(
         source_compile_options(""),
-        [&] { return hooks_.set(kind, signature, body, error, caller); },
+        [&](const std::string&) { return hooks_.set(kind, signature, body, error, caller); },
         error);
   }
   return hooks_.set(kind, signature, body, error, caller);
@@ -563,7 +595,7 @@ bool CppInterpreter::restore(const std::string& signature, std::string& error, c
   if (global_options_changed_ && !compile_scope_active_) {
     return with_compile_options(
         source_compile_options(""),
-        [&] { return hooks_.restore(signature, error, caller); }, error);
+        [&](const std::string&) { return hooks_.restore(signature, error, caller); }, error);
   }
   return hooks_.restore(signature, error, caller);
 }
@@ -577,7 +609,7 @@ bool CppInterpreter::define_callable(const std::string& signature, const std::st
   error.clear();
   if (global_options_changed_ && !compile_scope_active_) {
     return with_compile_options(
-        source_compile_options(""), [&] { return define_callable(signature, body, error); }, error);
+        source_compile_options(""), [&](const std::string&) { return define_callable(signature, body, error); }, error);
   }
   const auto callable = hooks_.definition(signature, error);
   if (!callable) {
@@ -897,7 +929,8 @@ CppInterpreter::AddResult CppInterpreter::load_source(const std::string& path, b
   if (!options.source.empty() || file_options_.count(name) ||
       global_options_changed_) {
     std::string error;
-    if (!with_compile_options(options, [&] { return execute(include); }, error))
+    if (!with_compile_options(options,
+          [&](const std::string& includes) { return execute(includes + include); }, error))
       return {false,
               "could not add " + name + (error.empty() ? "" : ": " + error)};
   } else if (!execute(include))
@@ -942,7 +975,7 @@ SourceCompileOptions CppInterpreter::source_compile_options(
 }
 
 bool CppInterpreter::with_compile_options(const SourceCompileOptions& options,
-                                          const std::function<bool()>& action,
+                                          const std::function<bool(const std::string&)>& action,
                                           std::string& error) {
   auto configured = make_compiler(options.arguments);
   if (!configured) {
@@ -975,11 +1008,13 @@ bool CppInterpreter::with_compile_options(const SourceCompileOptions& options,
                                      run_raw(scope.includes(), ignored));
   bool result = false;
   {
-    // A source and its forced headers must share one begin/finish pair, so
-    // failure restores them together and successful reload tracks all files.
-    llvm::SaveAndRestore<std::string> prefix(
-        source_prefix_, source ? scope.includes() : std::string());
-    result = included && action();
+    auto& diagnostics = interp_->getCompilerInstance()->getDiagnostics();
+    SourceSetupDiagnostics setup(*diagnostics.getClient(),
+        source ? source_input_ : std::string(), scope.includes().size());
+    DiagnosticClientScope client(diagnostics, setup);
+    result = included && action(source ? scope.includes() : std::string());
+    if (!result && setup.failed)
+      error = "could not apply compiler flags or forced includes";
   }
   // Failed parsing does not undo macro directives, so restore them separately.
   const bool restored = run_macros(scope.epilogue());

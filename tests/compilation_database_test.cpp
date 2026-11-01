@@ -210,6 +210,29 @@ TEST(CompilationDatabase, FailedForcedIncludeSourceDoesNotBecomeAnAddedSource) {
   EXPECT_EQ(cpp->evaluate("answer()"), "(int) 9\n");
 }
 
+TEST(CompilationDatabase, ForcedIncludeFailuresKeepTheirSpecificErrorMessage) {
+  TemporaryProject project;
+  project.write("f.h", "#pragma once\nint broken = undefined_name;\n");
+  const auto source = project.write("m.cpp", "int answer() { return 42; }\n");
+  write_database(project, arguments_entry(project.root(), source,
+      {"clang++", "-include", "f.h", "-c", "m.cpp"}));
+  CurrentDirectory directory(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  const auto rejected = cpp->add_source(source.string());
+  EXPECT_FALSE(rejected.ok);
+  EXPECT_NE(rejected.message.find("could not apply compiler flags or forced includes"), std::string::npos);
+  project.write("f.h", "#pragma once\nint forced() { return 7; }\n");
+  project.write("m.cpp", "int answer() { return undefined_name; }\n");
+  const auto source_error = cpp->add_source(source.string());
+  EXPECT_FALSE(source_error.ok);
+  EXPECT_EQ(source_error.message.find("could not apply compiler flags or forced includes"), std::string::npos);
+  project.write("m.cpp", "int answer() { return forced(); }\n");
+  ASSERT_TRUE(cpp->add_source(source.string()).ok);
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 7\n");
+}
+
 TEST(CompilationDatabase,
      LoadsAncestorBuildDatabaseAndPerFileOptionsAtStartup) {
   TemporaryProject project;

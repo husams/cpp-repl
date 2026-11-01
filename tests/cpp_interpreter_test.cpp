@@ -809,6 +809,22 @@ TEST_F(CppInterpreterTest, ParseErrorsPreserveDirectiveLookupForRemainingDeclara
   }
 }
 
+TEST_F(CppInterpreterTest, LargeRejectedInputHandlesLaterExplicitAndImplicitDirectives) {
+  ASSERT_TRUE(cpp_->execute("namespace LateLookup { int one() { return 1; } }"));
+  std::string code = "#error rejected input\n";
+  for (unsigned i = 0; i != 600; ++i)
+    code += "extern int late_declaration_" + std::to_string(i) + ";\n";
+  code += "using namespace LateLookup; int valid_lookup = one();\n"
+          "namespace { int invalid_lookup = undefined_name; }\n";
+  ::testing::internal::CaptureStderr();
+  const bool accepted = cpp_->execute(code);
+  const auto diagnostics = ::testing::internal::GetCapturedStderr();
+  EXPECT_FALSE(accepted);
+  EXPECT_EQ(diagnostics.find("undeclared identifier 'one'"), std::string::npos) << diagnostics;
+  EXPECT_FALSE(cpp_->evaluate("one()"));
+  EXPECT_EQ(cpp_->evaluate("LateLookup::one()"), "(int) 1\n");
+}
+
 TEST_F(CppInterpreterTest, UndoRemovesOnlyRejectedUsingDirectives) {
   ASSERT_TRUE(cpp_->execute(
       "namespace UndoKept { int undo_kept = 4; } using namespace UndoKept; "

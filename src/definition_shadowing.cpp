@@ -309,9 +309,9 @@ public:
   bool HandleTopLevelDecl(clang::DeclGroupRef declarations) override {
     // A directive can be parsed after the last error diagnostic. Remove it
     // before IncrementalParser performs its internal error cleanup too.
-    if (compiler_.getDiagnostics().hasErrorOccurred())
-      detach_using_directives(compiler_.getASTContext().getTranslationUnitDecl(), true);
     for (auto* declaration : declarations) {
+      if (compiler_.getDiagnostics().hasErrorOccurred())
+        detach_new_using_directives(declaration);
       if (capture_semicolon_expressions_ && !compiler_.getDiagnostics().hasErrorOccurred()) {
         auto* statement = llvm::dyn_cast<clang::TopLevelStmtDecl>(declaration);
         auto* expression = statement && statement->getStmt()
