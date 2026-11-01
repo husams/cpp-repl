@@ -1,8 +1,11 @@
 #pragma once
 
+#include <memory>
+
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/Frontend/CompilerInstance.h"
 #include "clang/Interpreter/Interpreter.h"
 #include "llvm/ADT/SmallVector.h"
 
@@ -47,8 +50,55 @@ inline void restore_lookup(clang::ASTContext& context, clang::TranslationUnitDec
   }
 }
 
+// Clang 21/22's CleanUpPTU asks using-directive names for FETokenInfo, which
+// they do not have. Only top-level directives are visited by that cleanup.
+inline void detach_using_directives(clang::TranslationUnitDecl* tu) {
+  llvm::SmallVector<clang::UsingDirectiveDecl*, 4> directives;
+  for (clang::Decl* decl : tu->decls())
+    if (auto* directive = llvm::dyn_cast<clang::UsingDirectiveDecl>(decl))
+      directives.push_back(directive);
+  for (auto* directive : directives)
+    tu->removeDecl(directive);
+}
+
+// Parse cleans up internally before returning an error. Intercept diagnostics
+// so directives preceding even a final #error are detached in time, while
+// preserving the existing diagnostic client's output, counts and ownership.
+class ParseDiagnostics : public clang::ForwardingDiagnosticConsumer {
+  clang::ASTContext& context_;
+  clang::TranslationUnitDecl* previous_unit_;
+  clang::DiagnosticsEngine& diagnostics_;
+  clang::DiagnosticConsumer* previous_;
+  std::unique_ptr<clang::DiagnosticConsumer> previous_owner_;
+
+ public:
+  explicit ParseDiagnostics(clang::Interpreter& interpreter)
+      : clang::ForwardingDiagnosticConsumer(
+            *interpreter.getCompilerInstance()->getDiagnostics().getClient()),
+        context_(interpreter.getASTContext()),
+        previous_unit_(context_.getTranslationUnitDecl()),
+        diagnostics_(interpreter.getCompilerInstance()->getDiagnostics()),
+        previous_(diagnostics_.getClient()), previous_owner_(diagnostics_.takeClient()) {
+    diagnostics_.setClient(this, false);
+  }
+  ~ParseDiagnostics() override {
+    if (previous_owner_)
+      diagnostics_.setClient(previous_owner_.release());
+    else
+      diagnostics_.setClient(previous_, false);
+  }
+  void HandleDiagnostic(clang::DiagnosticsEngine::Level level,
+                        const clang::Diagnostic& diagnostic) override {
+    clang::ForwardingDiagnosticConsumer::HandleDiagnostic(level, diagnostic);
+    if (level >= clang::DiagnosticsEngine::Error &&
+        context_.getTranslationUnitDecl() != previous_unit_)
+      detach_using_directives(context_.getTranslationUnitDecl());
+  }
+};
+
 inline llvm::Expected<clang::PartialTranslationUnit&> parse_input(clang::Interpreter& interpreter,
                                                                   llvm::StringRef code) {
+  ParseDiagnostics diagnostics(interpreter);
   auto parsed = interpreter.Parse(code);
   if (!parsed) {
     auto& context = interpreter.getASTContext();
@@ -57,19 +107,12 @@ inline llvm::Expected<clang::PartialTranslationUnit&> parse_input(clang::Interpr
   return parsed;
 }
 
-// Clang 21/22's CleanUpPTU asks using-directive names for FETokenInfo, which
-// they do not have, and crashes. Anonymous namespaces add implicit directives.
-// Detach top-level directives before Undo; nested ones are not visited by
-// that cleanup loop. The TU must belong to the most recent input; nullptr is
+// Anonymous namespaces add implicit directives too. Detach before Undo as
+// well as internal parse cleanup. The TU must be the most recent input; nullptr is
 // only for the known-empty input used to retrieve a pending expression value.
 inline llvm::Error undo_input(clang::Interpreter& interpreter, clang::TranslationUnitDecl* tu) {
   if (tu) {
-    llvm::SmallVector<clang::UsingDirectiveDecl*, 4> directives;
-    for (clang::Decl* decl : tu->decls())
-      if (auto* directive = llvm::dyn_cast<clang::UsingDirectiveDecl>(decl))
-        directives.push_back(directive);
-    for (auto* directive : directives)
-      tu->removeDecl(directive);
+    detach_using_directives(tu);
   }
   auto error = interpreter.Undo();
   if (!error && tu) {

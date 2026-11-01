@@ -955,14 +955,24 @@ bool CppInterpreter::with_compile_options(const SourceCompileOptions& options,
   }
   llvm::SaveAndRestore<bool> active(compile_scope_active_, true);
   clang::Value ignored;
-  const bool prepared =
-      scope.prelude().empty() || run_raw(scope.prelude(), ignored);
+  const auto run_macros = [&](const std::string& code) {
+    if (code.empty()) return true;
+    // Retain the per-file boundary for editor prefix capture before clearing
+    // the source identity used by reload bookkeeping.
+    if (!source_input_.empty())
+      editor_pch_->observe_input({}, args_, false, interp_->getCompilerInstance());
+    // Macro setup/restoration is not another attempt to add or reload the
+    // source. In particular, an epilogue must not consume failed_sources.
+    llvm::SaveAndRestore<std::string> source_scope(source_input_, {});
+    llvm::SaveAndRestore<bool> reload_scope(reloading_source_, false);
+    return run_raw(code, ignored);
+  };
+  const bool prepared = run_macros(scope.prelude());
   const bool included = prepared && (scope.includes().empty() ||
                                      run_raw(scope.includes(), ignored));
   const bool result = included && action();
   // Failed parsing does not undo macro directives, so restore them separately.
-  const bool restored =
-      scope.epilogue().empty() || run_raw(scope.epilogue(), ignored);
+  const bool restored = run_macros(scope.epilogue());
   ignored.clear();
   if (!prepared || !included)
     error = "could not apply compiler flags or forced includes";

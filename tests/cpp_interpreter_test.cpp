@@ -767,6 +767,27 @@ TEST_F(CppInterpreterTest, UndoSurvivesAnonymousNamespace) {
   EXPECT_EQ(cpp_->evaluate("undo_anon_next"), "(int) 3\n");
 }
 
+TEST_F(CppInterpreterTest, ParseCleanupHandlesDirectivesBeforeAndAfterErrors) {
+  ASSERT_TRUE(cpp_->execute(
+      "namespace ParseKept { int kept = 4; } using namespace ParseKept; "
+      "namespace ParseRejected { int leaked = 5; }"));
+  for (const auto* code : {
+           "using namespace ParseRejected;\n#error rejected input\n",
+           "#error rejected input\nusing namespace ParseRejected;\n",
+           "int broken = undefined_name; using namespace ParseRejected;",
+           "namespace { int broken = undefined_name; }",
+           "namespace { int rejected_anonymous = 1; }\n#error rejected input\n"}) {
+    SCOPED_TRACE(code);
+    EXPECT_FALSE(cpp_->execute(code));
+    EXPECT_EQ(cpp_->evaluate("1 + 1"), "(int) 2\n");
+    EXPECT_EQ(cpp_->evaluate("kept + ParseKept::kept"), "(int) 8\n");
+    EXPECT_FALSE(cpp_->evaluate("leaked"));
+  }
+  EXPECT_FALSE(cpp_->evaluate("rejected_anonymous"));
+  ASSERT_TRUE(cpp_->execute("int broken = 7; int rejected_anonymous = 9;"));
+  EXPECT_EQ(cpp_->evaluate("broken + rejected_anonymous"), "(int) 16\n");
+}
+
 TEST_F(CppInterpreterTest, UndoRemovesOnlyRejectedUsingDirectives) {
   ASSERT_TRUE(cpp_->execute(
       "namespace UndoKept { int undo_kept = 4; } using namespace UndoKept; "

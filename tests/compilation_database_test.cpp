@@ -115,6 +115,54 @@ TEST(CompilationDatabase, CompileScopesPreserveClangKeywordCompatibility) {
   EXPECT_EQ(cpp->evaluate("int(std::string(\"abc\").size())"), "(int) 3\n");
 }
 
+TEST(CompilationDatabase, RejectedSourcePreservesSkippedHeaderAndRestoresMacros) {
+  TemporaryProject project;
+  const auto header = project.write(
+      "h.hpp", "#pragma once\n"
+               "namespace lib { inline int one() { return 1; } }\n"
+               "namespace app { using namespace lib; }\n");
+  const auto source = project.write(
+      "m.cpp", "#include \"h.hpp\"\n"
+               "#ifndef REPRO\n#error missing per-file option\n#endif\n"
+               "namespace app { int missing(); int use() { return one() + missing(); } }\n");
+  write_database(project, arguments_entry(project.root(), source,
+                                         {"clang++", "-DREPRO=1", "-c", "m.cpp"}));
+  CurrentDirectory directory(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("#include \"" + header.string() + "\"\n"));
+  ASSERT_TRUE(cpp->execute("int old_caller() { return app::one(); }"));
+  for (int attempt = 0; attempt != 2; ++attempt) {
+    EXPECT_FALSE(cpp->add_source(source.string()).ok);
+    EXPECT_EQ(cpp->evaluate("1 + 1"), "(int) 2\n");
+    EXPECT_EQ(cpp->evaluate("app::one()"), "(int) 1\n");
+    EXPECT_EQ(cpp->evaluate("old_caller()"), "(int) 1\n");
+    EXPECT_EQ(cpp->evaluate("int(lib::one())"), "(int) 1\n");
+    ASSERT_TRUE(cpp->execute("#ifdef REPRO\n#error per-file macro leaked\n#endif\n"));
+    project.write("h.hpp", "#pragma once\n"
+                           "namespace lib { inline int one() { return 2; } }\n"
+                           "namespace app { using namespace lib; }\n");
+  }
+  EXPECT_TRUE(cpp->sources().empty());
+}
+
+TEST(CompilationDatabase, SourceOptionsKeepReloadDependenciesAfterMacroRestoration) {
+  TemporaryProject project;
+  const auto source = project.write("m.cpp", "int answer() { return REPRO; }\n");
+  write_database(project, arguments_entry(project.root(), source,
+                                         {"clang++", "-DREPRO=1", "-c", "m.cpp"}));
+  CurrentDirectory directory(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->add_source(source.string()).ok);
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 1\n");
+  project.write("m.cpp", "int answer() { return REPRO + 1; }\n");
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 2\n");
+  ASSERT_TRUE(cpp->execute("#ifdef REPRO\n#error per-file macro leaked\n#endif\n"));
+}
+
 TEST(CompilationDatabase,
      LoadsAncestorBuildDatabaseAndPerFileOptionsAtStartup) {
   TemporaryProject project;

@@ -18,6 +18,7 @@
 #include "clang/Sema/Lookup.h"
 #include "clang/Sema/Scope.h"
 #include "clang/Sema/Sema.h"
+#include "interpreter_undo.hpp"
 
 namespace example {
 namespace {
@@ -113,6 +114,9 @@ class ShadowConsumer : public clang::ASTConsumer {
   bool capture_semicolon_expressions_ = false;
 
   void hide(clang::DeclContext *context, clang::NamedDecl *old) {
+    // Using-directive names have no FETokenInfo for IdentifierResolver.
+    if (llvm::isa<clang::UsingDirectiveDecl>(old))
+      return;
     if (auto *map = context->getPrimaryContext()->getLookupPtr()) {
       auto found = map->find(old->getDeclName());
       if (found == map->end())
@@ -285,6 +289,7 @@ public:
       }
       auto *named = llvm::dyn_cast<clang::NamedDecl>(declaration);
       if (!named || named->getDeclName().isEmpty() ||
+          llvm::isa<clang::UsingDirectiveDecl>(named) ||
           !is_current_definition(*named) ||
           !named->getDeclContext()->isFileContext() ||
           !files.count(
@@ -302,6 +307,10 @@ public:
     }
   }
   bool HandleTopLevelDecl(clang::DeclGroupRef declarations) override {
+    // A directive can be parsed after the last error diagnostic. Remove it
+    // before IncrementalParser performs its internal error cleanup too.
+    if (compiler_.getDiagnostics().hasErrorOccurred())
+      detach_using_directives(compiler_.getASTContext().getTranslationUnitDecl());
     for (auto* declaration : declarations) {
       if (capture_semicolon_expressions_ && !compiler_.getDiagnostics().hasErrorOccurred()) {
         auto* statement = llvm::dyn_cast<clang::TopLevelStmtDecl>(declaration);

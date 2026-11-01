@@ -23,6 +23,7 @@ struct SourceReload::Impl {
   std::map<std::string, Files> failed_sources;
   std::string root;
   Files pending;
+  Files skipped;
   std::vector<std::string> refreshing;
   // Macro tokens and old AST nodes retain pointers into earlier source text.
   // Keep every generation alive, and lend non-owning views to SourceManager.
@@ -52,7 +53,7 @@ struct SourceReload::Impl {
     prepared_files.insert(file.getName().str());
   }
 
-  void record(clang::FileID file_id) {
+  void record(clang::FileID file_id, bool skipped_file = false) {
     if (root.empty() || file_id.isInvalid())
       return;
     auto &manager = compiler.getSourceManager();
@@ -63,7 +64,8 @@ struct SourceReload::Impl {
     if (!file || file->getName().starts_with("input_line_") ||
         file->getName().starts_with("<"))
       return;
-    pending[file->getName().str()] = manager.getBufferData(file_id).str();
+    auto &files = skipped_file ? skipped : pending;
+    files[file->getName().str()] = manager.getBufferData(file_id).str();
   }
 
   void undefine(clang::IdentifierInfo *identifier) {
@@ -142,7 +144,7 @@ struct SourceReload::Impl {
     }
     void FileSkipped(const clang::FileEntryRef &file, const clang::Token &,
                      clang::SrcMgr::CharacteristicKind) override {
-      state.record(state.compiler.getSourceManager().translateFile(file));
+      state.record(state.compiler.getSourceManager().translateFile(file), true);
     }
   };
 };
@@ -159,6 +161,7 @@ bool SourceReload::begin(const std::string &root, bool reload,
   auto &state = *impl_;
   state.root = root;
   state.pending.clear();
+  state.skipped.clear();
   if (root.empty())
     return true;
   state.macros = state.active_macros();
@@ -238,6 +241,10 @@ void SourceReload::finish(bool committed) {
   }
   if (!state.root.empty()) {
     if (committed) {
+      // Successful sources still track shared headers for change detection.
+      // A failed input must only refresh files it actually entered; skipped
+      // headers contain declarations committed by earlier inputs.
+      state.pending.insert(state.skipped.begin(), state.skipped.end());
       state.sources[state.root] = state.pending;
       state.failed_sources.erase(state.root);
     } else if (!state.pending.empty())
@@ -246,6 +253,7 @@ void SourceReload::finish(bool committed) {
   version_source_files(compiler, {});
   state.root.clear();
   state.pending.clear();
+  state.skipped.clear();
   state.refreshing.clear();
   state.macros.clear();
   state.backups.clear();

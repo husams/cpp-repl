@@ -207,6 +207,53 @@ TEST_F(IterativeDevelopment, FailedAddRestoresIncludeOnceHeaders) {
   EXPECT_EQ(cpp->evaluate("A{}.value"), "(int) 4\n");
 }
 
+TEST_F(IterativeDevelopment, ReloadPreservesUsingDirectives) {
+  SourceFiles files;
+  const auto path = files.write(
+      "source.cpp",
+      "namespace lib { inline int one() { return 1; } }\n"
+      "using namespace lib;\n"
+      "namespace app { using namespace lib; int answer() { return one(); } }\n");
+  ASSERT_TRUE(cpp->add_source(path).ok);
+  const auto result = cpp->reload_source(path);
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_EQ(cpp->evaluate("one() + app::answer()"), "(int) 2\n");
+}
+
+TEST_F(IterativeDevelopment, SuccessfulAddTracksSkippedHeadersForReload) {
+  SourceFiles files;
+  const auto header = files.write(
+      "h.hpp", "#pragma once\nnamespace lib { inline int one() { return 1; } }\n"
+               "namespace app { using namespace lib; }\n");
+  ASSERT_TRUE(cpp->execute("#include \"" + header + "\"\n"));
+  const auto source = files.write(
+      "m.cpp", "#include \"h.hpp\"\nint answer() { return app::one(); }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 1\n");
+  files.write("h.hpp", "#pragma once\nnamespace lib { inline int one() { return 2; } }\n"
+                       "namespace app { using namespace lib; }\n");
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 2\n");
+}
+
+TEST_F(IterativeDevelopment, RejectedParseWithUsingDirectivesKeepsSessionUsable) {
+  SourceFiles files;
+  ASSERT_TRUE(cpp->execute(
+      "namespace lib { int one() { return 1; } } using namespace lib;"
+      "namespace rejected_lookup { int leaked = 9; }"));
+  const auto path = files.write(
+      "broken.cpp",
+      "using namespace lib;\nusing namespace rejected_lookup;\n"
+      "int broken() { return undefined_name; }\n");
+  EXPECT_FALSE(cpp->add_source(path).ok);
+  EXPECT_EQ(cpp->evaluate("1 + 1"), "(int) 2\n");
+  EXPECT_EQ(cpp->evaluate("lib::one() + one()"), "(int) 2\n");
+  EXPECT_FALSE(cpp->evaluate("leaked"));
+  EXPECT_FALSE(cpp->evaluate("broken()"));
+  files.write("broken.cpp", "int broken() { return lib::one(); }\n");
+  ASSERT_TRUE(cpp->add_source(path).ok);
+  EXPECT_EQ(cpp->evaluate("broken()"), "(int) 1\n");
+}
+
 TEST_F(IterativeDevelopment,
        ReloadRemovesDeletedNamesAndRecoversFromMissingSymbols) {
   SourceFiles files;

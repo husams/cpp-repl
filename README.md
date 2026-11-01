@@ -285,6 +285,10 @@ A leading `!` selects the shell; parenthesize a C++ negation, such as `(!x)`.
   Earlier declarations remain available after a failed input; see the
   [include recovery example](examples/include-recovery/README.md) for the
   checked reproducer and compiler-state limits.
+  Rejected inputs containing `using namespace` also recover from parse errors
+  and missing symbols. Previously included headers remain usable across failed
+  additions with per-file options and retries. Definitions introduced only by
+  the rejected input are not committed.
   At startup, the REPL searches the current directory and its ancestors for
   `compile_commands.json`, also checking `build/` and `build-linux/` at each
   level. The first database found is validated and loaded once using Clang
