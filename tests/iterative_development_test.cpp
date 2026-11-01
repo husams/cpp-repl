@@ -235,6 +235,93 @@ TEST_F(IterativeDevelopment, SuccessfulAddTracksSkippedHeadersForReload) {
   EXPECT_EQ(cpp->evaluate("answer()"), "(int) 2\n");
 }
 
+TEST_F(IterativeDevelopment, FailedRetryRefreshesChangedSkippedHeader) {
+  SourceFiles files;
+  const auto header = files.write("h.hpp", "#pragma once\nint one() { return 1; }\n");
+  ASSERT_TRUE(cpp->execute("#include \"" + header + "\"\n"));
+  ASSERT_TRUE(cpp->execute("int old_caller() { return one(); }"));
+  const auto source = files.write("m.cpp", "#include \"h.hpp\"\nint use() { return two(); }\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  files.write("h.hpp", "#pragma once\nint one() { return 3; }\nint two() { return 2; }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("use()"), "(int) 2\n");
+  EXPECT_EQ(cpp->evaluate("one()"), "(int) 3\n");
+  EXPECT_EQ(cpp->evaluate("old_caller()"), "(int) 1\n");
+}
+
+TEST_F(IterativeDevelopment, FailedChangedSkippedHeaderRestoresEarlierDefinitions) {
+  SourceFiles files;
+  const auto header = files.write("h.hpp", "#pragma once\nint one() { return 1; }\n");
+  ASSERT_TRUE(cpp->execute("#include \"" + header + "\"\n"));
+  const auto source = files.write("m.cpp", "#include \"h.hpp\"\nint use() { return two(); }\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  files.write("h.hpp", "#pragma once\nint one() { return 3; }\nint broken = undefined_name;\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("one()"), "(int) 1\n");
+  files.write("h.hpp", "#pragma once\nint one() { return 3; }\nint two() { return 2; }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("use() + one()"), "(int) 5\n");
+}
+
+TEST_F(IterativeDevelopment, ReloadReplacesAndRemovesUsingDirectives) {
+  SourceFiles files;
+  const std::string declarations =
+      "namespace a { int f() { return 1; } }\n"
+      "namespace b { int f() { return 2; } }\n";
+  const auto source = files.write("m.cpp", declarations +
+      "using namespace a; int answer() { return f(); }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("f() + answer()"), "(int) 2\n");
+  files.write("m.cpp", declarations +
+      "using namespace b; int answer() { return f(); }\n");
+  ASSERT_TRUE(cpp->reload_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("f() + answer()"), "(int) 4\n");
+  files.write("m.cpp", declarations + "int answer() { return b::f(); }\n");
+  ASSERT_TRUE(cpp->reload_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 2\n");
+  EXPECT_FALSE(cpp->evaluate("f()"));
+}
+
+TEST_F(IterativeDevelopment, ReloadReplacesAndRemovesNestedUsingDirectives) {
+  SourceFiles files;
+  const std::string declarations =
+      "namespace a { int f() { return 1; } }\n"
+      "namespace b { int f() { return 2; } }\n";
+  const auto source = files.write("m.cpp", declarations +
+      "namespace app { using namespace a; int answer() { return f(); } }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  files.write("m.cpp", declarations +
+      "namespace app { using namespace b; int answer() { return f(); } }\n");
+  ASSERT_TRUE(cpp->reload_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("app::f() + app::answer()"), "(int) 4\n");
+  files.write("m.cpp", declarations +
+      "namespace app { int answer() { return b::f(); } }\n");
+  ASSERT_TRUE(cpp->reload_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("app::answer()"), "(int) 2\n");
+  EXPECT_FALSE(cpp->evaluate("app::f()"));
+}
+
+TEST_F(IterativeDevelopment, RejectedReloadRestoresUsingDirectives) {
+  SourceFiles files;
+  const std::string declarations =
+      "namespace a { int f() { return 1; } }\n"
+      "namespace b { int f() { return 2; } }\n";
+  // Exercise directive rollback independently of Clang's retained nested
+  // definitions after a rejected namespace redeclaration.
+  ASSERT_TRUE(cpp->execute(declarations));
+  const auto source = files.write("m.cpp",
+      "using namespace a; int answer() { return f(); }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  files.write("m.cpp",
+      "using namespace b; int answer() { return undefined_name; }\n");
+  EXPECT_FALSE(cpp->reload_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("f() + answer()"), "(int) 2\n");
+  files.write("m.cpp",
+      "using namespace b; int answer() { return f(); }\n");
+  ASSERT_TRUE(cpp->reload_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("f() + answer()"), "(int) 4\n");
+}
+
 TEST_F(IterativeDevelopment, RejectedParseWithUsingDirectivesKeepsSessionUsable) {
   SourceFiles files;
   ASSERT_TRUE(cpp->execute(

@@ -21,6 +21,7 @@ struct SourceReload::Impl {
   clang::CompilerInstance &compiler;
   std::map<std::string, Files> sources;
   std::map<std::string, Files> failed_sources;
+  std::map<std::string, Files> failed_skipped_sources;
   std::string root;
   Files pending;
   Files skipped;
@@ -182,9 +183,12 @@ bool SourceReload::begin(const std::string &root, bool reload,
       std::pair<clang::FileEntryRef, std::unique_ptr<llvm::MemoryBuffer>>>
       fresh;
   // Validate all dependencies before changing either lookup or preprocessing.
-  for (const auto &[path, contents] : previous->second) {
-    auto file = compiler.getFileManager().getFileRef(path);
+  const auto prepare = [&](const std::string &path,
+                           const std::string *unchanged = nullptr) {
     auto buffer = llvm::MemoryBuffer::getFile(path);
+    if (buffer && unchanged && (*buffer)->getBuffer() == *unchanged)
+      return true;
+    auto file = compiler.getFileManager().getFileRef(path);
     if (!file || !buffer) {
       if (!file)
         llvm::consumeError(file.takeError());
@@ -196,6 +200,17 @@ bool SourceReload::begin(const std::string &root, bool reload,
                              pp.getHeaderSearchInfo().getFileInfo(*file),
                              pp.alreadyIncluded(*file)});
     fresh.emplace_back(*file, std::move(*buffer));
+    return true;
+  };
+  for (const auto &[path, contents] : previous->second)
+    if (!prepare(path))
+      return false;
+  if (!reload) {
+    if (auto skipped = state.failed_skipped_sources.find(root);
+        skipped != state.failed_skipped_sources.end())
+      for (const auto &[path, contents] : skipped->second)
+        if (!previous->second.count(path) && !prepare(path, &contents))
+          return false;
   }
   for (auto entry : state.active_macros(true))
     state.undefine(entry.first);
@@ -242,13 +257,16 @@ void SourceReload::finish(bool committed) {
   if (!state.root.empty()) {
     if (committed) {
       // Successful sources still track shared headers for change detection.
-      // A failed input must only refresh files it actually entered; skipped
-      // headers contain declarations committed by earlier inputs.
+      // On failed-source retry, unchanged skipped headers keep their earlier
+      // committed declarations; edited skipped headers must be refreshed.
       state.pending.insert(state.skipped.begin(), state.skipped.end());
       state.sources[state.root] = state.pending;
       state.failed_sources.erase(state.root);
-    } else if (!state.pending.empty())
+      state.failed_skipped_sources.erase(state.root);
+    } else if (!state.pending.empty()) {
       state.failed_sources[state.root] = state.pending;
+      state.failed_skipped_sources[state.root] = state.skipped;
+    }
   }
   version_source_files(compiler, {});
   state.root.clear();

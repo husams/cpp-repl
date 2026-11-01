@@ -472,7 +472,9 @@ bool CppInterpreter::run_raw(const std::string& code, clang::Value& value,
   auto capture_scope = llvm::make_scope_exit(
       [&] { capture_semicolon_expressions(*interp_->getCompilerInstance(), false); });
 #endif
-  llvm::Expected<clang::PartialTranslationUnit&> ptu = parse_input(*interp_, code);
+  llvm::Expected<clang::PartialTranslationUnit&> ptu =
+      source_prefix_.empty() ? parse_input(*interp_, code)
+                             : parse_input(*interp_, source_prefix_ + code);
   if (!ptu) return report(ptu.takeError());
   if (ptu->TheModule) {
     const auto instrumented = hooks_.instrument(*ptu);
@@ -968,9 +970,17 @@ bool CppInterpreter::with_compile_options(const SourceCompileOptions& options,
     return run_raw(code, ignored);
   };
   const bool prepared = run_macros(scope.prelude());
-  const bool included = prepared && (scope.includes().empty() ||
+  const bool source = !source_input_.empty();
+  const bool included = prepared && (source || scope.includes().empty() ||
                                      run_raw(scope.includes(), ignored));
-  const bool result = included && action();
+  bool result = false;
+  {
+    // A source and its forced headers must share one begin/finish pair, so
+    // failure restores them together and successful reload tracks all files.
+    llvm::SaveAndRestore<std::string> prefix(
+        source_prefix_, source ? scope.includes() : std::string());
+    result = included && action();
+  }
   // Failed parsing does not undo macro directives, so restore them separately.
   const bool restored = run_macros(scope.epilogue());
   ignored.clear();

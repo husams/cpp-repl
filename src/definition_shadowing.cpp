@@ -114,9 +114,6 @@ class ShadowConsumer : public clang::ASTConsumer {
   bool capture_semicolon_expressions_ = false;
 
   void hide(clang::DeclContext *context, clang::NamedDecl *old) {
-    // Using-directive names have no FETokenInfo for IdentifierResolver.
-    if (llvm::isa<clang::UsingDirectiveDecl>(old))
-      return;
     if (auto *map = context->getPrimaryContext()->getLookupPtr()) {
       auto found = map->find(old->getDeclName());
       if (found == map->end())
@@ -129,16 +126,20 @@ class ShadowConsumer : public clang::ASTConsumer {
         map->erase(found);
       auto &sema = compiler_.getSema();
       bool on_scope_chain = false;
-      for (auto it = sema.IdResolver.begin(old->getDeclName());
-           it != sema.IdResolver.end(); ++it)
-        if (*it == old) {
-          on_scope_chain = true;
-          break;
-        }
-      if (on_scope_chain)
-        sema.IdResolver.RemoveDecl(old);
-      if (auto *scope = sema.getScopeForContext(context))
-        scope->RemoveDecl(old);
+      // Directives participate in context lookup, but their special name
+      // has no FETokenInfo and must never reach IdentifierResolver.
+      if (!llvm::isa<clang::UsingDirectiveDecl>(old)) {
+        for (auto it = sema.IdResolver.begin(old->getDeclName());
+             it != sema.IdResolver.end(); ++it)
+          if (*it == old) {
+            on_scope_chain = true;
+            break;
+          }
+        if (on_scope_chain)
+          sema.IdResolver.RemoveDecl(old);
+        if (auto *scope = sema.getScopeForContext(context))
+          scope->RemoveDecl(old);
+      }
       hidden_.push_back({context, old, on_scope_chain});
     }
   }
@@ -289,7 +290,6 @@ public:
       }
       auto *named = llvm::dyn_cast<clang::NamedDecl>(declaration);
       if (!named || named->getDeclName().isEmpty() ||
-          llvm::isa<clang::UsingDirectiveDecl>(named) ||
           !is_current_definition(*named) ||
           !named->getDeclContext()->isFileContext() ||
           !files.count(
@@ -310,7 +310,7 @@ public:
     // A directive can be parsed after the last error diagnostic. Remove it
     // before IncrementalParser performs its internal error cleanup too.
     if (compiler_.getDiagnostics().hasErrorOccurred())
-      detach_using_directives(compiler_.getASTContext().getTranslationUnitDecl());
+      detach_using_directives(compiler_.getASTContext().getTranslationUnitDecl(), true);
     for (auto* declaration : declarations) {
       if (capture_semicolon_expressions_ && !compiler_.getDiagnostics().hasErrorOccurred()) {
         auto* statement = llvm::dyn_cast<clang::TopLevelStmtDecl>(declaration);

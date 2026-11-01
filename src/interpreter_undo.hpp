@@ -52,13 +52,20 @@ inline void restore_lookup(clang::ASTContext& context, clang::TranslationUnitDec
 
 // Clang 21/22's CleanUpPTU asks using-directive names for FETokenInfo, which
 // they do not have. Only top-level directives are visited by that cleanup.
-inline void detach_using_directives(clang::TranslationUnitDecl* tu) {
+inline void detach_using_directives(clang::TranslationUnitDecl* tu,
+                                    bool preserve_lookup = false) {
   llvm::SmallVector<clang::UsingDirectiveDecl*, 4> directives;
   for (clang::Decl* decl : tu->decls())
     if (auto* directive = llvm::dyn_cast<clang::UsingDirectiveDecl>(decl))
       directives.push_back(directive);
-  for (auto* directive : directives)
+  for (auto* directive : directives) {
     tu->removeDecl(directive);
+    // Parsing can continue after an error. Keep semantic lookup working even
+    // though the directive is detached from the lexical list that crashes
+    // CleanUpPTU. Clang's lookup-table cleanup still removes it on rejection.
+    if (preserve_lookup)
+      tu->makeDeclVisibleInContext(directive);
+  }
 }
 
 // Parse cleans up internally before returning an error. Intercept diagnostics
@@ -92,7 +99,7 @@ class ParseDiagnostics : public clang::ForwardingDiagnosticConsumer {
     clang::ForwardingDiagnosticConsumer::HandleDiagnostic(level, diagnostic);
     if (level >= clang::DiagnosticsEngine::Error &&
         context_.getTranslationUnitDecl() != previous_unit_)
-      detach_using_directives(context_.getTranslationUnitDecl());
+      detach_using_directives(context_.getTranslationUnitDecl(), true);
   }
 };
 

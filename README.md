@@ -287,8 +287,9 @@ A leading `!` selects the shell; parenthesize a C++ negation, such as `(!x)`.
   checked reproducer and compiler-state limits.
   Rejected inputs containing `using namespace` also recover from parse errors
   and missing symbols. Previously included headers remain usable across failed
-  additions with per-file options and retries. Definitions introduced only by
-  the rejected input are not committed.
+  additions with per-file options and retries. Recovery is limited to top-level
+  lookup: Clang can retain declarations and using-directives nested inside
+  namespaces after rejection, affecting later lookup or failing to execute.
   At startup, the REPL searches the current directory and its ancestors for
   `compile_commands.json`, also checking `build/` and `build-linux/` at each
   level. The first database found is validated and loaded once using Clang

@@ -140,9 +140,6 @@ TEST(CompilationDatabase, RejectedSourcePreservesSkippedHeaderAndRestoresMacros)
     EXPECT_EQ(cpp->evaluate("old_caller()"), "(int) 1\n");
     EXPECT_EQ(cpp->evaluate("int(lib::one())"), "(int) 1\n");
     ASSERT_TRUE(cpp->execute("#ifdef REPRO\n#error per-file macro leaked\n#endif\n"));
-    project.write("h.hpp", "#pragma once\n"
-                           "namespace lib { inline int one() { return 2; } }\n"
-                           "namespace app { using namespace lib; }\n");
   }
   EXPECT_TRUE(cpp->sources().empty());
 }
@@ -161,6 +158,56 @@ TEST(CompilationDatabase, SourceOptionsKeepReloadDependenciesAfterMacroRestorati
   project.write("m.cpp", "int answer() { return REPRO + 1; }\n");
   EXPECT_EQ(cpp->evaluate("answer()"), "(int) 2\n");
   ASSERT_TRUE(cpp->execute("#ifdef REPRO\n#error per-file macro leaked\n#endif\n"));
+}
+
+TEST(CompilationDatabase, ForcedIncludesShareSourceReloadTransaction) {
+  TemporaryProject project;
+  project.write("f.h", "#pragma once\ninline int forced() { return 7; }\n");
+  const auto source = project.write("m.cpp", "int answer() { return forced() + 1; }\n");
+  write_database(project, arguments_entry(project.root(), source,
+      {"clang++", "-DREPRO=1", "-include", "f.h", "-c", "m.cpp"}));
+  CurrentDirectory directory(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->add_source(source.string()).ok);
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 8\n");
+  project.write("m.cpp", "int answer() { return forced() + 2; }\n");
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 9\n");
+  EXPECT_EQ(cpp->evaluate("forced()"), "(int) 7\n");
+  project.write("m.cpp", "int answer() { return undefined_name; }\n");
+  EXPECT_FALSE(cpp->reload_source(source.string()).ok);
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 9\n");
+  EXPECT_EQ(cpp->evaluate("forced()"), "(int) 7\n");
+  project.write("m.cpp", "int answer() { return forced() + 3; }\n");
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 10\n");
+  project.write("f.h", "#pragma once\ninline int forced() { return 9; }\n");
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 12\n");
+  EXPECT_EQ(cpp->evaluate("forced()"), "(int) 9\n");
+  ASSERT_TRUE(cpp->execute("#ifdef REPRO\n#error per-file macro leaked\n#endif\n"));
+}
+
+TEST(CompilationDatabase, FailedForcedIncludeSourceDoesNotBecomeAnAddedSource) {
+  TemporaryProject project;
+  project.write("f.h", "#pragma once\ninline int forced() { return 7; }\n");
+  const auto source = project.write("m.cpp", "int answer() { return undefined_name; }\n");
+  write_database(project, arguments_entry(project.root(), source,
+      {"clang++", "-include", "f.h", "-c", "m.cpp"}));
+  CurrentDirectory directory(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  EXPECT_FALSE(cpp->add_source(source.string()).ok);
+  EXPECT_TRUE(cpp->sources().empty());
+  project.write("f.h", "#pragma once\ninline int forced() { return 9; }\n");
+  ::testing::internal::CaptureStderr();
+  const auto value = cpp->evaluate("1 + 1");
+  const auto diagnostics = ::testing::internal::GetCapturedStderr();
+  EXPECT_EQ(value, "(int) 2\n");
+  EXPECT_TRUE(diagnostics.empty()) << diagnostics;
+  project.write("m.cpp", "int answer() { return forced(); }\n");
+  ASSERT_TRUE(cpp->add_source(source.string()).ok);
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 9\n");
 }
 
 TEST(CompilationDatabase,

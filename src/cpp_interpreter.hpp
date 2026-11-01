@@ -191,6 +191,8 @@ class CppInterpreter {
   bool global_options_changed_ = false;
   bool compile_scope_active_ = false;
   std::string source_input_;
+  // Forced headers parsed in the same input as the source being added/reloaded.
+  std::string source_prefix_;
   bool reloading_source_ = false;
   // Repaints can request the same buffer repeatedly. A new incremental TU or
   // changed compiler flags invalidates the analysis without retaining AST nodes.
