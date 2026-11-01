@@ -115,6 +115,124 @@ TEST(CompilationDatabase, CompileScopesPreserveClangKeywordCompatibility) {
   EXPECT_EQ(cpp->evaluate("int(std::string(\"abc\").size())"), "(int) 3\n");
 }
 
+TEST(CompilationDatabase, RejectedSourcePreservesSkippedHeaderAndRestoresMacros) {
+  TemporaryProject project;
+  const auto header = project.write(
+      "h.hpp", "#pragma once\n"
+               "namespace lib { inline int one() { return 1; } }\n"
+               "namespace app { using namespace lib; }\n");
+  const auto source = project.write(
+      "m.cpp", "#include \"h.hpp\"\n"
+               "#ifndef REPRO\n#error missing per-file option\n#endif\n"
+               "namespace app { int missing(); int use() { return one() + missing(); } }\n");
+  write_database(project, arguments_entry(project.root(), source,
+                                         {"clang++", "-DREPRO=1", "-c", "m.cpp"}));
+  CurrentDirectory directory(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->execute("#include \"" + header.string() + "\"\n"));
+  ASSERT_TRUE(cpp->execute("int old_caller() { return app::one(); }"));
+  for (int attempt = 0; attempt != 2; ++attempt) {
+    EXPECT_FALSE(cpp->add_source(source.string()).ok);
+    EXPECT_EQ(cpp->evaluate("1 + 1"), "(int) 2\n");
+    EXPECT_EQ(cpp->evaluate("app::one()"), "(int) 1\n");
+    EXPECT_EQ(cpp->evaluate("old_caller()"), "(int) 1\n");
+    EXPECT_EQ(cpp->evaluate("int(lib::one())"), "(int) 1\n");
+    ASSERT_TRUE(cpp->execute("#ifdef REPRO\n#error per-file macro leaked\n#endif\n"));
+  }
+  EXPECT_TRUE(cpp->sources().empty());
+}
+
+TEST(CompilationDatabase, SourceOptionsKeepReloadDependenciesAfterMacroRestoration) {
+  TemporaryProject project;
+  const auto source = project.write("m.cpp", "int answer() { return REPRO; }\n");
+  write_database(project, arguments_entry(project.root(), source,
+                                         {"clang++", "-DREPRO=1", "-c", "m.cpp"}));
+  CurrentDirectory directory(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->add_source(source.string()).ok);
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 1\n");
+  project.write("m.cpp", "int answer() { return REPRO + 1; }\n");
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 2\n");
+  ASSERT_TRUE(cpp->execute("#ifdef REPRO\n#error per-file macro leaked\n#endif\n"));
+}
+
+TEST(CompilationDatabase, ForcedIncludesShareSourceReloadTransaction) {
+  TemporaryProject project;
+  project.write("f.h", "#pragma once\ninline int forced() { return 7; }\n");
+  const auto source = project.write("m.cpp", "int answer() { return forced() + 1; }\n");
+  write_database(project, arguments_entry(project.root(), source,
+      {"clang++", "-DREPRO=1", "-include", "f.h", "-c", "m.cpp"}));
+  CurrentDirectory directory(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  ASSERT_TRUE(cpp->add_source(source.string()).ok);
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 8\n");
+  project.write("m.cpp", "int answer() { return forced() + 2; }\n");
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 9\n");
+  EXPECT_EQ(cpp->evaluate("forced()"), "(int) 7\n");
+  project.write("m.cpp", "int answer() { return undefined_name; }\n");
+  EXPECT_FALSE(cpp->reload_source(source.string()).ok);
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 9\n");
+  EXPECT_EQ(cpp->evaluate("forced()"), "(int) 7\n");
+  project.write("m.cpp", "int answer() { return forced() + 3; }\n");
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 10\n");
+  project.write("f.h", "#pragma once\ninline int forced() { return 9; }\n");
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 12\n");
+  EXPECT_EQ(cpp->evaluate("forced()"), "(int) 9\n");
+  ASSERT_TRUE(cpp->execute("#ifdef REPRO\n#error per-file macro leaked\n#endif\n"));
+}
+
+TEST(CompilationDatabase, FailedForcedIncludeSourceDoesNotBecomeAnAddedSource) {
+  TemporaryProject project;
+  project.write("f.h", "#pragma once\ninline int forced() { return 7; }\n");
+  const auto source = project.write("m.cpp", "int answer() { return undefined_name; }\n");
+  write_database(project, arguments_entry(project.root(), source,
+      {"clang++", "-include", "f.h", "-c", "m.cpp"}));
+  CurrentDirectory directory(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  EXPECT_FALSE(cpp->add_source(source.string()).ok);
+  EXPECT_TRUE(cpp->sources().empty());
+  project.write("f.h", "#pragma once\ninline int forced() { return 9; }\n");
+  ::testing::internal::CaptureStderr();
+  const auto value = cpp->evaluate("1 + 1");
+  const auto diagnostics = ::testing::internal::GetCapturedStderr();
+  EXPECT_EQ(value, "(int) 2\n");
+  EXPECT_TRUE(diagnostics.empty()) << diagnostics;
+  project.write("m.cpp", "int answer() { return forced(); }\n");
+  ASSERT_TRUE(cpp->add_source(source.string()).ok);
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 9\n");
+}
+
+TEST(CompilationDatabase, ForcedIncludeFailuresKeepTheirSpecificErrorMessage) {
+  TemporaryProject project;
+  project.write("f.h", "#pragma once\nint broken = undefined_name;\n");
+  const auto source = project.write("m.cpp", "int answer() { return 42; }\n");
+  write_database(project, arguments_entry(project.root(), source,
+      {"clang++", "-include", "f.h", "-c", "m.cpp"}));
+  CurrentDirectory directory(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_NE(cpp, nullptr) << error;
+  const auto rejected = cpp->add_source(source.string());
+  EXPECT_FALSE(rejected.ok);
+  EXPECT_NE(rejected.message.find("could not apply compiler flags or forced includes"), std::string::npos);
+  project.write("f.h", "#pragma once\nint forced() { return 7; }\n");
+  project.write("m.cpp", "int answer() { return undefined_name; }\n");
+  const auto source_error = cpp->add_source(source.string());
+  EXPECT_FALSE(source_error.ok);
+  EXPECT_EQ(source_error.message.find("could not apply compiler flags or forced includes"), std::string::npos);
+  project.write("m.cpp", "int answer() { return forced(); }\n");
+  ASSERT_TRUE(cpp->add_source(source.string()).ok);
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 7\n");
+}
+
 TEST(CompilationDatabase,
      LoadsAncestorBuildDatabaseAndPerFileOptionsAtStartup) {
   TemporaryProject project;

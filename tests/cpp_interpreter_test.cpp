@@ -767,6 +767,64 @@ TEST_F(CppInterpreterTest, UndoSurvivesAnonymousNamespace) {
   EXPECT_EQ(cpp_->evaluate("undo_anon_next"), "(int) 3\n");
 }
 
+TEST_F(CppInterpreterTest, ParseCleanupHandlesDirectivesBeforeAndAfterErrors) {
+  ASSERT_TRUE(cpp_->execute(
+      "namespace ParseKept { int kept = 4; } using namespace ParseKept; "
+      "namespace ParseRejected { int leaked = 5; }"));
+  for (const auto* code : {
+           "using namespace ParseRejected;\n#error rejected input\n",
+           "#error rejected input\nusing namespace ParseRejected;\n",
+           "int broken = undefined_name; using namespace ParseRejected;",
+           "namespace { int broken = undefined_name; }",
+           "namespace { int rejected_anonymous = 1; }\n#error rejected input\n"}) {
+    SCOPED_TRACE(code);
+    EXPECT_FALSE(cpp_->execute(code));
+    EXPECT_EQ(cpp_->evaluate("1 + 1"), "(int) 2\n");
+    EXPECT_EQ(cpp_->evaluate("kept + ParseKept::kept"), "(int) 8\n");
+    EXPECT_FALSE(cpp_->evaluate("leaked"));
+  }
+  EXPECT_FALSE(cpp_->evaluate("rejected_anonymous"));
+  ASSERT_TRUE(cpp_->execute("int broken = 7; int rejected_anonymous = 9;"));
+  EXPECT_EQ(cpp_->evaluate("broken + rejected_anonymous"), "(int) 16\n");
+}
+
+TEST_F(CppInterpreterTest, ParseErrorsPreserveDirectiveLookupForRemainingDeclarations) {
+  ASSERT_TRUE(cpp_->execute("namespace DiagnosticLib { int one() { return 1; } }"));
+  for (const auto* code : {
+      "using namespace DiagnosticLib; int first = undefined_name; int last = one();",
+      "int first = undefined_name; using namespace DiagnosticLib; int last = one();",
+      "using namespace DiagnosticLib; int first = undefined_name; "
+      "struct Deferred { int value() { return one(); } }; int last = one();",
+      "using namespace DiagnosticLib; int first = undefined_name; "
+      "template<class T> struct Deferred { int value() { return one(); } };"}) {
+    SCOPED_TRACE(code);
+    ::testing::internal::CaptureStderr();
+    const bool accepted = cpp_->execute(code);
+    const auto diagnostics = ::testing::internal::GetCapturedStderr();
+    EXPECT_FALSE(accepted);
+    EXPECT_NE(diagnostics.find("undeclared identifier 'undefined_name'"), std::string::npos);
+    EXPECT_EQ(diagnostics.find("undeclared identifier 'one'"), std::string::npos) << diagnostics;
+    EXPECT_FALSE(cpp_->evaluate("one()"));
+    EXPECT_EQ(cpp_->evaluate("DiagnosticLib::one()"), "(int) 1\n");
+  }
+}
+
+TEST_F(CppInterpreterTest, LargeRejectedInputHandlesLaterExplicitAndImplicitDirectives) {
+  ASSERT_TRUE(cpp_->execute("namespace LateLookup { int one() { return 1; } }"));
+  std::string code = "#error rejected input\n";
+  for (unsigned i = 0; i != 600; ++i)
+    code += "extern int late_declaration_" + std::to_string(i) + ";\n";
+  code += "using namespace LateLookup; int valid_lookup = one();\n"
+          "namespace { int invalid_lookup = undefined_name; }\n";
+  ::testing::internal::CaptureStderr();
+  const bool accepted = cpp_->execute(code);
+  const auto diagnostics = ::testing::internal::GetCapturedStderr();
+  EXPECT_FALSE(accepted);
+  EXPECT_EQ(diagnostics.find("undeclared identifier 'one'"), std::string::npos) << diagnostics;
+  EXPECT_FALSE(cpp_->evaluate("one()"));
+  EXPECT_EQ(cpp_->evaluate("LateLookup::one()"), "(int) 1\n");
+}
+
 TEST_F(CppInterpreterTest, UndoRemovesOnlyRejectedUsingDirectives) {
   ASSERT_TRUE(cpp_->execute(
       "namespace UndoKept { int undo_kept = 4; } using namespace UndoKept; "

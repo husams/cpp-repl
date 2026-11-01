@@ -1,4 +1,5 @@
 #include "editor_analysis.hpp"
+#include "diagnostic_scope.hpp"
 
 #include <algorithm>
 #include <iterator>
@@ -1776,35 +1777,6 @@ public:
   }
 };
 
-// ASTImporter can diagnose the original AST. Keep diagnostics and error state
-// local to this request, including after a previously rejected session input.
-class DiagnosticScope {
-  clang::DiagnosticsEngine& diagnostics_;
-  bool had_errors_;
-  std::unique_ptr<clang::DiagnosticConsumer> owned_;
-  clang::DiagnosticConsumer* previous_;
-
-public:
-  explicit DiagnosticScope(clang::DiagnosticsEngine& diagnostics)
-      : diagnostics_(diagnostics)
-      , had_errors_(diagnostics.hasErrorOccurred())
-      , owned_(diagnostics.takeClient())
-      , previous_(diagnostics.getClient()) {
-    diagnostics_.setClient(std::make_unique<clang::IgnoringDiagConsumer>().release(), true);
-  }
-
-  ~DiagnosticScope() {
-    if (owned_) {
-      diagnostics_.setClient(owned_.release(), true);
-    } else {
-      diagnostics_.setClient(previous_, false);
-    }
-    if (!had_errors_) {
-      diagnostics_.Reset(true);
-    }
-  }
-};
-
 class EditorDiagnostics : public clang::DiagnosticConsumer {
   EditorAnalysis& result_;
 
@@ -1859,7 +1831,8 @@ EditorAnalysis analyze_editor(std::unique_ptr<clang::CompilerInstance> compiler,
   if (code.empty() || code.size() > 65536) {
     return result;
   }
-  DiagnosticScope diagnostics(session.getDiagnostics());
+  DiagnosticClientScope diagnostics(session.getDiagnostics(),
+      std::make_unique<clang::IgnoringDiagConsumer>(), true);
   compiler->getDiagnostics().setClient(std::make_unique<EditorDiagnostics>(result).release(),
                                        true);
   const std::string filename = "input_line_[Editor]";

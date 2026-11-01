@@ -153,7 +153,7 @@ class CppInterpreter {
                std::vector<std::string>* abi_exports = nullptr,
                bool capture_semicolon_expression = false);
   bool with_compile_options(const SourceCompileOptions& options,
-                            const std::function<bool()>& action,
+                            const std::function<bool(const std::string&)>& action,
                             std::string& error);
   bool update_compile_options(const std::vector<std::string>& flags,
                               bool replace, const std::string& file,

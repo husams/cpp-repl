@@ -207,6 +207,237 @@ TEST_F(IterativeDevelopment, FailedAddRestoresIncludeOnceHeaders) {
   EXPECT_EQ(cpp->evaluate("A{}.value"), "(int) 4\n");
 }
 
+TEST_F(IterativeDevelopment, ReloadPreservesUsingDirectives) {
+  SourceFiles files;
+  const auto path = files.write(
+      "source.cpp",
+      "namespace lib { inline int one() { return 1; } }\n"
+      "using namespace lib;\n"
+      "namespace app { using namespace lib; int answer() { return one(); } }\n");
+  ASSERT_TRUE(cpp->add_source(path).ok);
+  const auto result = cpp->reload_source(path);
+  ASSERT_TRUE(result.ok) << result.message;
+  EXPECT_EQ(cpp->evaluate("one() + app::answer()"), "(int) 2\n");
+}
+
+TEST_F(IterativeDevelopment, SuccessfulAddTracksSkippedHeadersForReload) {
+  SourceFiles files;
+  const auto header = files.write(
+      "h.hpp", "#pragma once\nnamespace lib { inline int one() { return 1; } }\n"
+               "namespace app { using namespace lib; }\n");
+  ASSERT_TRUE(cpp->execute("#include \"" + header + "\"\n"));
+  const auto source = files.write(
+      "m.cpp", "#include \"h.hpp\"\nint answer() { return app::one(); }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 1\n");
+  files.write("h.hpp", "#pragma once\nnamespace lib { inline int one() { return 2; } }\n"
+                       "namespace app { using namespace lib; }\n");
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 2\n");
+}
+
+TEST_F(IterativeDevelopment, FailedRetryRefreshesChangedSkippedHeader) {
+  SourceFiles files;
+  const auto header = files.write("h.hpp", "#pragma once\nint one() { return 1; }\n");
+  ASSERT_TRUE(cpp->execute("#include \"" + header + "\"\n"));
+  ASSERT_TRUE(cpp->execute("int old_caller() { return one(); }"));
+  const auto source = files.write("m.cpp", "#include \"h.hpp\"\nint use() { return two(); }\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  files.write("h.hpp", "#pragma once\nint one() { return 3; }\nint two() { return 2; }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("use()"), "(int) 2\n");
+  EXPECT_EQ(cpp->evaluate("one()"), "(int) 3\n");
+  EXPECT_EQ(cpp->evaluate("old_caller()"), "(int) 1\n");
+}
+
+TEST_F(IterativeDevelopment, RetryFindsEditedTransitiveSkippedHeader) {
+  SourceFiles files;
+  files.write("g.hpp", "#pragma once\n#include \"h.hpp\"\nint one() { return 1; }\n");
+  const auto header = files.write("h.hpp", "#pragma once\n#include \"g.hpp\"\n");
+  ASSERT_TRUE(cpp->execute("#include \"" + header + "\"\n"));
+  const auto source = files.write("m.cpp", "#include \"h.hpp\"\nint use() { return two(); }\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  files.write("g.hpp", "#pragma once\n#include \"h.hpp\"\n"
+                       "int one() { return 1; } int two() { return 2; }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("use()"), "(int) 2\n");
+}
+
+TEST_F(IterativeDevelopment, TransitiveHeaderChangesReloadEverySharingSource) {
+  SourceFiles files;
+  files.write("h.hpp", "#pragma once\nstruct Config { int v = 1; };\n");
+  files.write("a.hpp", "#pragma once\n#include \"h.hpp\"\n");
+  const auto first = files.write("a.cpp", "#include \"a.hpp\"\nint first() { return Config{}.v; }\n");
+  const auto second = files.write("b.cpp", "#include \"a.hpp\"\nint use() { return Config{}.v; }\n");
+  ASSERT_TRUE(cpp->add_source(first).ok);
+  ASSERT_TRUE(cpp->add_source(second).ok);
+  EXPECT_EQ(cpp->evaluate("use() + first()"), "(int) 2\n");
+  files.write("h.hpp", "#pragma once\nstruct Config { int v = 2; };\n");
+  EXPECT_EQ(cpp->evaluate("use() + first()"), "(int) 4\n");
+}
+
+TEST_F(IterativeDevelopment, StartupHeadersRetainTransitiveRetryDependencies) {
+  SourceFiles files;
+  files.write("g.hpp", "#pragma once\nint one() { return 1; }\n");
+  const auto header = files.write("h.hpp", "#pragma once\n#include \"g.hpp\"\n");
+  std::string error;
+  auto startup = CppInterpreter::create({"-include", header}, error);
+  ASSERT_TRUE(startup) << error;
+  EXPECT_EQ(startup->evaluate("one()"), "(int) 1\n");
+  const auto source = files.write("m.cpp", "#include \"h.hpp\"\nint use() { return two(); }\n");
+  EXPECT_FALSE(startup->add_source(source).ok);
+  files.write("g.hpp", "#pragma once\nint one() { return 1; } int two() { return 2; }\n");
+  ASSERT_TRUE(startup->add_source(source).ok);
+  EXPECT_EQ(startup->evaluate("use()"), "(int) 2\n");
+}
+
+TEST_F(IterativeDevelopment, RetryDiagnosesDeletedTransitiveHeaderOnlyWhenStillIncluded) {
+  SourceFiles files;
+  const auto leaf = files.write("g.hpp", "#pragma once\nint one() { return 1; }\n");
+  const auto header = files.write("h.hpp", "#pragma once\n#include \"g.hpp\"\n");
+  ASSERT_TRUE(cpp->execute("#include \"" + header + "\"\n"));
+  const auto source = files.write("m.cpp", "#include \"h.hpp\"\nint use() { return two(); }\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  ASSERT_TRUE(std::filesystem::remove(leaf));
+  files.write("m.cpp", "#include \"h.hpp\"\nint use() { return one(); }\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  files.write("m.cpp", "int use() { return one(); }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("use()"), "(int) 1\n");
+}
+
+TEST_F(IterativeDevelopment, RetryKeepsEditedHeaderThatIsNoLongerIncluded) {
+  SourceFiles files;
+  const auto header = files.write("h.hpp", "#pragma once\n#define KEPT_VALUE 1\n"
+      "int one() { return KEPT_VALUE; }\n");
+  ASSERT_TRUE(cpp->execute("#include \"" + header + "\"\n"));
+  const auto source = files.write("m.cpp", "#include \"h.hpp\"\nint broken = missing;\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  files.write("h.hpp", "#pragma once\n#define KEPT_VALUE 2\nint one() { return KEPT_VALUE; }\n");
+  files.write("m.cpp", "int answer() { return 42; }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("one()"), "(int) 1\n");
+  EXPECT_EQ(cpp->evaluate("KEPT_VALUE"), "(int) 1\n");
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 42\n");
+}
+
+TEST_F(IterativeDevelopment, RetryAllowsDeletedSkippedHeaderThatIsNoLongerIncluded) {
+  SourceFiles files;
+  const auto header = files.write("h.hpp", "#pragma once\nint one() { return 1; }\n");
+  ASSERT_TRUE(cpp->execute("#include \"" + header + "\"\n"));
+  const auto source = files.write("m.cpp", "#include \"h.hpp\"\nint broken = missing;\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  ASSERT_TRUE(std::filesystem::remove(header));
+  files.write("m.cpp", "int answer() { return 42; }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("one() + answer()"), "(int) 43\n");
+}
+
+TEST_F(IterativeDevelopment, RetryRejectsDeletedHeaderThatIsStillIncludedAndRecovers) {
+  SourceFiles files;
+  const auto header = files.write("h.hpp", "#pragma once\nint one() { return 1; }\n");
+  ASSERT_TRUE(cpp->execute("#include \"" + header + "\"\n"));
+  const auto source = files.write("m.cpp", "#include \"h.hpp\"\nint use() { return two(); }\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  ASSERT_TRUE(std::filesystem::remove(header));
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("one()"), "(int) 1\n");
+  files.write("h.hpp", "#pragma once\nint one() { return 1; } int two() { return 2; }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("use()"), "(int) 2\n");
+}
+
+TEST_F(IterativeDevelopment, FailedChangedSkippedHeaderRestoresEarlierDefinitions) {
+  SourceFiles files;
+  const auto header = files.write("h.hpp", "#pragma once\nint one() { return 1; }\n");
+  ASSERT_TRUE(cpp->execute("#include \"" + header + "\"\n"));
+  const auto source = files.write("m.cpp", "#include \"h.hpp\"\nint use() { return two(); }\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  files.write("h.hpp", "#pragma once\nint one() { return 3; }\nint broken = undefined_name;\n");
+  EXPECT_FALSE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("one()"), "(int) 1\n");
+  files.write("h.hpp", "#pragma once\nint one() { return 3; }\nint two() { return 2; }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("use() + one()"), "(int) 5\n");
+}
+
+TEST_F(IterativeDevelopment, ReloadReplacesAndRemovesUsingDirectives) {
+  SourceFiles files;
+  const std::string declarations =
+      "namespace a { int f() { return 1; } }\n"
+      "namespace b { int f() { return 2; } }\n";
+  const auto source = files.write("m.cpp", declarations +
+      "using namespace a; int answer() { return f(); }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("f() + answer()"), "(int) 2\n");
+  files.write("m.cpp", declarations +
+      "using namespace b; int answer() { return f(); }\n");
+  ASSERT_TRUE(cpp->reload_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("f() + answer()"), "(int) 4\n");
+  files.write("m.cpp", declarations + "int answer() { return b::f(); }\n");
+  ASSERT_TRUE(cpp->reload_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("answer()"), "(int) 2\n");
+  EXPECT_FALSE(cpp->evaluate("f()"));
+}
+
+TEST_F(IterativeDevelopment, ReloadReplacesAndRemovesNestedUsingDirectives) {
+  SourceFiles files;
+  const std::string declarations =
+      "namespace a { int f() { return 1; } }\n"
+      "namespace b { int f() { return 2; } }\n";
+  const auto source = files.write("m.cpp", declarations +
+      "namespace app { using namespace a; int answer() { return f(); } }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  files.write("m.cpp", declarations +
+      "namespace app { using namespace b; int answer() { return f(); } }\n");
+  ASSERT_TRUE(cpp->reload_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("app::f() + app::answer()"), "(int) 4\n");
+  files.write("m.cpp", declarations +
+      "namespace app { int answer() { return b::f(); } }\n");
+  ASSERT_TRUE(cpp->reload_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("app::answer()"), "(int) 2\n");
+  EXPECT_FALSE(cpp->evaluate("app::f()"));
+}
+
+TEST_F(IterativeDevelopment, RejectedReloadRestoresUsingDirectives) {
+  SourceFiles files;
+  const std::string declarations =
+      "namespace a { int f() { return 1; } }\n"
+      "namespace b { int f() { return 2; } }\n";
+  // Exercise directive rollback independently of Clang's retained nested
+  // definitions after a rejected namespace redeclaration.
+  ASSERT_TRUE(cpp->execute(declarations));
+  const auto source = files.write("m.cpp",
+      "using namespace a; int answer() { return f(); }\n");
+  ASSERT_TRUE(cpp->add_source(source).ok);
+  files.write("m.cpp",
+      "using namespace b; int answer() { return undefined_name; }\n");
+  EXPECT_FALSE(cpp->reload_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("f() + answer()"), "(int) 2\n");
+  files.write("m.cpp",
+      "using namespace b; int answer() { return f(); }\n");
+  ASSERT_TRUE(cpp->reload_source(source).ok);
+  EXPECT_EQ(cpp->evaluate("f() + answer()"), "(int) 4\n");
+}
+
+TEST_F(IterativeDevelopment, RejectedParseWithUsingDirectivesKeepsSessionUsable) {
+  SourceFiles files;
+  ASSERT_TRUE(cpp->execute(
+      "namespace lib { int one() { return 1; } } using namespace lib;"
+      "namespace rejected_lookup { int leaked = 9; }"));
+  const auto path = files.write(
+      "broken.cpp",
+      "using namespace lib;\nusing namespace rejected_lookup;\n"
+      "int broken() { return undefined_name; }\n");
+  EXPECT_FALSE(cpp->add_source(path).ok);
+  EXPECT_EQ(cpp->evaluate("1 + 1"), "(int) 2\n");
+  EXPECT_EQ(cpp->evaluate("lib::one() + one()"), "(int) 2\n");
+  EXPECT_FALSE(cpp->evaluate("leaked"));
+  EXPECT_FALSE(cpp->evaluate("broken()"));
+  files.write("broken.cpp", "int broken() { return lib::one(); }\n");
+  ASSERT_TRUE(cpp->add_source(path).ok);
+  EXPECT_EQ(cpp->evaluate("broken()"), "(int) 1\n");
+}
+
 TEST_F(IterativeDevelopment,
        ReloadRemovesDeletedNamesAndRecoversFromMissingSymbols) {
   SourceFiles files;

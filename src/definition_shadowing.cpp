@@ -18,6 +18,7 @@
 #include "clang/Sema/Lookup.h"
 #include "clang/Sema/Scope.h"
 #include "clang/Sema/Sema.h"
+#include "interpreter_undo.hpp"
 
 namespace example {
 namespace {
@@ -125,16 +126,20 @@ class ShadowConsumer : public clang::ASTConsumer {
         map->erase(found);
       auto &sema = compiler_.getSema();
       bool on_scope_chain = false;
-      for (auto it = sema.IdResolver.begin(old->getDeclName());
-           it != sema.IdResolver.end(); ++it)
-        if (*it == old) {
-          on_scope_chain = true;
-          break;
-        }
-      if (on_scope_chain)
-        sema.IdResolver.RemoveDecl(old);
-      if (auto *scope = sema.getScopeForContext(context))
-        scope->RemoveDecl(old);
+      // Directives participate in context lookup, but their special name
+      // has no FETokenInfo and must never reach IdentifierResolver.
+      if (!llvm::isa<clang::UsingDirectiveDecl>(old)) {
+        for (auto it = sema.IdResolver.begin(old->getDeclName());
+             it != sema.IdResolver.end(); ++it)
+          if (*it == old) {
+            on_scope_chain = true;
+            break;
+          }
+        if (on_scope_chain)
+          sema.IdResolver.RemoveDecl(old);
+        if (auto *scope = sema.getScopeForContext(context))
+          scope->RemoveDecl(old);
+      }
       hidden_.push_back({context, old, on_scope_chain});
     }
   }
@@ -302,7 +307,11 @@ public:
     }
   }
   bool HandleTopLevelDecl(clang::DeclGroupRef declarations) override {
+    // A directive can be parsed after the last error diagnostic. Remove it
+    // before IncrementalParser performs its internal error cleanup too.
     for (auto* declaration : declarations) {
+      if (compiler_.getDiagnostics().hasErrorOccurred())
+        detach_new_using_directives(declaration);
       if (capture_semicolon_expressions_ && !compiler_.getDiagnostics().hasErrorOccurred()) {
         auto* statement = llvm::dyn_cast<clang::TopLevelStmtDecl>(declaration);
         auto* expression = statement && statement->getStmt()
