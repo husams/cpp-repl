@@ -113,6 +113,7 @@ option(REPLXX_EXAMPLE_BUILD_TESTS "Build the unit tests" ON)
 if(REPLXX_EXAMPLE_BUILD_TESTS)
   enable_testing()
   include(GoogleTest)
+  set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
   FetchContent_Declare(
     googletest
@@ -276,6 +277,39 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
                      ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/unresolved_virtuals.hpp
                      $<TARGET_FILE:hook_test_library>)
   endif()
+
+  get_filename_component(CPP_REPL_TEST_CLANG_BIN "${CPP_REPL_CLANG_EXECUTABLE}" DIRECTORY)
+  get_filename_component(CPP_REPL_TEST_CMAKE_BIN "${CMAKE_COMMAND}" DIRECTORY)
+  set(_cpp_repl_test_path
+    "${CPP_REPL_TEST_CLANG_BIN}" "${CPP_REPL_TEST_CMAKE_BIN}")
+  if(Python3_FOUND)
+    get_filename_component(_cpp_repl_test_python_bin "${Python3_EXECUTABLE}" DIRECTORY)
+    list(APPEND _cpp_repl_test_path "${_cpp_repl_test_python_bin}")
+  endif()
+  list(APPEND _cpp_repl_test_path /usr/bin /bin /usr/sbin /sbin)
+  list(JOIN _cpp_repl_test_path ":" CPP_REPL_TEST_PATH)
+  configure_file(tests/test_environment.cmake.in
+    "${CMAKE_CURRENT_BINARY_DIR}/test_environment.cmake" @ONLY)
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/test_environment_post.cmake"
+    "cpp_repl_isolate_discovered_tests()\n")
+  get_property(_cpp_repl_registered_tests DIRECTORY PROPERTY TESTS)
+  if(_cpp_repl_registered_tests)
+    set_tests_properties(${_cpp_repl_registered_tests} PROPERTIES
+      FIXTURES_REQUIRED cpp_repl_test_environment)
+  endif()
+  add_test(NAME cpp_repl_test_environment_cleanup
+    COMMAND "${CMAKE_COMMAND}" -DCPP_REPL_TEST_ENVIRONMENT_CLEANUP=ON
+      -P "${CMAKE_CURRENT_BINARY_DIR}/test_environment.cmake")
+  set_tests_properties(cpp_repl_test_environment_cleanup PROPERTIES
+    FIXTURES_CLEANUP cpp_repl_test_environment)
+  get_property(_cpp_repl_test_includes DIRECTORY PROPERTY TEST_INCLUDE_FILES)
+  list(REMOVE_ITEM _cpp_repl_test_includes
+    "${CMAKE_CURRENT_BINARY_DIR}/test_environment.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/test_environment_post.cmake")
+  set_property(DIRECTORY PROPERTY TEST_INCLUDE_FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/test_environment.cmake"
+    ${_cpp_repl_test_includes}
+    "${CMAKE_CURRENT_BINARY_DIR}/test_environment_post.cmake")
 endif()
 
 include(GNUInstallDirs)

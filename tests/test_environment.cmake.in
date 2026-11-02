@@ -1,0 +1,64 @@
+if(CPP_REPL_TEST_ENVIRONMENT_CLEANUP)
+  if(NOT "$ENV{CPP_REPL_TEST_ENVIRONMENT_ROOT}" MATCHES
+      "^/tmp/cpp-repl-ctest-[0-9a-f]+$")
+    message(FATAL_ERROR "Refusing to remove an invalid CTest environment root")
+  endif()
+  file(REMOVE_RECURSE "$ENV{CPP_REPL_TEST_ENVIRONMENT_ROOT}")
+  return()
+endif()
+
+string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef _cpp_repl_test_id)
+set(_cpp_repl_test_root "/tmp/cpp-repl-ctest-${_cpp_repl_test_id}")
+file(MAKE_DIRECTORY "${_cpp_repl_test_root}/cache" "${_cpp_repl_test_root}/tmp")
+file(CHMOD "${_cpp_repl_test_root}"
+  PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
+set(ENV{CPP_REPL_TEST_ENVIRONMENT_ROOT} "${_cpp_repl_test_root}")
+set(ENV{HOME} "${_cpp_repl_test_root}")
+set(ENV{USERPROFILE} "${_cpp_repl_test_root}")
+set(ENV{XDG_CACHE_HOME} "${_cpp_repl_test_root}/cache")
+set(ENV{TMPDIR} "${_cpp_repl_test_root}/tmp")
+set(ENV{TEMP} "${_cpp_repl_test_root}/tmp")
+set(ENV{TMP} "${_cpp_repl_test_root}/tmp")
+set(ENV{PATH} "@CPP_REPL_TEST_PATH@")
+
+foreach(_cpp_repl_env IN ITEMS
+    CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH OBJC_INCLUDE_PATH LIBRARY_PATH
+    COMPILER_PATH GCC_EXEC_PREFIX CLANG_CONFIG_FILE_USER_DIR
+    CLANG_CONFIG_FILE_SYSTEM_DIR SDKROOT DEVELOPER_DIR TOOLCHAINS
+    NO_COLOR CLICOLOR CLICOLOR_FORCE FORCE_COLOR
+    LD_LIBRARY_PATH LD_PRELOAD
+    DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH DYLD_FALLBACK_LIBRARY_PATH
+    DYLD_INSERT_LIBRARIES DYLD_ROOT_PATH DYLD_SHARED_CACHE_DIR
+    DYLD_VERSIONED_LIBRARY_PATH DYLD_VERSIONED_FRAMEWORK_PATH
+    GTEST_FILTER GTEST_REPEAT GTEST_SHUFFLE GTEST_OUTPUT GTEST_COLOR
+    GTEST_BREAK_ON_FAILURE GTEST_THROW_ON_FAILURE GTEST_CATCH_EXCEPTIONS
+    GTEST_DEATH_TEST_STYLE GTEST_DEATH_TEST_USE_FORK GTEST_TOTAL_SHARDS
+    GTEST_SHARD_INDEX GTEST_SHARD_STATUS_FILE GTEST_STACK_TRACE_DEPTH
+    GTEST_FLAGFILE GTEST_INTERNAL_RUN_DEATH_TEST GTEST_PREMATURE_EXIT_FILE
+    GTEST_STREAM_RESULT_TO GTEST_ALSO_RUN_DISABLED_TESTS GTEST_LIST_TESTS
+    GTEST_FAIL_FAST GTEST_FAIL_IF_NO_TEST_LINKED GTEST_FAIL_IF_NO_TEST_SELECTED
+    GTEST_BRIEF GTEST_PRINT_TIME GTEST_PRINT_UTF8 GTEST_RANDOM_SEED
+    GTEST_RECREATE_ENVIRONMENTS_WHEN_REPEATING TESTBRIDGE_TEST_ONLY
+    TEST_PREMATURE_EXIT_FILE XML_OUTPUT_FILE LANGUAGE)
+  unset(ENV{${_cpp_repl_env}})
+endforeach()
+set(ENV{LC_ALL} C)
+set(ENV{LANG} C)
+set(ENV{TERM} xterm-256color)
+
+# The first include sanitizes the environment before PRE_TEST discovery; the
+# final include assigns an isolated cwd so tests cannot discover checkout
+# compile_commands.json or profiles. Python tempdirs stay under this HOME.
+function(cpp_repl_isolate_discovered_tests)
+  foreach(_cpp_repl_target IN ITEMS
+      cpp_lexer_test commands_test library_dependency_test
+      iterative_development_test cpp_interpreter_test record_members_test
+      compilation_database_test)
+    set(_cpp_repl_discovered_tests "${${_cpp_repl_target}_TESTS}")
+    if(_cpp_repl_discovered_tests)
+      set_tests_properties(${_cpp_repl_discovered_tests} PROPERTIES
+        WORKING_DIRECTORY "$ENV{CPP_REPL_TEST_ENVIRONMENT_ROOT}"
+        FIXTURES_REQUIRED cpp_repl_test_environment)
+    endif()
+  endforeach()
+endfunction()
