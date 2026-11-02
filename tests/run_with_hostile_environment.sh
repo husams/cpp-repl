@@ -2,6 +2,10 @@
 # Run CTest with deliberately hostile ambient settings; pass an absolute executable.
 # Usage: bash tests/run_with_hostile_environment.sh /absolute/path/to/ctest --test-dir build
 set -euo pipefail
+if (( $# == 0 )) || [[ "$1" != /* || ! -x "$1" ]]; then
+  printf 'Usage: %s /absolute/path/to/executable [args...]\n' "$0" >&2
+  exit 2
+fi
 poison=$(mktemp -d /tmp/cpp-repl-ambient.XXXXXX)
 trap 'rm -rf "$poison"' EXIT
 mkdir -p "$poison/include" "$poison/home/.cpp-repl" "$poison/bin" "$poison/python" "$poison/loader" "$poison/config" "$poison/keep"
