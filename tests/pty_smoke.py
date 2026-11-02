@@ -714,6 +714,9 @@ def main():
             "(int) 6" in plain(out["after_cancel"]))
         check("%quit exits after hooks", status == 0)
 
+        # libc/libSystem is loaded by the runtime on Linux/macOS, unlike optional libz.
+        system_library_name = "libSystem." if sys.platform == "darwin" else "libc."
+        system_library_regex = "^libSystem[.]" if sys.platform == "darwin" else "^libc[.]"
         out, status = session(binary, cwd, [
             ("define", b"int symbol_total(int a, int b) { return a+b; }\r", True),
             ("tab", b"%info symbol_t\t"),
@@ -737,13 +740,13 @@ def main():
             ("symbols_usage", b"%symbols unknown\r", True),
             ("libs_tab_all", b"%libs a\t"),
             ("libs_cancel_all", b"\x03", True),
-            ("libraries_hidden", b"%libs '^libz[.]'\r", True),
-            ("libraries", b"%libs all '^libz[.]'\r", True),
+            ("libraries_hidden", f"%libs '{system_library_regex}'\r".encode(), True),
+            ("libraries", f"%libs all '{system_library_regex}'\r".encode(), True),
             ("libraries_all", b"%libs all\r", True),
             ("libraries_invalid", b"%libs all '['\r", True),
             ("paths_tab", b"%pat\t"),
             ("paths", b"\r", True),
-            ("library_info", b"%libinfo '^libz[.]'\r", True),
+            ("library_info", f"%libinfo '{system_library_regex}'\r".encode(), True),
             ("symbol_info", b"%syminfo 'symbol_total'\r", True),
             ("still_runs", b"symbol_total(2, 3)\r", True),
             ("quit", b"%quit\r"),
@@ -775,11 +778,11 @@ def main():
             "no loaded symbols match" not in plain(out["symbols_missing"]))
         check("symbols reports an invalid regex", "invalid name regex" in plain(out["symbols_invalid"]))
         check("symbols rejects unknown options with usage", "usage: %symbols" in plain(out["symbols_usage"]))
-        check("libs lists names without paths", "libz." in plain(out["libraries"]) and "/usr/" not in plain(out["libraries"]))
+        check("libs lists names without paths", system_library_name in plain(out["libraries"]) and "/usr/" not in plain(out["libraries"]))
         check("libs completes all", "%libs all" in plain(out["libs_tab_all"]))
         check("libs hides system libraries unless all is requested",
-            "libz." not in plain(out["libraries_hidden"]) and
-            "libz." in plain(out["libraries_all"]))
+            system_library_name not in plain(out["libraries_hidden"]) and
+            system_library_name in plain(out["libraries_all"]))
         check("libs all validates its regex",
             "invalid library regex" in plain(out["libraries_invalid"]))
         check("paths completes and reports loader settings",

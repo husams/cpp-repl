@@ -1420,7 +1420,10 @@ TEST_F(CppInterpreterTest, SymbolListingHidesSystemExportsUnlessAllIsRequested) 
   Dl_info runtime{};
   ASSERT_NE(dladdr(dlsym(RTLD_DEFAULT, "malloc"), &runtime), 0);
   ASSERT_NE(runtime.dli_fname, nullptr);
-  const auto directory = std::filesystem::path(runtime.dli_fname).parent_path().string();
+  std::error_code canonical_error;
+  const auto canonical_runtime = std::filesystem::weakly_canonical(runtime.dli_fname, canonical_error);
+  ASSERT_FALSE(canonical_error) << canonical_error.message();
+  const auto directory = canonical_runtime.parent_path().string();
   const std::string system = "^" + std::regex_replace(directory, std::regex(R"([.^$|()\[\]{}*+?\\])"), R"(\$&)") + "/";
   EXPECT_EQ(cpp_->symbol_list(system, "^malloc$", error), "");
   EXPECT_EQ(cpp_->symbol_list(system, "^malloc$", error, true), "malloc\n");
