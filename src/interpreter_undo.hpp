@@ -19,7 +19,14 @@ namespace example {
 // Restore the previous declaration in the same primary context Clang cleaned.
 inline void restore_lookup(clang::ASTContext& context, clang::TranslationUnitDecl* failed) {
   auto* primary = context.getTranslationUnitDecl()->getPrimaryContext();
-  for (clang::Decl* decl : failed->decls()) {
+  llvm::SmallVector<clang::Decl*, 64> declarations(failed->decls());
+  for (std::size_t index = 0; index < declarations.size(); ++index) {
+    clang::Decl* decl = declarations[index];
+    // <new> declares its overloads inside extern "C++" linkage blocks.
+    if (auto* linkage = llvm::dyn_cast<clang::LinkageSpecDecl>(decl)) {
+      declarations.append(linkage->decls_begin(), linkage->decls_end());
+      continue;
+    }
     auto* named = llvm::dyn_cast<clang::NamedDecl>(decl);
     if (!named || named->getDeclName().isEmpty()) {
       continue;
@@ -45,10 +52,25 @@ inline void restore_lookup(clang::ASTContext& context, clang::TranslationUnitDec
     // guard and its namespace contents in Clang's AST. Keep that namespace
     // reachable too; otherwise re-including <string> cannot recover std.
     // Do not publish declarations or namespaces introduced by rejected user code.
-    if (primary->lookup(named->getDeclName()).empty() && llvm::isa<clang::NamespaceDecl>(named) &&
-        !named->isInvalidDecl() &&
-        context.getSourceManager().isInSystemHeader(named->getLocation())) {
-      primary->makeDeclVisibleInContext(named);
+    const bool system_header =
+        context.getSourceManager().isInSystemHeader(named->getLocation());
+    bool allocation = false;
+    if (const auto* function = llvm::dyn_cast<clang::FunctionDecl>(named)) {
+      const auto op = function->getOverloadedOperator();
+      allocation = (op == clang::OO_New || op == clang::OO_Array_New ||
+                    op == clang::OO_Delete || op == clang::OO_Array_Delete) &&
+                   (function->isImplicit() || system_header);
+    }
+    // Newer libstdc++ uses __builtin_operator_new/delete. CodeGen looks up
+    // the global allocation overloads again; losing <new>'s declarations
+    // after a rejection makes Clang hit llvm_unreachable on the next string.
+    if (!named->isInvalidDecl() &&
+        (allocation || (llvm::isa<clang::NamespaceDecl>(named) && system_header &&
+                        primary->lookup(named->getDeclName()).empty()))) {
+      bool visible = false;
+      for (auto* existing : primary->lookup(named->getDeclName()))
+        visible |= existing->getCanonicalDecl() == named->getCanonicalDecl();
+      if (!visible) primary->makeDeclVisibleInContext(named);
     }
   }
 }

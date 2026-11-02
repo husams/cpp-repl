@@ -80,6 +80,91 @@ Assign the lambda to a variable before calling it, for example
 
 Pass `-DREPLXX_EXAMPLE_BUILD_TESTS=OFF` to skip the tests (and googletest).
 
+### Toolchain and standard library configuration
+
+On Linux, `build-rhel.sh` selects the system `clang`/`clang++` from `PATH` by
+default, builds, and runs **all** tests before installing. Use `--no-install`
+to leave the installed executable alone:
+
+```sh
+./build-rhel.sh --no-install
+./build-rhel.sh --toolchain /opt/toolchain/x86_64-2.6.32-v4 --no-install
+```
+
+The script asks the selected `llvm-config --cmakedir` for package locations,
+including installations using `lib.llvm`. `--cc`, `--cxx`, `--llvm-dir`, and
+`--clang-dir` override discovery. Use a fresh `--build-dir` when changing the
+compiler, sysroot, GCC installation or C++ library. The embedded interpreter still requires LLVM/Clang
+21 or 22; an older **GCC 8.5 standard library** is supported, including its
+separate `libstdc++fs` archive. This does not add an LLVM 8 interpreter backend.
+
+The selected compiler's Linux Clang config is detected automatically so its
+GCC installation, sysroot and ABI flags also reach the JIT. Build and install
+rpaths include the selected compiler's C++ runtime library directories, without
+adding a sysroot's glibc directories to the host loader search. No loader
+environment variables or hardcoded vendor paths are required. For other layouts,
+override the settings explicitly (paths below are examples):
+
+```sh
+./build-rhel.sh --toolchain /opt/toolchain/x86_64-2.6.32-v4 \
+  --sysroot /opt/toolchain/x86_64-2.6.32-v4/x86_64-1a-linux-gnu/sysroot \
+  --gcc-install-dir /opt/toolchain/x86_64-2.6.32-v4/lib/gcc/x86_64-1a-linux-gnu/8.5.0 \
+  --stdlib libstdc++ \
+  --include-dir /path/to/project/include \
+  --system-include-dir /path/to/vendor/include \
+  --library-dir /path/to/vendor/lib64 \
+  --default-arg=-std=c++17 --build-dir build-custom --no-install
+```
+
+`--sysroot`, `--gcc-toolchain`, `--gcc-install-dir`, `--stdlib`,
+`--clang-config`, `--include-dir` and `--system-include-dir` configure both the
+build and the JIT defaults. Include and library directories are repeatable;
+`--library-dir` sets build link paths and build/install runtime paths.
+`--default-arg` adds a repeatable JIT-only default. Use
+`--default-arg=-nostdinc++` with explicit `--system-include-dir` entries to
+replace the default C++ header search. `--resource-dir` selects builtin headers
+for the **linked** Clang version, independently of the GCC header version.
+Run `./build-rhel.sh --help` for the complete options.
+
+Direct CMake builds expose the same JIT defaults:
+
+| Cache variable | Meaning |
+| --- | --- |
+| `CPP_REPL_DEFAULT_COMPILE_OPTIONS` | Semicolon-separated list of default compiler arguments; paths with spaces stay one argument |
+| `CPP_REPL_CLANG_CONFIG_FILE` | `AUTO` follows the build compiler on Linux; an absolute filename selects a config; empty disables detection |
+| `CPP_REPL_CLANG_RESOURCE_DIR` | Builtin header directory; otherwise discovered from the selected Clang |
+| `CPP_REPL_CLANG_EXECUTABLE` | Matching Clang used for builtin-header discovery and native symbol exports |
+| `CPP_REPL_STDLIB_SUPPORT_LIBRARIES` | `AUTO` detects GCC Toolset nonshared support; alternatively a semicolon-separated list of additional archives, or empty to disable detection |
+| `CMAKE_BUILD_RPATH`, `CMAKE_INSTALL_RPATH` | Additional library runtime directories; preserved alongside LLVM/compiler runtime paths |
+
+Session compiler flags follow the configured defaults, so singular settings
+such as `-std`, sysroot, GCC installation and resource directory can be
+overridden at launch. An explicit `--config` replaces the detected vendor
+config; `--no-default-config` disables that detected config. Defaults also apply
+to editor analysis and per-source compilation scopes. On macOS, an explicit
+config supplies the SDK and C++ header paths too; disabling default config files
+alone keeps automatic SDK/header discovery.
+
+```sh
+./build-custom/cpp-repl --sysroot=/path/to/sysroot --gcc-toolchain=/path/to/gcc \
+  -stdlib=libstdc++ -nostdinc++ -isystem /path/to/c++/headers \
+  -isystem /path/to/c++/target-headers
+./build-custom/cpp-repl --config=/path/to/session.cfg
+```
+
+Keep the C++ headers, runtime library, LLVM libraries and loaded native
+libraries ABI-compatible. JIT flags select compilation settings; they do not
+replace a C++ runtime that the process already loaded. To switch between
+libc++ and libstdc++, build against a matching LLVM installation and select
+the library at build time. A sysroot supplies headers and link inputs; the
+REPL executes on the host and does not emulate another architecture or glibc.
+
+One separate LLVM 21/GCC 15 JIT limitation remains: expressions that destroy
+temporary `std::filesystem` objects can report unresolved inline destructors
+(for example, `file_size(root / "file")`). The filesystem checks for toolchain
+selection use named path objects. This configuration support does not repair
+that separate destructor-emission issue.
+
 ## Run
 
 ```sh
