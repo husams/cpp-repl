@@ -10,6 +10,21 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include(CheckCXXSourceCompiles)
+set(_cpp_repl_filesystem_probe "#include <filesystem>\nint main() { return std::filesystem::exists(\".\") ? 0 : 1; }")
+check_cxx_source_compiles("${_cpp_repl_filesystem_probe}" CPP_REPL_FILESYSTEM_LINKS)
+if(NOT CPP_REPL_FILESYSTEM_LINKS)
+  include(CMakePushCheckState)
+  cmake_push_check_state()
+  set(CMAKE_REQUIRED_LIBRARIES stdc++fs)
+  check_cxx_source_compiles("${_cpp_repl_filesystem_probe}" CPP_REPL_FILESYSTEM_LINKS_WITH_STDCXXFS)
+  cmake_pop_check_state()
+  if(NOT CPP_REPL_FILESYSTEM_LINKS_WITH_STDCXXFS)
+    message(FATAL_ERROR "The selected C++ standard library cannot link std::filesystem")
+  endif()
+  set(CPP_REPL_FILESYSTEM_LIBRARIES stdc++fs)
+endif()
+
 include(FetchContent)
 
 # Pinned replxx revision (commit of tag release-0.0.4).
@@ -44,15 +59,30 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
                   "so the interpreter matches LLVM's ABI.")
 endif()
 # Run against the LLVM dylibs without DYLD_* variables.
-set(CMAKE_BUILD_RPATH "${LLVM_LIBRARY_DIR}")
-set(CMAKE_INSTALL_RPATH "${LLVM_LIBRARY_DIR}")
+set(_cpp_repl_runtime_dirs "${LLVM_LIBRARY_DIR}")
+foreach(_cpp_repl_dir IN LISTS CMAKE_CXX_IMPLICIT_LINK_DIRECTORIES)
+  # Never add a sysroot's glibc directories to the host loader's search path.
+  # Only the compiler's C++/unwind runtimes should supplement the host runtime.
+  if(NOT EXISTS "${_cpp_repl_dir}/libc.so.6" AND
+     (EXISTS "${_cpp_repl_dir}/libstdc++.so" OR
+      EXISTS "${_cpp_repl_dir}/libc++.so" OR
+      EXISTS "${_cpp_repl_dir}/libc++.dylib" OR
+      EXISTS "${_cpp_repl_dir}/libgcc_s.so"))
+    list(APPEND _cpp_repl_runtime_dirs "${_cpp_repl_dir}")
+  endif()
+endforeach()
+list(APPEND CMAKE_BUILD_RPATH ${_cpp_repl_runtime_dirs})
+list(APPEND CMAKE_INSTALL_RPATH ${_cpp_repl_runtime_dirs})
+list(REMOVE_DUPLICATES CMAKE_BUILD_RPATH)
+list(REMOVE_DUPLICATES CMAKE_INSTALL_RPATH)
 
 add_library(example_core STATIC
   src/commands.cpp src/shell_substitution.cpp src/cpp_lexer.cpp src/highlight_cpp.cpp
   src/highlight_repl.cpp src/library_manager.cpp src/library_dependencies.cpp src/inspection_output.cpp)
 target_include_directories(example_core PUBLIC src)
 target_include_directories(example_core SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
-target_link_libraries(example_core PUBLIC replxx ${CMAKE_DL_LIBS} PRIVATE LLVM)
+target_link_libraries(example_core PUBLIC replxx ${CMAKE_DL_LIBS}
+  ${CPP_REPL_FILESYSTEM_LIBRARIES} PRIVATE LLVM)
 target_compile_options(example_core PRIVATE -Wall -Wextra -Wpedantic)
 
 add_library(cpp_interp STATIC src/cpp_interpreter.cpp src/editor_analysis.cpp src/editor_pch.cpp src/cpp_inspect.cpp src/cpp_symbols.cpp src/function_hooks.cpp src/loaded_symbols.cpp src/runtime_inspection.cpp src/project_compilation_database.cpp src/source_compile_options.cpp src/startup_files.cpp src/session_commands.cpp src/native_symbol_exports.cpp)
@@ -83,23 +113,42 @@ endif()
 target_sources(cpp_interp PRIVATE ${REPLXX_NATIVE_SOURCE} src/editor_ui.cpp src/editor_input.cpp src/editor_call.cpp
   src/definition_shadowing.cpp src/source_reload.cpp src/interpreter_symbols.cpp)
 target_include_directories(cpp_interp PUBLIC src)
+target_include_directories(cpp_interp PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_include_directories(cpp_interp SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS} ${CLANG_INCLUDE_DIRS})
 separate_arguments(CPP_REPL_LLVM_DEFINITIONS NATIVE_COMMAND "${LLVM_DEFINITIONS}")
-set(CPP_REPL_CLANG_RESOURCE_DIR "${LLVM_LIBRARY_DIR}/clang/${LLVM_VERSION_MAJOR}")
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  execute_process(COMMAND "${CMAKE_CXX_COMPILER}" -print-resource-dir
-    OUTPUT_VARIABLE REPLXX_COMPILER_RESOURCE_DIR OUTPUT_STRIP_TRAILING_WHITESPACE
-    RESULT_VARIABLE REPLXX_RESOURCE_STATUS)
-  if(REPLXX_RESOURCE_STATUS EQUAL 0 AND EXISTS "${REPLXX_COMPILER_RESOURCE_DIR}/include/stddef.h")
-    set(CPP_REPL_CLANG_RESOURCE_DIR "${REPLXX_COMPILER_RESOURCE_DIR}")
-  endif()
-endif()
+include(cmake/toolchain-defaults.cmake)
 target_compile_definitions(cpp_interp PRIVATE ${CPP_REPL_LLVM_DEFINITIONS}
   CPP_REPL_CLANG_EXECUTABLE="${CPP_REPL_CLANG_EXECUTABLE}"
   CPP_REPL_LLVM_PREFIX="${LLVM_INSTALL_PREFIX}"
   CPP_REPL_RESOURCE_DIR="${CPP_REPL_CLANG_RESOURCE_DIR}")
 # libclang-cpp and libLLVM contain clangInterpreter and the ORC JIT.
 target_link_libraries(cpp_interp PUBLIC example_core clang-cpp LLVM)
+set(CPP_REPL_STDLIB_SUPPORT_LIBRARIES "AUTO" CACHE STRING
+  "Additional standard-library support archives for the JIT; AUTO detects GCC Toolset nonshared support")
+set(_cpp_repl_support_libraries ${CPP_REPL_FILESYSTEM_LIBRARIES})
+if(CPP_REPL_STDLIB_SUPPORT_LIBRARIES STREQUAL "AUTO")
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND "stdc++" IN_LIST CMAKE_CXX_IMPLICIT_LINK_LIBRARIES)
+    separate_arguments(_cpp_repl_build_flags NATIVE_COMMAND "${CMAKE_CXX_FLAGS}")
+    execute_process(COMMAND "${CMAKE_CXX_COMPILER}" ${_cpp_repl_build_flags}
+      -print-file-name=libstdc++_nonshared.a
+      OUTPUT_VARIABLE _cpp_repl_nonshared OUTPUT_STRIP_TRAILING_WHITESPACE
+      RESULT_VARIABLE _cpp_repl_nonshared_status)
+    if(_cpp_repl_nonshared_status EQUAL 0 AND IS_ABSOLUTE "${_cpp_repl_nonshared}" AND
+       EXISTS "${_cpp_repl_nonshared}")
+      list(APPEND _cpp_repl_support_libraries "${_cpp_repl_nonshared}")
+    endif()
+  endif()
+else()
+  list(APPEND _cpp_repl_support_libraries ${CPP_REPL_STDLIB_SUPPORT_LIBRARIES})
+endif()
+if(_cpp_repl_support_libraries AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  # GCC 8 filesystem and GCC Toolset's newer APIs can live in static archives.
+  # Export all members, including methods the host itself never references.
+  message(STATUS "cpp-repl JIT standard-library support: ${_cpp_repl_support_libraries}")
+  target_link_libraries(cpp_interp INTERFACE
+    "-Wl,--whole-archive" ${_cpp_repl_support_libraries} "-Wl,--no-whole-archive")
+  target_link_options(cpp_interp INTERFACE "-Wl,--export-dynamic")
+endif()
 if(NOT LLVM_ENABLE_RTTI)
   target_compile_options(cpp_interp PRIVATE -fno-rtti)
 endif()
@@ -112,6 +161,10 @@ target_compile_options(cpp-repl PRIVATE -Wall -Wextra -Wpedantic)
 option(REPLXX_EXAMPLE_BUILD_TESTS "Build the unit tests" ON)
 if(REPLXX_EXAMPLE_BUILD_TESTS)
   enable_testing()
+  find_program(CPP_REPL_BASH_EXECUTABLE NAMES bash REQUIRED)
+  add_test(NAME build_script_configuration
+    COMMAND "${CPP_REPL_BASH_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/build_script_test.sh"
+      "${CMAKE_CURRENT_SOURCE_DIR}/build-rhel.sh")
   include(GoogleTest)
   set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
@@ -168,6 +221,7 @@ if(REPLXX_EXAMPLE_BUILD_TESTS)
   gtest_discover_tests(library_dependency_test)
 
   add_executable(cpp_interpreter_test tests/cpp_interpreter_test.cpp tests/template_callables_test.cpp
+    tests/toolchain_test.cpp
     tests/editor_context_test.cpp tests/editor_pch_test.cpp tests/editor_input_test.cpp tests/editor_call_test.cpp
     tests/expression_values_test.cpp tests/repl_options_session_test.cpp)
   add_executable(iterative_development_test tests/iterative_development_test.cpp)

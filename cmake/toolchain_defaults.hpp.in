@@ -1,0 +1,10 @@
+#pragma once
+
+#include <string>
+#include <vector>
+
+namespace example {
+inline constexpr const char* default_clang_config = @CPP_REPL_CONFIG_LITERAL@;
+inline const std::vector<std::string> default_compile_options = {
+@CPP_REPL_DEFAULT_ARGUMENTS@};
+}  // namespace example

@@ -63,14 +63,7 @@
 #include "runtime_inspection.hpp"
 #include "source_compile_options.hpp"
 #include "source_reload.hpp"
-
-// Set by CMake from the LLVM package that was linked.
-#ifndef CPP_REPL_LLVM_PREFIX
-#define CPP_REPL_LLVM_PREFIX "/opt/homebrew/opt/llvm"
-#endif
-#ifndef CPP_REPL_RESOURCE_DIR
-#define CPP_REPL_RESOURCE_DIR CPP_REPL_LLVM_PREFIX "/lib/clang/22"
-#endif
+#include "toolchain_defaults.hpp"
 
 namespace example {
 
@@ -215,16 +208,41 @@ std::string sdk_path() {
 // embedding executable has to name them: Clang's builtin headers, and on macOS
 // LLVM's libc++ headers plus the SDK for the C library headers.
 std::vector<std::string> platform_args(
-    [[maybe_unused]] const std::vector<std::string>& user_args) {
+    const std::vector<std::string>& user_args) {
   std::vector<std::string> args = {"-resource-dir", CPP_REPL_RESOURCE_DIR};
+  const auto has_config = [](const std::vector<std::string>& options) {
+    return std::any_of(options.begin(), options.end(), [](const std::string& arg) {
+        return arg == "--config" || arg.rfind("--config=", 0) == 0;
+      });
+  };
+  const bool user_config = has_config(user_args) || has_config(default_compile_options);
+  const bool skip_default_config = user_config ||
+      std::find(user_args.begin(), user_args.end(), "--no-default-config") != user_args.end() ||
+      std::find(default_compile_options.begin(), default_compile_options.end(), "--no-default-config") != default_compile_options.end();
+  if (!skip_default_config && *default_clang_config)
+    args.emplace_back(std::string("--config=") + default_clang_config);
+  args.insert(args.end(), default_compile_options.begin(), default_compile_options.end());
 #ifdef __APPLE__
-  args.insert(args.end(), {"-nostdinc++", "-isystem", CPP_REPL_LLVM_PREFIX "/include/c++/v1"});
+  const bool toolchain_config = user_config || (!skip_default_config && *default_clang_config);
+  const auto custom_headers = [](const std::vector<std::string>& options) {
+    return std::any_of(options.begin(), options.end(), [](const std::string& arg) {
+      return arg == "-stdlib=libstdc++" || arg == "-nostdinc++" ||
+             arg == "-nostdinc" || arg.rfind("--config", 0) == 0;
+    });
+  };
+  if (!toolchain_config && !custom_headers(user_args) && !custom_headers(default_compile_options))
+    args.insert(args.end(), {"-nostdinc++", "-isystem", CPP_REPL_LLVM_PREFIX "/include/c++/v1"});
   const bool user_set_sysroot = std::any_of(
-      user_args.begin(), user_args.end(), [](const std::string& arg) {
+      args.begin(), args.end(), [](const std::string& arg) {
         return arg == "-isysroot" || arg == "--sysroot" ||
                arg.rfind("-isysroot", 0) == 0 || arg.rfind("--sysroot=", 0) == 0;
       });
-  if (!user_set_sysroot) {
+  const bool session_sysroot = std::any_of(user_args.begin(), user_args.end(),
+      [](const std::string& arg) {
+        return arg.rfind("-isysroot", 0) == 0 || arg == "--sysroot" ||
+               arg.rfind("--sysroot=", 0) == 0;
+      });
+  if (!user_set_sysroot && !session_sysroot && !toolchain_config) {
     const std::string sdk = sdk_path();
     if (!sdk.empty()) args.insert(args.end(), {"-isysroot", sdk});
   }

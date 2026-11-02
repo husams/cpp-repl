@@ -196,9 +196,25 @@ std::optional<std::vector<std::string>> normalize_compile_flags(
       return std::nullopt;
     }
     const auto name = argument->getOption().getName();
+    if (argument->getOption().matches(options::OPT_config) && argument->getNumValues() == 1) {
+      const auto value = fs::path(argument->getValue());
+      // Bare names use Clang's config search directories; paths name files.
+      if (value.has_parent_path()) {
+        const auto absolute = (fs::path(directory) / value).lexically_normal();
+        std::error_code ec;
+        if (!fs::is_regular_file(absolute, ec)) {
+          error = "Clang configuration file not found: " + absolute.string();
+          return std::nullopt;
+        }
+        argument->getValues()[0] = parsed.MakeArgString(absolute.string());
+      }
+    }
     const bool header =
         name == "include" || name == "imacros" || name == "include-pch";
-    const bool path = header || name == "I" || name == "F" || name == "B" ||
+    const bool path = header ||
+                      argument->getOption().matches(options::OPT_gcc_toolchain) ||
+                      argument->getOption().matches(options::OPT_gcc_install_dir_EQ) ||
+                      name == "I" || name == "F" || name == "B" ||
                       name == "isystem" || name == "iquote" ||
                       name == "idirafter" || name == "iframework" ||
                       name == "iframeworkwithsysroot" || name == "isysroot" ||
