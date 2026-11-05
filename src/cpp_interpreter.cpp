@@ -26,15 +26,18 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclBase.h"
+#include "clang/AST/DeclTemplate.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/TargetOptions.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Interpreter/Interpreter.h"
 #include "clang/Interpreter/PartialTranslationUnit.h"
 #include "clang/Interpreter/Value.h"
+#include "clang/Lex/PreprocessorOptions.h"
 #include "cpp_inspect.hpp"
 #include "cpp_lexer.hpp"
 #include "cpp_symbols.hpp"
+#include "definition_generation.hpp"
 #include "definition_shadowing.hpp"
 #include "diagnostic_scope.hpp"
 #include "editor_pch.hpp"
@@ -52,11 +55,13 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Linker/Linker.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Host.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 #include "loaded_symbols.hpp"
 #include "native_symbol_exports.hpp"
 #include "project_compilation_database.hpp"
@@ -380,7 +385,12 @@ CppInterpreter::CppInterpreter(std::unique_ptr<clang::Interpreter> interp,
   editor_pch_ = std::make_unique<EditorPchCache>();
 }
 
-CppInterpreter::~CppInterpreter() = default;
+CppInterpreter::~CppInterpreter() {
+  if (prepared_definitions_ && !prepared_definitions_->execution_attempted) {
+    std::string ignored;
+    cancel_defines(ignored);
+  }
+}
 
 std::unique_ptr<CppInterpreter> CppInterpreter::create(
     const std::vector<std::string>& args, std::string& error) {
@@ -468,7 +478,20 @@ std::unique_ptr<CppInterpreter> CppInterpreter::create(
 // ParseAndExecute(), split up so a failed Execute can be undone.
 bool CppInterpreter::run(const std::string& code, clang::Value& value,
                          bool capture_semicolon_expression) {
-  if (source_input_.empty()) reload_changed_sources();
+  if (prepared_definitions_ && !preparing_definitions_) {
+    const auto lexed = lex_cpp(code);
+    if (!lexed.unterminated &&
+        std::all_of(lexed.tokens.begin(), lexed.tokens.end(),
+                    [](const auto& token) { return token.kind == TokenKind::Comment; })) {
+      return true;
+    }
+    llvm::errs()
+        << "error: definitions are pending; use %define, %commit-defines or %cancel-defines\n";
+    return false;
+  }
+  if (source_input_.empty() && !prepared_definitions_) {
+    reload_changed_sources();
+  }
   if (!global_options_changed_ || compile_scope_active_)
     return run_raw(code, value, nullptr, capture_semicolon_expression);
   SourceCompileOptions options;
@@ -490,6 +513,9 @@ bool CppInterpreter::run(const std::string& code, clang::Value& value,
 bool CppInterpreter::run_raw(const std::string& code, clang::Value& value,
                              std::vector<std::string>* abi_exports,
                              bool capture_semicolon_expression) {
+  if (prepared_definitions_) {
+    return stage_definition_input(code);
+  }
   if (has_top_level_return(code)) {  // would crash the parser
     llvm::errs() << "error: 'return' is only allowed inside a function\n";
     return false;
@@ -557,6 +583,9 @@ bool CppInterpreter::run_raw(const std::string& code, clang::Value& value,
         list += (list.empty() ? "" : ", ") + name;
       llvm::errs() << "error: undefined symbol"
                    << (missing.size() > 1 ? "s" : "") << ": " << list << '\n';
+      llvm::errs() << "hint: use %generate-defines "
+                   << (source_input_.empty() ? "<source-or-header>" : "\"" + source_input_ + "\"")
+                   << " --output definitions.repl before adding or including the input\n";
       if (llvm::Error u = undo_input(*interp_, ptu->TUPart)) report(std::move(u));
       return false;
     }
@@ -599,6 +628,10 @@ bool CppInterpreter::execute(const std::string& code) {
 bool CppInterpreter::set_hook(HookKind kind, const std::string& signature,
                                const std::string& body, std::string& error, const std::string& caller) {
   error.clear();
+  if (prepared_definitions_) {
+    error = "definitions are pending";
+    return false;
+  }
   if (global_options_changed_ && !compile_scope_active_) {
     return with_compile_options(
         source_compile_options(""),
@@ -610,6 +643,10 @@ bool CppInterpreter::set_hook(HookKind kind, const std::string& signature,
 
 bool CppInterpreter::restore(const std::string& signature, std::string& error, const std::string& caller) {
   error.clear();
+  if (prepared_definitions_) {
+    error = "definitions are pending";
+    return false;
+  }
   if (global_options_changed_ && !compile_scope_active_) {
     return with_compile_options(
         source_compile_options(""),
@@ -625,6 +662,10 @@ std::vector<ActiveHook> CppInterpreter::active_hooks() const {
 bool CppInterpreter::define_callable(const std::string& signature, const std::string& body,
                                      std::string& error) {
   error.clear();
+  if (prepared_definitions_ && prepared_definitions_->execution_attempted) {
+    error = "prepared execution failed; restart the session";
+    return false;
+  }
   if (global_options_changed_ && !compile_scope_active_) {
     return with_compile_options(
         source_compile_options(""), [&](const std::string&) { return define_callable(signature, body, error); }, error);
@@ -641,18 +682,41 @@ bool CppInterpreter::define_callable(const std::string& signature, const std::st
   if (!address) {
     llvm::consumeError(address.takeError());
   }
-  if (!native_exports_->prepare(error)) {
+  if (!prepared_definitions_ && !native_exports_->prepare(error)) {
     return false;
   }
   clang::Value value;
   std::vector<std::string> exports;
   std::string prefix;
   for (unsigned i = 0; i < callable->template_specializations; ++i) prefix += "template<> ";
+  // Preparation has already parsed the use which requested this missing
+  // instance. No implementation has been emitted or executed; mark its
+  // declaration as an explicit specialization before supplying that body.
+  const bool prepared_instance =
+      prepared_definitions_ &&
+      callable->function->getTemplateSpecializationKind() == clang::TSK_ImplicitInstantiation;
+  const auto instantiation = callable->function->getPointOfInstantiation();
+  if (prepared_instance) {
+    callable->function->setTemplateSpecializationKind(clang::TSK_ExplicitSpecialization);
+  }
   if (!run_raw(prefix + "__attribute__((used)) " + callable->declaration + " {\n" + body + "\n}\n", value,
                &exports)) {
     discard_failed_callable_definition(*callable->function);
+    if (prepared_instance) {
+      callable->function->setTemplateSpecializationKind(clang::TSK_ImplicitInstantiation,
+                                                        instantiation);
+    }
     error = "could not define callable: " + signature;
     return false;
+  }
+  if (prepared_definitions_) {
+    if (prepared_instance) {
+      prepared_definitions_->template_instances.emplace_back(callable->function,
+                                                             instantiation.getRawEncoding());
+    }
+    prepared_definitions_->callables.push_back(callable->function);
+    prepared_definitions_->exports.push_back(callable->mangled);
+    return true;
   }
   exports.insert(exports.begin(), callable->mangled);
   std::vector<std::pair<std::string, std::uintptr_t>> addresses;
@@ -678,6 +742,10 @@ bool CppInterpreter::define_variable(const std::string& name,
                                      const std::string& initializer,
                                      std::string& error) {
   error.clear();
+  if (prepared_definitions_ && prepared_definitions_->execution_attempted) {
+    error = "prepared execution failed; restart the session";
+    return false;
+  }
   if (initializer.find_first_not_of(" \t\n\r") == std::string::npos) {
     error = "missing C++ initializer";
     return false;
@@ -699,14 +767,22 @@ bool CppInterpreter::define_variable(const std::string& name,
     return false;
   }
   if (!address) llvm::consumeError(address.takeError());
-  if (!native_exports_->prepare(error)) return false;
+  if (!prepared_definitions_ && !native_exports_->prepare(error)) {
+    return false;
+  }
   // Native imports may use even constant members never ODR-used in the REPL.
   // Force their storage to be emitted before looking up its JIT address.
+  llvm::SaveAndRestore<bool> staging(preparing_definitions_, true);
   if (!execute("__attribute__((used)) " + variable->declaration + " = " +
                initializer + ";\n")) {
     discard_failed_variable_definition(interp_->getASTContext(), name);
     error = "could not define variable: " + name;
     return false;
+  }
+  if (prepared_definitions_) {
+    prepared_definitions_->variables.push_back(name);
+    prepared_definitions_->exports.push_back(variable->mangled);
+    return true;
   }
   auto storage = lookup_symbol(jit_, variable->mangled);
   if (!storage || !storage->getValue()) {
@@ -719,6 +795,252 @@ bool CppInterpreter::define_variable(const std::string& name,
     return false;
   }
   return true;
+}
+
+bool CppInterpreter::stage_definition_input(const std::string& code) {
+  if (has_top_level_return(code)) {
+    llvm::errs() << "error: 'return' is only allowed inside a function\n";
+    return false;
+  }
+  std::unique_ptr<DefinitionIdentityScope> identity;
+  if (prepared_definitions_->source_inputs) {
+    identity = std::make_unique<DefinitionIdentityScope>(*interp_->getCompilerInstance());
+  }
+  auto parsed = parse_input(*interp_, code);
+  if (!parsed) {
+    return report(parsed.takeError());
+  }
+  prepared_definitions_->inputs.push_back(&*parsed);
+  semantic_context_ = nullptr;
+  completion_context_ = nullptr;
+  return true;
+}
+
+CppInterpreter::AddResult CppInterpreter::prepare_defines(const std::string& path,
+                                                          const std::string& translation_unit) {
+  if (prepared_definitions_) {
+    return {false, "definitions are already pending"};
+  }
+  std::error_code ec;
+  const auto file = std::filesystem::canonical(expand_home(path), ec);
+  if (ec || !std::filesystem::is_regular_file(file, ec)) {
+    return {false, "not a source file: " + path};
+  }
+  const auto name = file.string();
+  if (name.find_first_of("\\\"\r\n") != std::string::npos) {
+    return {false, "unsupported source filename"};
+  }
+  const bool added = std::find(sources_.begin(), sources_.end(), name) != sources_.end();
+  std::string context = name;
+  if (const auto selected = source_contexts_.find(name); selected != source_contexts_.end()) {
+    context = selected->second;
+  }
+  if (!translation_unit.empty()) {
+    const auto tu = std::filesystem::canonical(expand_home(translation_unit), ec);
+    if (ec || !std::filesystem::is_regular_file(tu, ec)) {
+      return {false, "not a translation unit: " + translation_unit};
+    }
+    context = tu.string();
+    if (context.find_first_of("\\\"\r\n") != std::string::npos) {
+      return {false, "unsupported translation unit filename"};
+    }
+  }
+  std::string error;
+  prepared_definitions_ = std::make_unique<PreparedDefinitions>();
+  prepared_definitions_->path = name;
+  prepared_definitions_->context = context;
+  prepared_definitions_->reload = added;
+  prepared_definitions_->transaction =
+      std::make_unique<DefinitionTransaction>(*interp_->getCompilerInstance());
+  if (!source_reload_->begin(name, added, error)) {
+    std::string ignored;
+    cancel_defines(ignored);
+    return {false, error};
+  }
+  llvm::SaveAndRestore<bool> staging(preparing_definitions_, true);
+  llvm::SaveAndRestore<std::string> source(source_input_, name);
+  const auto options = source_compile_options(context);
+  const bool parsed = with_compile_options(
+      options,
+      [&](const std::string& includes) {
+        return stage_definition_input(includes + "#include \"" + name + "\"\n");
+      },
+      error);
+  if (!parsed) {
+    std::string cleanup;
+    cancel_defines(cleanup);
+    return {false, "could not prepare " + name + (error.empty() ? "" : ": " + error) +
+                       (cleanup.empty() ? "" : "; " + cleanup)};
+  }
+  prepared_definitions_->source_inputs = prepared_definitions_->inputs.size();
+  return {true, "prepared without execution: " + name +
+                    (options.source.empty() ? "" : " (compile options: " + options.source + ")")};
+}
+
+std::optional<std::string> CppInterpreter::generate_defines(const std::string& path,
+                                                            std::string& error,
+                                                            const std::string& translation_unit) {
+  error.clear();
+  if (prepared_definitions_) {
+    error = "commit or cancel the pending definitions before scanning";
+    return std::nullopt;
+  }
+  return isolated_definition_scan(
+      [&](std::string& failure) -> std::optional<std::string> {
+        const auto result = prepare_defines(path, translation_unit);
+        if (!result.ok) {
+          failure = result.message;
+          return std::nullopt;
+        }
+        auto script = generate_definition_entries(*interp_, hooks_, jit_, *prepared_definitions_);
+        const auto& option_file = prepared_definitions_->context;
+        std::string option_error;
+        if (const auto options = describe_compile_options(option_error, option_file)) {
+          std::istringstream lines(*options);
+          std::string comments, line;
+          while (std::getline(lines, line)) {
+            comments += "// " + line + '\n';
+          }
+          script.insert(script.find('\n') + 1, comments);
+        }
+        script.insert(script.find('\n') + 1, "// " + result.message + "\n");
+        return script;
+      },
+      error);
+}
+
+bool CppInterpreter::commit_defines(std::string& error) {
+  error.clear();
+  if (!prepared_definitions_) {
+    error = "no definitions are pending";
+    return false;
+  }
+  auto& prepared = *prepared_definitions_;
+  if (prepared.execution_attempted) {
+    error = "prepared execution failed; restart the session";
+    return false;
+  }
+  clang::PartialTranslationUnit* destination = nullptr;
+  for (auto* input : prepared.inputs) {
+    if (input->TheModule) {
+      destination = input;
+      break;
+    }
+  }
+  if (!destination) {
+    error = "prepared input has no generated module";
+    return false;
+  }
+  auto merged = std::make_unique<llvm::Module>(destination->TheModule->getModuleIdentifier(),
+                                               destination->TheModule->getContext());
+  merged->setDataLayout(destination->TheModule->getDataLayout());
+  merged->setTargetTriple(destination->TheModule->getTargetTriple());
+  const auto link = [&](std::size_t begin, std::size_t end) {
+    for (std::size_t i = begin; i < end; ++i) {
+      if (prepared.inputs[i]->TheModule &&
+          llvm::Linker::linkModules(*merged, llvm::CloneModule(*prepared.inputs[i]->TheModule))) {
+        return false;
+      }
+    }
+    return true;
+  };
+  // Definition initializers precede the source's initializers. Cloning keeps
+  // the parsed modules available when a missing dependency prevents commit.
+  if (!link(prepared.source_inputs, prepared.inputs.size()) || !link(0, prepared.source_inputs)) {
+    error = "could not link prepared definitions; cancel and correct the batch";
+    return false;
+  }
+  const auto missing = missing_symbols(jit_, *merged);
+  if (!missing.empty()) {
+    error = "undefined symbols (batch remains unexecuted): ";
+    for (const auto& name : missing) {
+      error += name + "; ";
+    }
+    return false;
+  }
+  if (!prepared.exports.empty() && !native_exports_->prepare(error)) {
+    return false;
+  }
+  for (const auto& global : merged->global_values()) {
+    const auto name = global.getName();
+    if (!global.isDeclarationForLinker() && !global.hasLocalLinkage() &&
+        global.getVisibility() == llvm::GlobalValue::DefaultVisibility &&
+        (name.starts_with("_ZTV") || name.starts_with("_ZTT") || name.starts_with("_ZTI") ||
+         name.starts_with("_ZTS") || name.starts_with("_ZTC") || name.starts_with("_ZTh") ||
+         name.starts_with("_ZTv") || name.starts_with("_ZTc"))) {
+      prepared.exports.push_back(name.str());
+    }
+  }
+  destination->TheModule = std::move(merged);
+  const auto instrumented = hooks_.instrument(*destination);
+  prepared.execution_attempted = true;
+  if (auto failure = interp_->Execute(*destination)) {
+    hooks_.discard(instrumented);
+    error = "prepared execution failed; restart the session: " + llvm::toString(std::move(failure));
+    return false;
+  }
+  for (auto* input : prepared.inputs) {
+    input->TheModule.reset();
+  }
+  auto exports = prepared.exports;
+  if (!prepared.reload) {
+    sources_.push_back(prepared.path);
+  }
+  source_contexts_[prepared.path] = prepared.context;
+  source_reload_->finish(true);
+  prepared.transaction->commit();
+  prepared_definitions_.reset();
+  editor_pch_->observe_input({}, args_, false, interp_->getCompilerInstance());
+  semantic_context_ = nullptr;
+  completion_context_ = nullptr;
+  std::vector<std::pair<std::string, std::uintptr_t>> addresses;
+  for (const auto& name : exports) {
+    auto address = lookup_symbol(jit_, name);
+    if (!address) {
+      error = "batch committed, but export address is unavailable: " +
+              llvm::toString(address.takeError());
+      return false;
+    }
+    addresses.emplace_back(name, address->getValue());
+  }
+  if (!addresses.empty() && !native_exports_->publish(addresses, error)) {
+    error = "batch committed, but native publication failed: " + error;
+    return false;
+  }
+  return true;
+}
+
+bool CppInterpreter::cancel_defines(std::string& error) {
+  error.clear();
+  if (!prepared_definitions_) {
+    error = "no definitions are pending";
+    return false;
+  }
+  if (prepared_definitions_->execution_attempted) {
+    error = "prepared execution failed; restart the session";
+    return false;
+  }
+  auto prepared = std::move(prepared_definitions_);
+  for (auto it = prepared->inputs.rbegin(); it != prepared->inputs.rend(); ++it) {
+    if (auto failure = undo_input(*interp_, (*it)->TUPart)) {
+      error = "could not cancel prepared definitions: " + llvm::toString(std::move(failure));
+      break;
+    }
+  }
+  for (auto* function : prepared->callables) {
+    discard_failed_callable_definition(*function);
+  }
+  for (const auto& [function, point] : prepared->template_instances) {
+    function->setTemplateSpecializationKind(clang::TSK_ImplicitInstantiation,
+                                            clang::SourceLocation::getFromRawEncoding(point));
+  }
+  for (const auto& name : prepared->variables) {
+    discard_failed_variable_definition(interp_->getASTContext(), name);
+  }
+  source_reload_->finish(false);
+  semantic_context_ = nullptr;
+  completion_context_ = nullptr;
+  return error.empty();
 }
 
 std::optional<std::string> CppInterpreter::symbol_list(
@@ -794,6 +1116,9 @@ std::optional<std::string> CppInterpreter::evaluate(const std::string& code) {
 }
 
 std::string CppInterpreter::load_library(const std::string& path) {
+  if (prepared_definitions_) {
+    return "definitions are pending";
+  }
 #ifdef __linux__
   // Resolve ELF PLT/GOT entries before native caller matching, even when this
   // API is used directly instead of going through LibraryManager's RTLD_NOW.
@@ -928,6 +1253,9 @@ void CppInterpreter::reload_changed_sources() {
 }
 
 CppInterpreter::AddResult CppInterpreter::load_source(const std::string& path, bool reload) {
+  if (prepared_definitions_) {
+    return {false, "definitions are pending"};
+  }
   namespace fs = std::filesystem;
   std::error_code ec;
   const fs::path file = fs::canonical(expand_home(path), ec);
@@ -942,17 +1270,20 @@ CppInterpreter::AddResult CppInterpreter::load_source(const std::string& path, b
   if (!added && reload) return {false, "source has not been added: " + name};
   llvm::SaveAndRestore<std::string> source_scope(source_input_, name);
   llvm::SaveAndRestore<bool> reload_scope(reloading_source_, reload);
-  const auto options = source_compile_options(name);
+  const auto selected = source_contexts_.find(name);
+  const auto options =
+      source_compile_options(selected == source_contexts_.end() ? name : selected->second);
   const auto include = "#include \"" + name + "\"\n";
   if (!options.source.empty() || file_options_.count(name) ||
-      global_options_changed_) {
+      (selected != source_contexts_.end() && selected->second != name) || global_options_changed_) {
     std::string error;
     if (!with_compile_options(options,
           [&](const std::string& includes) { return execute(includes + include); }, error))
       return {false,
               "could not add " + name + (error.empty() ? "" : ": " + error)};
-  } else if (!execute(include))
+  } else if (!execute(include)) {
     return {false, "could not add " + name};
+  }
   if (!reload) sources_.push_back(name);
   return {true, std::string(reload ? "reloaded: " : "added: ") + name +
                     (options.source.empty()
@@ -1088,6 +1419,10 @@ bool CppInterpreter::update_compile_options(
     const std::vector<std::string>& flags, bool replace,
     const std::string& file, std::string& error) {
   error.clear();
+  if (prepared_definitions_) {
+    error = "definitions are pending";
+    return false;
+  }
   std::error_code ec;
   const auto directory = std::filesystem::current_path(ec).string();
   if (ec) {

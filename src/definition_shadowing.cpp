@@ -112,6 +112,7 @@ class ShadowConsumer : public clang::ASTConsumer {
   std::vector<Hidden> hidden_;
   std::set<std::string> version_files_;
   bool capture_semicolon_expressions_ = false;
+  bool preserve_identity_ = false;
 
   void hide(clang::DeclContext *context, clang::NamedDecl *old) {
     if (auto *map = context->getPrimaryContext()->getLookupPtr()) {
@@ -210,6 +211,9 @@ class ShadowConsumer : public clang::ASTConsumer {
       }
       return;
     }
+    if (preserve_identity_) {
+      return;
+    }
     if (!prompt && !version_files_.count(manager.getFilename(location).str()))
       return;
     auto *space = clang::NamespaceDecl::Create(
@@ -253,6 +257,11 @@ class ShadowConsumer : public clang::ASTConsumer {
   }
 
 public:
+  bool preserve_identity(bool enabled) {
+    const bool previous = preserve_identity_;
+    preserve_identity_ = enabled;
+    return previous;
+  }
   explicit ShadowConsumer(clang::CompilerInstance &compiler)
       : compiler_(compiler) {
     std::lock_guard<std::mutex> lock(consumers_mutex);
@@ -417,6 +426,21 @@ DefinitionTransaction::~DefinitionTransaction() {
     found->second->finish(committed_);
 }
 void DefinitionTransaction::commit() { committed_ = true; }
+
+DefinitionIdentityScope::DefinitionIdentityScope(clang::CompilerInstance& compiler)
+    : compiler_(compiler) {
+  std::lock_guard<std::mutex> lock(consumers_mutex);
+  if (auto found = consumers.find(&compiler_); found != consumers.end()) {
+    previous_ = found->second->preserve_identity(true);
+  }
+}
+
+DefinitionIdentityScope::~DefinitionIdentityScope() {
+  std::lock_guard<std::mutex> lock(consumers_mutex);
+  if (auto found = consumers.find(&compiler_); found != consumers.end()) {
+    found->second->preserve_identity(previous_);
+  }
+}
 
 void version_source_files(clang::CompilerInstance &compiler,
                           const std::vector<std::string> &files) {

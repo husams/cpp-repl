@@ -85,6 +85,33 @@ std::string command_entry(const fs::path& directory, const fs::path& file,
          ",\"command\":" + quote_json(command) + "}";
 }
 
+TEST(CompilationDatabase, GeneratesDefinitionsUsingDatabaseFlagsBeforeLoadingSource) {
+  TemporaryProject project;
+  project.write("include/api.hpp", "int missing(int);\n");
+  const auto source =
+      project.write("source.cpp", "#include <api.hpp>\nint result = missing(DATABASE_VALUE);\n");
+  project.write(
+      "compile_commands.json",
+      "[" +
+          command_entry(project.root(), source,
+                        "clang++ -std=c++17 -Iinclude -DDATABASE_VALUE=40 -c source.cpp") +
+          "]");
+  CurrentDirectory cwd(project.root());
+  std::string error;
+  auto cpp = create_interpreter(error);
+  ASSERT_TRUE(cpp) << error;
+  const auto script = cpp->generate_defines(source.string(), error);
+  ASSERT_TRUE(script) << error;
+  EXPECT_NE(script->find("%define missing(int arg0)"), std::string::npos) << *script;
+  EXPECT_NE(script->find("DATABASE_VALUE=40"), std::string::npos) << *script;
+  EXPECT_TRUE(cpp->sources().empty());
+  const auto prepared = cpp->prepare_defines(source.string());
+  ASSERT_TRUE(prepared.ok) << prepared.message;
+  ASSERT_TRUE(cpp->define_callable("missing(int x)", "return x + 2;", error)) << error;
+  ASSERT_TRUE(cpp->commit_defines(error)) << error;
+  EXPECT_EQ(cpp->evaluate("result"), "(int) 42\n");
+}
+
 std::string arguments_entry(const fs::path& directory, const fs::path& file,
                             const std::vector<std::string>& arguments) {
   std::string out = "{\"directory\":" + quote_json(directory.string()) +

@@ -6,6 +6,7 @@
 
 #include "commands.hpp"
 #include "cpp_interpreter.hpp"
+#include "definition_generation.hpp"
 #include "inspection_output.hpp"
 #include "runtime_inspection.hpp"
 
@@ -57,6 +58,47 @@ CommandResult execute_command(LibraryManager& libs, CppInterpreter& cpp,
   if (cmd.kind == CommandKind::Cpp) {
     return {true, false};  // C++ input is handled by the interactive REPL.
   }
+  if (cpp.definitions_pending() && cmd.error.empty() && cmd.kind != CommandKind::DefineVariable &&
+      cmd.kind != CommandKind::CommitDefines && cmd.kind != CommandKind::CancelDefines &&
+      cmd.kind != CommandKind::Help && cmd.kind != CommandKind::Quit) {
+    out << "error: definitions are pending; use %define, %commit-defines or %cancel-defines\n";
+    return {true, false};
+  }
+  if (cmd.kind == CommandKind::GenerateDefines && cmd.error.empty()) {
+    std::string error;
+    const auto script = cpp.generate_defines(cmd.paths.front().value, error,
+                                             cmd.definitions_tu ? cmd.definitions_tu->value : "");
+    bool ok = script.has_value();
+    if (script && cmd.definitions_output) {
+      ok = write_definition_script(expand_home(cmd.definitions_output->value), *script,
+                                   cmd.update_definitions, error);
+      if (ok) {
+        out << "generated definitions: " << cmd.definitions_output->value << '\n';
+      }
+    } else if (script) {
+      out << *script;
+    }
+    if (!ok) {
+      out << "error: " << error << '\n';
+    }
+    return {true, ok};
+  }
+  if (cmd.kind == CommandKind::PrepareDefines && cmd.error.empty()) {
+    const auto result = cpp.prepare_defines(cmd.paths.front().value,
+                                            cmd.definitions_tu ? cmd.definitions_tu->value : "");
+    out << (result.ok ? "" : "error: ") << result.message << '\n';
+    return {true, result.ok};
+  }
+  if ((cmd.kind == CommandKind::CommitDefines || cmd.kind == CommandKind::CancelDefines) &&
+      cmd.error.empty()) {
+    std::string error;
+    const bool ok = cmd.kind == CommandKind::CommitDefines ? cpp.commit_defines(error)
+                                                           : cpp.cancel_defines(error);
+    out << (ok ? (cmd.kind == CommandKind::CommitDefines ? "committed definitions\n"
+                                                         : "cancelled definitions\n")
+               : "error: " + error + '\n');
+    return {true, ok};
+  }
   if ((cmd.kind == CommandKind::Set || cmd.kind == CommandKind::OptionValue) && cmd.error.empty()) {
     const auto value = get_repl_option(cpp.options(), cmd.option_name);
     if (!value) {
@@ -75,7 +117,9 @@ CommandResult execute_command(LibraryManager& libs, CppInterpreter& cpp,
     const auto& name = cmd.signature ? cmd.signature->value : cmd.symbol->value;
     const bool ok = cmd.signature ? cpp.define_callable(name, cmd.code->value, error)
                                   : cpp.define_variable(name, cmd.code->value, error);
-    out << color_inspection(ok ? "defined: " + name + '\n' : "error: " + error + '\n',
+    out << color_inspection(ok ? (cpp.definitions_pending() ? "staged: " : "defined: ") + name +
+                                     '\n'
+                               : "error: " + error + '\n',
                             inspection_colors_enabled());
     return {true, ok};
   }

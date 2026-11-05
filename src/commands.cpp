@@ -77,6 +77,44 @@ void parse_paths(std::string_view text, ParsedCommand& cmd) {
   }
 }
 
+void parse_definition_options(std::string_view text, ParsedCommand& cmd) {
+  parse_paths(text, cmd);
+  if (!cmd.error.empty()) {
+    return;
+  }
+  auto words = std::move(cmd.paths);
+  cmd.paths.clear();
+  if (words.empty() || words.front().value.front() == '-') {
+    set_error(cmd, "missing source or header filename", {cmd.arg_begin, text.size()});
+    return;
+  }
+  cmd.paths.push_back(words.front());
+  for (std::size_t i = 1; i < words.size(); ++i) {
+    const auto& word = words[i];
+    if (word.value == "--update" && cmd.kind == CommandKind::GenerateDefines &&
+        !cmd.update_definitions) {
+      cmd.update_definitions = true;
+      continue;
+    }
+    auto* value = word.value == "--tu" ? &cmd.definitions_tu
+                  : word.value == "--output" && cmd.kind == CommandKind::GenerateDefines
+                      ? &cmd.definitions_output
+                      : nullptr;
+    if (!value || *value) {
+      set_error(cmd, "unknown or duplicate option: " + word.value, word.span);
+      return;
+    }
+    if (++i == words.size() || words[i].value.front() == '-') {
+      set_error(cmd, "missing filename after " + word.value, word.span);
+      return;
+    }
+    *value = words[i];
+  }
+  if (cmd.update_definitions && !cmd.definitions_output) {
+    set_error(cmd, "--update requires --output", {cmd.arg_begin, text.size()});
+  }
+}
+
 // Shell-style grouping and escapes, with no variable expansion or execution.
 // The first word is a filename only when it does not start with '-'.
 void parse_compile_options(std::string_view text, ParsedCommand& cmd) {
@@ -524,6 +562,15 @@ const std::vector<CommandInfo>& command_table() {
        "print a readable C++ symbol name without loading its library"},
       {"%define", CommandKind::DefineVariable, " <symbol or signature> cpp`<initializer or body>`",
        "define missing variable storage or a callable before loading a library"},
+      {"%generate-defines", CommandKind::GenerateDefines,
+       " <file> [--tu <source>] [--output <file.repl>] [--update]",
+       "parse without execution and generate missing %define entries"},
+      {"%prepare-defines", CommandKind::PrepareDefines, " <file> [--tu <source>]",
+       "prepare declarations without executing the source or header"},
+      {"%commit-defines", CommandKind::CommitDefines, "",
+       "resolve and execute the prepared source and definitions together"},
+      {"%cancel-defines", CommandKind::CancelDefines, "",
+       "discard unexecuted prepared source and definitions"},
       {"%symbols", CommandKind::Symbols, " [all] [undefined] [lib <regex>] [name <regex>]",
        "list loaded symbol names (all includes system libraries)"},
       {"%mock", CommandKind::Mock, " <signature> [in <caller>] cpp`<body>`",
@@ -663,6 +710,10 @@ ParsedCommand parse_command(std::string_view text, bool allow_shell) {
     case CommandKind::Reload:
       parse_paths(text, cmd);
       break;
+    case CommandKind::GenerateDefines:
+    case CommandKind::PrepareDefines:
+      parse_definition_options(text, cmd);
+      break;
     case CommandKind::CompileOpts:
     case CommandKind::AddCompileOpt:
     case CommandKind::SetCompileOpts:
@@ -714,6 +765,8 @@ ParsedCommand parse_command(std::string_view text, bool allow_shell) {
       break;
     }
     case CommandKind::Hooks:
+    case CommandKind::CommitDefines:
+    case CommandKind::CancelDefines:
     case CommandKind::Paths:
     case CommandKind::Clear:
     case CommandKind::Help:
@@ -830,6 +883,10 @@ bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out,
     case CommandKind::UseCompileOpts:
     case CommandKind::DefineVariable:
     case CommandKind::Class:    // owns the interpreter
+    case CommandKind::GenerateDefines:
+    case CommandKind::PrepareDefines:
+    case CommandKind::CommitDefines:
+    case CommandKind::CancelDefines:
     case CommandKind::Methods:
     case CommandKind::Fields:
     case CommandKind::Info:

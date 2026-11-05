@@ -45,6 +45,10 @@ namespace example {
 //   shell     := "!" shell-command               one physical line, /bin/sh -c
 //   demangle  := "%demangle" symbol              mangled or plain name
 //   define    := "%define" (symbol | signature) "cpp`" (initializer | body) "`"
+//   generate  := "%generate-defines" path [ "--tu" path ] [ "--output" path ] [ "--update" ]
+//   prepare   := "%prepare-defines" path [ "--tu" path ]
+//   commit    := "%commit-defines"
+//   cancel    := "%cancel-defines"
 //   symbols   := "%symbols" [ "all" ] [ "undefined" ] [ "lib" regex ] [ "name" regex ]
 //   hook      := ("%mock" | "%pre" | "%post") signature [ "in" signature ] "cpp`" body "`"
 //   restore   := "%restore" [ signature [ "in" signature ] ]
@@ -81,6 +85,10 @@ enum class CommandKind {
   Shell,
   Demangle,
   DefineVariable,
+  GenerateDefines,
+  PrepareDefines,
+  CommitDefines,
+  CancelDefines,
   Symbols,
   Mock,
   Pre,
@@ -139,6 +147,9 @@ struct ParsedCommand {
   std::optional<Operand> signature;   // %mock / %pre / %post / %restore target
   std::optional<Operand> caller;      // optional direct caller after "in"
   std::optional<Operand> code;        // contents of cpp`...`
+  std::optional<Operand> definitions_output;
+  std::optional<Operand> definitions_tu;
+  bool update_definitions = false;
   std::string option_name;            // %set target or $query name
   std::optional<Operand> option_value;  // boolean value for %set
   std::optional<Span> option_equals;    // '=' in a %set assignment
