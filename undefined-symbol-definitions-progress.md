@@ -13,10 +13,10 @@ Analysis must not execute user input or mutate the live session. Staged inputs r
 
 ## Implementation
 
-- `acbe1c8`: isolated Clang dependency analysis and editable script generation.
-- `8c86c92`: prepare/define/commit/cancel commands, staged reloads, native publication, and regressions.
+- `7f987c1`: isolated Clang dependency analysis and editable script generation.
+- `40f935f`: prepare/define/commit/cancel commands, staged reloads, native publication, and regressions.
 - Independent correctness review: approved after resolving virtual support groups, declaration identity, staged reload cancellation, template instances, and retained/serialized header compilation contexts.
-- Original checkout retained its five pre-existing modified files. No merge, push, installation, or changes to that checkout were performed.
+- Original checkout and its pre-existing edits are preserved. Publication and integration are tracked in [PR #23](https://github.com/husams/cpp-repl/pull/23).
 
 ## Usage
 
@@ -31,7 +31,7 @@ The example at `examples/undefined-definitions` was run on macOS and Linux: its 
 
 Manual launcher: `examples/undefined-definitions/manual.sh` copies unloaded inputs into a fresh temporary directory and prints the scan/prepare/define/commit steps. `manual-session.repl` provides the same runnable transcript. Both the normal manual workflow and recovery after an intentional failed `%add` were checked; each returns 42 and an initialization count of one.
 
-## Validation
+## Initial validation on the original worktree base
 
 All 24 new regressions (23 generation/staging/grammar tests and one compilation-database test) pass on both platforms.
 
@@ -42,9 +42,24 @@ All 24 new regressions (23 generation/staging/grammar tests and one compilation-
 
 The Linux failures are `CppInterpreterTest.SymbolListingHidesSystemExportsUnlessAllIsRequested` and `pty_smoke`. A separate clean build of the original `7664d4e` baseline reproduces the same symbol-listing failure and the same three library-listing/libinfo assertions in the smoke test. No new feature test fails. These existing toolchain/library-path assertions were not changed by this feature.
 
-Independent review approved the implementation. `git diff --check` passes. The implementation remains on the isolated branch and has not been merged, pushed, or installed.
+Independent review approved the implementation. `git diff --check` passes.
 
 Linux uses LLVM 21.1.8 and the GCC 8.5 SDK at `/opt/toolchain/x86_64-2.6.32-v4.0.137`, with `-DCMAKE_CXX_STANDARD_LIBRARIES=-lstdc++fs` supplied for this branch's existing filesystem linkage. Its build and fixtures remain isolated at `/tmp/cpp-repl-undefined-defines.1Mh3qk`; baseline controls are at `/tmp/cpp-repl-undefined-defines-baseline.1Mh3qk`.
+
+## Integration with current main
+
+The feature commits were rebased onto `5ddc33d` for PR #23, retaining main's configurable toolchains and portable library checks and excluding the unrelated local PCH change. The new test target was added to main's CTest isolation mechanism in `f984206`.
+
+Independent integration review approved the rebased change. Hostile-environment checks pass 25/25, including the cleanup fixture; discovery confirms the new tests run in isolated temporary directories.
+
+Fresh full-suite validation against current main passes on both platforms:
+
+| Platform | Toolchain | Full CTest result |
+| --- | --- | --- |
+| macOS arm64 | LLVM 22.1.8 | 396/396 passed |
+| linux-dev x86-64 | LLVM 21.1.8 and GCC 8.5 SDK | 393/393 passed |
+
+Current main's toolchain and library-path fixes resolve the two failures from the original-base run. The Linux integration run uses main's automatic filesystem support selection without the earlier manual linker override. Full logs: `/tmp/cpp-repl-defines-pr-macos.txt` and `/tmp/cpp-repl-defines-pr-linux.txt`; hostile-environment log: `/tmp/cpp-repl-defines-pr-hostile.txt`.
 
 Logs on the development Mac:
 
