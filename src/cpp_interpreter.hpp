@@ -23,6 +23,7 @@ class ProjectCompilationDatabase;
 class NativeSymbolExports;
 class SourceReload;
 class EditorPchCache;
+struct PreparedDefinitions;
 struct SourceCompileOptions;
 
 // The clang-repl engine behind the REPL: clang::Interpreter parses each input
@@ -129,6 +130,14 @@ class CppInterpreter {
   bool define_variable(const std::string& name, const std::string& initializer,
                         std::string& error);
   bool define_callable(const std::string& signature, const std::string& body, std::string& error);
+  // Analyze without executing or changing the live compiler/JIT.
+  std::optional<std::string> generate_defines(const std::string& path, std::string& error,
+                                              const std::string& translation_unit = "");
+  AddResult prepare_defines(const std::string& path, const std::string& translation_unit = "");
+  bool commit_defines(std::string& error);
+  bool cancel_defines(std::string& error);
+
+  bool definitions_pending() const { return prepared_definitions_ != nullptr; }
   // Defined native exports and emitted session functions/globals. Regex filters
   // search full library paths (or <session>) and demangled qualified names.
   // System libraries are hidden unless include_system is true.
@@ -152,6 +161,7 @@ class CppInterpreter {
   bool run_raw(const std::string& code, clang::Value& value,
                std::vector<std::string>* abi_exports = nullptr,
                bool capture_semicolon_expression = false);
+  bool stage_definition_input(const std::string& code);
   bool with_compile_options(const SourceCompileOptions& options,
                             const std::function<bool(const std::string&)>& action,
                             std::string& error);
@@ -178,11 +188,14 @@ class CppInterpreter {
   std::unique_ptr<SourceReload> source_reload_;
   std::unique_ptr<EditorPchCache> editor_pch_;
   std::unique_ptr<clang::Interpreter> interp_;
+  std::unique_ptr<PreparedDefinitions> prepared_definitions_;
+  bool preparing_definitions_ = false;
   llvm::orc::LLJIT& jit_;  // Owned by interp_'s incremental executor.
   FunctionHooks hooks_;
   ReplOptions options_;
   std::vector<std::string> args_;  // the user's compiler flags, for completion
   std::vector<std::string> sources_;  // canonical paths of the %add-ed files
+  std::map<std::string, std::string> source_contexts_; // explicit header --tu selections
   std::unique_ptr<ProjectCompilationDatabase> database_;
   std::map<std::string, FileCompileOptions> file_options_;
   std::string reference_file_;

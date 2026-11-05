@@ -53,7 +53,7 @@ function(cpp_repl_isolate_discovered_tests)
   foreach(_cpp_repl_target IN ITEMS
       cpp_lexer_test commands_test library_dependency_test
       iterative_development_test cpp_interpreter_test record_members_test
-      compilation_database_test)
+      compilation_database_test definition_generation_test)
     set(_cpp_repl_discovered_tests "${${_cpp_repl_target}_TESTS}")
     if(_cpp_repl_discovered_tests)
       set_tests_properties(${_cpp_repl_discovered_tests} PROPERTIES
