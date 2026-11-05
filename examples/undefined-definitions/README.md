@@ -1,5 +1,44 @@
 # Discover undefined symbols before loading C++
 
+## Test manually
+
+From this directory, run:
+
+```sh
+./manual.sh
+```
+
+The launcher uses this feature worktree's built binary and copies the two C++
+files to a fresh temporary directory. Nothing is automatically prepared or
+defined. It prints the directory and the commands to try:
+
+```text
+%generate-defines consumer.cpp --output definitions.repl
+%prepare-defines consumer.cpp
+%define definition_demo::adjust(int value) cpp`return value + 7;`
+%define definition_demo::bias cpp`35`
+%commit-defines
+answer()
+definition_demo::initialization_count
+```
+
+The last two expressions should print **42** and **1**. Inspect the generated
+`definitions.repl` in the printed directory to see the discovered signatures.
+It is retained after exit so you can edit it. `%cancel-defines` lets you discard
+a prepared batch and try again.
+
+To demonstrate the original failure, start a fresh manual session and enter
+`%add consumer.cpp` first. It reports undefined `adjust` and `bias`; the
+scan-and-define workflow above can then resolve them.
+
+The same commands are available as a runnable transcript:
+
+```sh
+./manual.sh < manual-session.repl
+```
+
+## Start with completed definitions
+
 From this directory, start `cpp-repl`. The numbered startup script prepares
 `consumer.cpp`, supplies its missing definitions, and commits the batch.
 

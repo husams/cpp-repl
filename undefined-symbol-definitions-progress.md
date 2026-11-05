@@ -29,6 +29,8 @@ Complete and uncomment the generated `%define` entries; retain the surrounding `
 
 The example at `examples/undefined-definitions` was run on macOS and Linux: its startup script produces `answer() == 42` and an initialization count of one.
 
+Manual launcher: `examples/undefined-definitions/manual.sh` copies unloaded inputs into a fresh temporary directory and prints the scan/prepare/define/commit steps. `manual-session.repl` provides the same runnable transcript. Both the normal manual workflow and recovery after an intentional failed `%add` were checked; each returns 42 and an initialization count of one.
+
 ## Validation
 
 All 24 new regressions (23 generation/staging/grammar tests and one compilation-database test) pass on both platforms.

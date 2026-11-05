@@ -1,0 +1,13 @@
+// Discover both missing definitions without loading the source.
+%generate-defines consumer.cpp --output definitions.repl
+
+// Retain declarations while leaving the header's initializer unexecuted.
+%prepare-defines consumer.cpp
+%define definition_demo::adjust(int value) cpp`return value + 7;`
+%define definition_demo::bias cpp`35`
+%commit-defines
+
+// Expected: (int) 42, then (int) 1.
+answer()
+definition_demo::initialization_count
+%quit
