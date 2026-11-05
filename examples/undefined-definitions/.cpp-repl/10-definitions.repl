@@ -1,0 +1,5 @@
+// Declarations are retained without executing api.hpp's initializer.
+%prepare-defines consumer.cpp
+%define definition_demo::adjust(int value) cpp`return value + 7;`
+%define definition_demo::bias cpp`35`
+%commit-defines

@@ -504,6 +504,48 @@ A leading `!` selects the shell; parenthesize a C++ negation, such as `(!x)`.
   spellings for aliases too, preserving pointer-level qualifiers and the
   distinction between `&` and `&&`. Queries read AST metadata without parsing
   or executing C++ input.
+- `%generate-defines <file> [--tu <source>] [--output <file.repl>] [--update]` -
+  parse a C++ source or header before adding or including it, and generate
+  editable `%define` entries for missing dependencies. Without `--output`,
+  preview the report and script. Analysis runs in an isolated child process:
+  it does not execute initializers or change the live AST, macros, or JIT.
+  The selected compilation database entry and effective flags appear in the
+  report; `--tu` selects a source's compilation context for a header.
+  Replay scripts with the same compilation database and configured flags;
+  inherited header contexts are written explicitly as `--tu` in the script.
+  Referenced candidates are distinguished from unresolved emitted dependencies;
+  declarations without references are omitted, resolved providers are excluded,
+  and unsupported targets/support symbols are reported separately.
+  Generated entries are commented until you supply their bodies or initializers.
+  The script prepares declarations first and commits only after the definitions.
+  New output files never overwrite existing files. `--update` preserves edited
+  definition regions and handwritten text, adds new entries, and comments stale
+  entries when their types change or their dependencies disappear. Keep the
+  generated region markers intact. Updates require the same input and `--tu`
+  context and reject symlinks and handwritten files. Analysis is bounded to
+  60 seconds and a 16 MiB report. Existing added files can also be scanned
+  before `%reload`; the scan does not reload the live code.
+- `%prepare-defines <file> [--tu <source>]` - parse and retain a source or header
+  without executing it. Its declarations are available to subsequent `%define`
+  commands, including when the header's own initializers need missing symbols.
+  These definitions are staged without running their initializers or publishing
+  native exports. While a batch is pending, ordinary C++ and other state-changing
+  commands are rejected; comments, `%help`, and `%quit` remain usable.
+  An already-added input is prepared as a reload; cancellation restores its
+  prior definitions and successful commit preserves previously compiled callers.
+  Explicit header `--tu` selections are retained for later reloads.
+- `%commit-defines` - link the prepared input and staged definitions together,
+  check dependencies, then execute them. Definition initializers run before the
+  source's initializers, each once. Missing dependencies leave the whole batch
+  unexecuted so more `%define` commands can complete it. Successful commit adds
+  the input to `%add`'s source list and publishes staged native exports.
+- `%cancel-defines` - discard an unexecuted batch and restore source macro state.
+  Failed bodies/initializers can be corrected before commit. Native publication
+  failures after successful execution explicitly report that the batch committed;
+  executed external effects cannot be undone. An unexpected failure after JIT
+  execution starts requires restarting the session. Pending batches are cancelled
+  on normal exit. See the [undefined-definitions example](examples/undefined-definitions/README.md)
+  for a header with missing initializer dependencies and a reusable startup script.
 - ``%define <symbol> cpp`initializer` `` - provide a missing definition for a
   declared global variable or static data member. Clang supplies the actual
   type and declarator; you supply any valid C++ initializer, including function
