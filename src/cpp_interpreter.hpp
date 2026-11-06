@@ -15,6 +15,7 @@
 namespace clang {
 class Interpreter;
 class Value;
+struct PartialTranslationUnit;
 }  // namespace clang
 
 namespace example {
@@ -190,6 +191,7 @@ class CppInterpreter {
   std::unique_ptr<clang::Interpreter> interp_;
   std::unique_ptr<PreparedDefinitions> prepared_definitions_;
   bool preparing_definitions_ = false;
+  std::function<bool(clang::PartialTranslationUnit&)> check_generated_default_;
   llvm::orc::LLJIT& jit_;  // Owned by interp_'s incremental executor.
   FunctionHooks hooks_;
   ReplOptions options_;
