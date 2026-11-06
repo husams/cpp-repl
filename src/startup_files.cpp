@@ -58,7 +58,9 @@ std::optional<std::string> script_order(const fs::path& path) {
 
 void load_script(LibraryManager& libs, CppInterpreter& cpp,
                  std::ostream& output, const fs::path& path,
-                 StartupFilesResult& result) {
+                 StartupFilesResult& result, unsigned source_depth = 0) {
+  const bool sourcing = source_depth != 0;
+  const std::string prefix = sourcing ? "" : "startup ";
   const bool colors = inspection_colors_enabled();
   auto fail = [&](unsigned line, const std::string& message) {
     ++result.failed;
@@ -68,7 +70,7 @@ void load_script(LibraryManager& libs, CppInterpreter& cpp,
   };
   std::ifstream input(path);
   if (!input) {
-    fail(1, "cannot open startup script");
+    fail(1, "cannot open " + prefix + "script");
     return;
   }
   ++result.loaded;
@@ -92,27 +94,53 @@ void load_script(LibraryManager& libs, CppInterpreter& cpp,
     }
     if (is_command_line(line)) {
       const auto command = parse_command(line);
-      const auto executed = execute_command(libs, cpp, command, output);
+      const auto executed = execute_command(libs, cpp, command, output, source_depth);
       if (executed.ok)
         ++result.commands;
       else
-        fail(entry_number, "startup command failed: " + command.name);
+        fail(entry_number, prefix + "command failed: " + command.name);
       if (!executed.keep_running) {
         result.quit = true;
         break;
       }
     } else if (!cpp.execute(line)) {
-      fail(entry_number, "startup C++ input failed");
+      fail(entry_number, prefix + "C++ input failed");
     }
+    if (sourcing && result.failed) break;
   }
   if (!pending.empty())
     fail(entry_number, is_command_line(pending) ? parse_command(pending).error
                                                 : "incomplete C++ input");
-  if (input.bad()) fail(number, "could not finish reading startup script");
-  output << color_inspection("preloaded: " + path.string() + '\n', colors);
+  if (input.bad()) fail(number, "could not finish reading " + prefix + "script");
+  if (!sourcing || !result.failed)
+    output << color_inspection((sourcing ? "sourced: " : "preloaded: ") + path.string() + '\n',
+                               colors);
 }
 
 }  // namespace
+
+CommandResult source_repl_file(LibraryManager& libs, CppInterpreter& cpp,
+                               std::ostream& output, const std::string& filename,
+                               unsigned source_depth) {
+  if (source_depth >= 32) {
+    output << "error: maximum %source nesting depth reached\n";
+    return {true, false};
+  }
+  std::error_code ec;
+  const auto path = fs::absolute(expand_home(filename), ec);
+  if (ec || !fs::is_regular_file(path, ec)) {
+    output << "error: cannot read script file: " << filename << '\n';
+    return {true, false};
+  }
+  StartupFilesResult result;
+  load_script(libs, cpp, output, path, result, source_depth + 1);
+  // The dispatcher only permits %source when no batch is pending.
+  if (result.failed && cpp.definitions_pending()) {
+    std::string error;
+    if (!cpp.cancel_defines(error)) output << "error: " << error << '\n';
+  }
+  return {!result.quit, result.failed == 0};
+}
 
 StartupFilesResult load_startup_files(LibraryManager& libs, CppInterpreter& cpp,
                                       std::ostream& output,

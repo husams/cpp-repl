@@ -29,6 +29,7 @@ namespace example {
 //   libinfo   := "%libinfo" library              name, path or regex
 //   add-path  := "%add-path" path { ":" path }   blanks around ':' allowed
 //   add       := "%add" { path }                 zero or more source files
+//   source    := "%source" path
 //   reload    := "%reload" { path }              no argument: reload all
 //   compile-opts := "%compile-opts" [ file ]
 //   add-compile-opt := "%add-compile-opt" [ file ] flag { flag-or-value }
@@ -70,6 +71,7 @@ enum class CommandKind {
   Paths,
   AddPath,
   Add,
+  Source,
   Reload,
   CompileOpts,
   AddCompileOpt,

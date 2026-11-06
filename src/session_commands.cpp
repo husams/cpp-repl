@@ -9,6 +9,7 @@
 #include "definition_generation.hpp"
 #include "inspection_output.hpp"
 #include "runtime_inspection.hpp"
+#include "startup_files.hpp"
 
 namespace example {
 namespace {
@@ -52,9 +53,10 @@ bool show_class(CppInterpreter& cpp, const ParsedCommand& cmd,
 }  // namespace
 
 CommandResult execute_command(LibraryManager& libs, CppInterpreter& cpp,
-                              const ParsedCommand& cmd, std::ostream& out) {
+                              const ParsedCommand& cmd, std::ostream& out,
+                              unsigned source_depth) {
   if (!cmd.shell_commands.empty() && cmd.error.empty())
-    return execute_command(libs, cpp, expand_shell_substitutions(cmd), out);
+    return execute_command(libs, cpp, expand_shell_substitutions(cmd), out, source_depth);
   if (cmd.kind == CommandKind::Cpp) {
     return {true, false};  // C++ input is handled by the interactive REPL.
   }
@@ -163,6 +165,9 @@ CommandResult execute_command(LibraryManager& libs, CppInterpreter& cpp,
   }
   if (cmd.kind == CommandKind::Add && cmd.error.empty()) {
     return {true, add_sources(cpp, cmd, out)};
+  }
+  if (cmd.kind == CommandKind::Source && cmd.error.empty()) {
+    return source_repl_file(libs, cpp, out, cmd.paths.front().value, source_depth);
   }
   if (cmd.kind == CommandKind::Reload && cmd.error.empty()) {
     std::vector<std::string> paths;

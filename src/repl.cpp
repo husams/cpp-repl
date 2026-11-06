@@ -156,7 +156,8 @@ Replxx::completions_t complete(CppInterpreter& cpp, const std::string& input, in
 
   if (cmd.kind == CommandKind::Lib || cmd.kind == CommandKind::AddPath ||
       cmd.kind == CommandKind::Add || cmd.kind == CommandKind::Reload ||
-      cmd.kind == CommandKind::GenerateDefines || cmd.kind == CommandKind::PrepareDefines) {
+      cmd.kind == CommandKind::Source || cmd.kind == CommandKind::GenerateDefines ||
+      cmd.kind == CommandKind::PrepareDefines) {
     const std::string typed = input.substr(current_path_begin(input, cmd));
     context_len = static_cast<int>(utf8_length(typed));
     for (const std::string& p : complete_path(typed, cmd.kind == CommandKind::AddPath)) {

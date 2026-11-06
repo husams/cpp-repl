@@ -297,6 +297,33 @@ void use_unavailable() { unavailable(); missing_constructor(); }
   EXPECT_EQ(cpp->evaluate("caught()"), "(int) 1\n");
 }
 
+TEST_F(DefinitionGeneration, SourcesGeneratedDefinitionsInTheCurrentSession) {
+  ASSERT_TRUE(cpp->execute("int session_value = 40;"));
+  const auto source = write("source.cpp", "int missing(); int answer() { return missing() + 2; }");
+  const auto script = (directory / "generated definitions.repl").string();
+  std::string output;
+  ASSERT_TRUE(command("%generate-defines \"" + source + "\" --output \"" + script + "\"", &output))
+      << output;
+  ASSERT_TRUE(command("%source \"" + script + "\"", &output)) << output;
+  EXPECT_FALSE(cpp->definitions_pending());
+  EXPECT_EQ(cpp->evaluate("session_value + answer()"), "(int) 42\n");
+}
+
+TEST_F(DefinitionGeneration, SourceStopsOnErrorAndCancelsItsPendingDefinitions) {
+  const auto source = write("source.cpp", "int missing(); int answer() { return missing(); }");
+  const auto script = write("bad.repl", "%prepare-defines \"" + source + "\"\n"
+                                        "%define missing() cpp`return unknown_name;`\n"
+                                        "%define missing() cpp`return 42;`\n"
+                                        "%commit-defines\n");
+  std::string output;
+  EXPECT_FALSE(command("%source \"" + script + "\"", &output)) << output;
+  EXPECT_NE(output.find(script + ":2:"), std::string::npos) << output;
+  EXPECT_EQ(output.find("committed definitions"), std::string::npos) << output;
+  EXPECT_FALSE(cpp->definitions_pending());
+  EXPECT_TRUE(command("%prepare-defines \"" + source + "\""));
+  EXPECT_TRUE(command("%cancel-defines"));
+}
+
 TEST_F(DefinitionGeneration, RegenerationDisablesStaleSignaturesAndKeepsNewCandidates) {
   const auto source = write("source.cpp", "int needed(); int use() { return needed(); }");
   std::string error;

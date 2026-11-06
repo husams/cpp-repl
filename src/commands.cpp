@@ -530,6 +530,8 @@ const std::vector<CommandInfo>& command_table() {
       {"%add", CommandKind::Add, " [path ...]",
        "parse and run C++ files using compile_commands.json (no argument: list "
        "added files)"},
+      {"%source", CommandKind::Source, " <file.repl>",
+       "run a REPL script in the current session"},
       {"%reload", CommandKind::Reload, " [path ...]",
        "reload added C++ files and user headers (no argument: reload all)"},
       {"%compile-opts", CommandKind::CompileOpts, " [file]",
@@ -710,6 +712,11 @@ ParsedCommand parse_command(std::string_view text, bool allow_shell) {
     case CommandKind::Reload:
       parse_paths(text, cmd);
       break;
+    case CommandKind::Source:
+      parse_paths(text, cmd);
+      if (cmd.paths.size() != 1)
+        set_error(cmd, "expected one script filename", {cmd.arg_begin, text.size()});
+      break;
     case CommandKind::GenerateDefines:
     case CommandKind::PrepareDefines:
       parse_definition_options(text, cmd);
@@ -876,6 +883,7 @@ bool dispatch(const ParsedCommand& cmd, LibraryManager& libs, std::ostream& out,
       }
       break;
     case CommandKind::Add:      // %add and %class are run by the REPL, which
+    case CommandKind::Source:
     case CommandKind::Reload:
     case CommandKind::CompileOpts:
     case CommandKind::AddCompileOpt:
