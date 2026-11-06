@@ -2,6 +2,10 @@
 #include <fstream>
 #include <sstream>
 
+#ifdef __linux__
+#include <typeinfo>
+#include <dlfcn.h>
+#endif
 #include <gtest/gtest.h>
 #include <unistd.h>
 
@@ -11,6 +15,14 @@
 #include "library_manager.hpp"
 #include "session_commands.hpp"
 #include "startup_files.hpp"
+
+#ifdef __linux__
+struct GeneratedReplayRtti {};
+
+extern "C" const void* cpp_repl_test_native_rtti() {
+  return &typeid(GeneratedReplayRtti);
+}
+#endif
 
 namespace example {
 namespace {
@@ -440,6 +452,31 @@ TEST_F(DefinitionGeneration, PublishesCommittedDefinitionsToNativeConsumers) {
   ASSERT_TRUE(cpp->execute("extern \"C\" int generated_native_answer();"));
   EXPECT_EQ(cpp->evaluate("generated_native_answer()"), "(int) 42\n");
 }
+
+#ifdef __linux__
+// Clang emits hidden RTTI for this type on macOS.
+TEST_F(DefinitionGeneration, ReplaysWithTheNativeRttiAddress) {
+  const auto native_symbol = "_ZTI" + std::string(typeid(GeneratedReplayRtti).name());
+  ASSERT_EQ(dlsym(RTLD_DEFAULT, native_symbol.c_str()), cpp_repl_test_native_rtti());
+  const auto source = write("rtti.cpp", R"cpp(
+#include <typeinfo>
+struct GeneratedReplayRtti {};
+extern "C" const void* cpp_repl_test_native_rtti();
+int missing();
+int replay_result() {
+  return (&typeid(GeneratedReplayRtti) == cpp_repl_test_native_rtti() ? 42 : -1) + missing();
+}
+)cpp");
+  const auto script = (directory / "10-definitions.repl").string();
+  std::string output;
+  ASSERT_TRUE(command("%generate-defines \"" + source + "\" --output \"" + script + "\"", &output))
+      << output;
+  std::ostringstream replay;
+  const auto loaded = load_startup_files(libs, *cpp, replay, directory.string());
+  ASSERT_EQ(loaded.failed, 0u) << replay.str();
+  EXPECT_EQ(cpp->evaluate("replay_result()"), "(int) 42\n");
+}
+#endif
 
 TEST(DefinitionGenerationGrammar, ValidatesOptionsAndDoesNotTreatGenerationAsCppBody) {
   EXPECT_TRUE(parse_command("%generate-defines").error.size());
