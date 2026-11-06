@@ -353,6 +353,31 @@ bool value_pending(const clang::PartialTranslationUnit& ptu) {
   return false;
 }
 
+void reuse_native_rtti(llvm::orc::LLJIT& jit, llvm::Module& module) {
+  for (auto& global : module.globals()) {
+    const auto name = global.getName();
+    if ((!name.starts_with("_ZTI") && !name.starts_with("_ZTS")) ||
+        !global.hasInitializer() || !global.hasDefaultVisibility() ||
+        (!global.hasLinkOnceODRLinkage() && !global.hasWeakODRLinkage())) {
+      continue;
+    }
+    auto* native = dlsym(RTLD_DEFAULT, name.str().c_str());
+    if (!native) continue;
+    auto existing = lookup_symbol(jit, name);
+    if (!existing) {
+      llvm::consumeError(existing.takeError());
+      continue;
+    }
+    if (existing->getValue() != reinterpret_cast<std::uintptr_t>(native)) continue;
+
+    // Let the JIT bind references to the same type info as native consumers.
+    global.setInitializer(nullptr);
+    global.setComdat(nullptr);
+    global.setLinkage(llvm::GlobalValue::ExternalLinkage);
+    global.setDSOLocal(false);
+  }
+}
+
 // The external symbols `module` refers to that the JIT cannot resolve (from
 // earlier inputs, loaded libraries or the process), demangled.
 std::vector<std::string> missing_symbols(llvm::orc::LLJIT& jit,
@@ -997,6 +1022,7 @@ bool CppInterpreter::commit_defines(std::string& error) {
     error = "could not link prepared definitions; cancel and correct the batch";
     return false;
   }
+  reuse_native_rtti(jit_, *merged);
   const auto missing = missing_symbols(jit_, *merged);
   if (!missing.empty()) {
     error = "undefined symbols (batch remains unexecuted): ";
