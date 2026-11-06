@@ -196,6 +196,9 @@ TEST_F(DefinitionGeneration, ScansTemplateInstancesMemberQualifiersAndUnsupporte
       write("source.cpp",
             "template<class T> T generic(T);\n"
             "struct Worker { int run(int) const & noexcept; static int value; };\n"
+            "struct NoDefault { explicit NoDefault(int); };\n"
+            "NoDefault must_not_throw() noexcept;\n"
+            "void call_nothrow() { must_not_throw(); }\n"
             "int variadic(int, ...);\n"
             "int use(Worker& w) { return generic<int>(w.run(Worker::value)) + variadic(1, 2); }\n");
   std::string output;
@@ -205,7 +208,10 @@ TEST_F(DefinitionGeneration, ScansTemplateInstancesMemberQualifiersAndUnsupporte
       << output;
   EXPECT_NE(output.find("%define Worker::value"), std::string::npos) << output;
   EXPECT_NE(output.find("Unsupported:"), std::string::npos) << output;
-  EXPECT_EQ(output.find("// %define variadic"), std::string::npos) << output;
+  EXPECT_EQ(output.find("%define variadic"), std::string::npos) << output;
+  EXPECT_EQ(output.find("%define must_not_throw"), std::string::npos) << output;
+  EXPECT_NE(output.find("no default return available without throwing"), std::string::npos)
+      << output;
 }
 
 TEST_F(DefinitionGeneration, CreatesAndUpdatesScriptsWithoutLosingUserEdits) {
@@ -217,11 +223,20 @@ TEST_F(DefinitionGeneration, CreatesAndUpdatesScriptsWithoutLosingUserEdits) {
   EXPECT_FALSE(command(generate));
   std::ifstream input(output_path);
   std::string edited{std::istreambuf_iterator<char>(input), {}};
+  const std::string generated = "%define needed() cpp`return {};`";
   const std::string placeholder = "// %define needed() cpp`/* function body */`";
-  const auto pos = edited.find(placeholder);
+  const auto pos = edited.find(generated);
   ASSERT_NE(pos, std::string::npos) << edited;
-  edited.replace(pos, placeholder.size(), "%define needed() cpp`return 42;`");
+  edited.replace(pos, generated.size(), placeholder);
   edited.insert(edited.find("%commit-defines"), "// My handwritten note.\n");
+  std::ofstream(output_path) << edited;
+  ASSERT_TRUE(command(generate + " --update", &output)) << output;
+  std::ifstream migrated(output_path);
+  edited.assign(std::istreambuf_iterator<char>(migrated), {});
+  const auto active = edited.find(generated);
+  ASSERT_NE(active, std::string::npos) << edited;
+  EXPECT_EQ(edited.find(placeholder), std::string::npos) << edited;
+  edited.replace(active, generated.size(), "%define needed() cpp`return 42;`");
   std::ofstream(output_path) << edited;
   ASSERT_TRUE(command(generate + " --update", &output)) << output;
   std::ifstream updated(output_path);
@@ -231,19 +246,43 @@ TEST_F(DefinitionGeneration, CreatesAndUpdatesScriptsWithoutLosingUserEdits) {
 }
 
 TEST_F(DefinitionGeneration, GeneratedScriptReplaysUsingNormalStartupLoader) {
-  const auto source = write("source.cpp", "int needed(); int result = needed();");
+  const auto source = write("source.cpp", R"cpp(
+#include <string>
+struct Aggregate { int value; };
+struct ExplicitDefault { explicit ExplicitDefault() : value(7) {} int value; };
+struct NoDefault { explicit NoDefault(int); };
+struct MissingConstructor { MissingConstructor(); };
+int number();
+void notify();
+std::string text();
+Aggregate aggregate();
+ExplicitDefault object();
+NoDefault unavailable();
+MissingConstructor missing_constructor();
+extern const int constant;
+extern std::string label;
+extern ExplicitDefault item;
+int result = (notify(), number() + constant);
+int defaults() { return text().size() + label.size() + aggregate().value + object().value + item.value; }
+void use_unavailable() { unavailable(); missing_constructor(); }
+)cpp");
+  write("20-call.repl", "int caught() { try { unavailable(); } catch (const std::runtime_error& e) {\n"
+                       "if (std::string(e.what()) != \"not implemented\") return 0; }\n"
+                       "try { missing_constructor(); } catch (const std::runtime_error& e) {\n"
+                       "return std::string(e.what()) == \"not implemented\"; } return 0; }\n");
   std::string error;
-  auto script = cpp->generate_defines(source, error);
+  const auto script = cpp->generate_defines(source, error);
   ASSERT_TRUE(script) << error;
-  const std::string placeholder = "// %define needed() cpp`/* function body */`";
-  const auto pos = script->find(placeholder);
-  ASSERT_NE(pos, std::string::npos) << *script;
-  script->replace(pos, placeholder.size(), "%define needed() cpp`return 42;`");
+  EXPECT_NE(script->find("%define notify() cpp``"), std::string::npos) << *script;
+  EXPECT_NE(script->find("%define missing_constructor() cpp`throw "), std::string::npos)
+      << *script;
   write("10-definitions.repl", *script);
   std::ostringstream output;
   const auto loaded = load_startup_files(libs, *cpp, output, directory.string());
-  EXPECT_EQ(loaded.failed, 0u) << output.str();
-  EXPECT_EQ(cpp->evaluate("result"), "(int) 42\n");
+  ASSERT_EQ(loaded.failed, 0u) << *script << output.str();
+  EXPECT_EQ(cpp->evaluate("result"), "(int) 0\n");
+  EXPECT_EQ(cpp->evaluate("defaults()"), "(int) 14\n");
+  EXPECT_EQ(cpp->evaluate("caught()"), "(int) 1\n");
 }
 
 TEST_F(DefinitionGeneration, RegenerationDisablesStaleSignaturesAndKeepsNewCandidates) {
@@ -259,7 +298,7 @@ TEST_F(DefinitionGeneration, RegenerationDisablesStaleSignaturesAndKeepsNewCandi
   std::ifstream input(output);
   const std::string content{std::istreambuf_iterator<char>(input), {}};
   EXPECT_NE(content.find("Stale definition"), std::string::npos) << content;
-  EXPECT_NE(content.find("// %define added()"), std::string::npos) << content;
+  EXPECT_NE(content.find("\n%define added() cpp`return {};`"), std::string::npos) << content;
   EXPECT_NE(content.find("// Type: double (void)"), std::string::npos) << content;
   EXPECT_TRUE(write_definition_script(output, *fresh, true, error)) << error;
 }

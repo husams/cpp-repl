@@ -43,6 +43,8 @@ PreparedDefinitions::PreparedDefinitions() = default;
 PreparedDefinitions::~PreparedDefinitions() = default;
 
 namespace {
+constexpr std::string_view exception_include = "\n#include <stdexcept>\n";
+
 bool write_all(int fd, const std::string& text) {
   std::size_t offset = 0;
   while (offset < text.size()) {
@@ -210,6 +212,13 @@ std::string prepare_line(const std::string& text) {
   return text.substr(begin, text.find('\n', begin + 1) - begin);
 }
 
+std::string typed_default(clang::ASTContext& context, clang::QualType type) {
+  auto policy = context.getPrintingPolicy();
+  policy.SuppressTagKeyword = true;
+  return clang::TypeName::getFullyQualifiedType(type.getUnqualifiedType(), context, true)
+             .getAsString(policy) + "{}";
+}
+
 class References : public clang::RecursiveASTVisitor<References> {
   clang::ASTContext& context_;
 
@@ -371,7 +380,9 @@ isolated_definition_scan(const std::function<std::optional<std::string>(std::str
 
 std::string generate_definition_entries(clang::Interpreter& interpreter, FunctionHooks& hooks,
                                         llvm::orc::LLJIT& jit,
-                                        const PreparedDefinitions& prepared) {
+                                        const PreparedDefinitions& prepared,
+                                        const std::function<bool(const std::string&, bool,
+                                                                 const std::string&)>& can_define) {
   auto& context = interpreter.getASTContext();
   References references(context);
   for (std::size_t i = 0; i < prepared.source_inputs; ++i) {
@@ -446,24 +457,56 @@ std::string generate_definition_entries(clang::Interpreter& interpreter, Functio
   }
   std::ostringstream out;
   out << "// cpp-repl generated definitions v1\n// Input: " << prepared.path
-      << "\n// Complete and uncomment the %define entries before replaying.\n"
-         "// Referenced candidates may not require linkage until used.\n"
-      << "%prepare-defines " << std::quoted(prepared.path);
+      << "\n// Review the generated defaults before replaying.\n"
+         "// Referenced candidates may not require linkage until used.";
+  const auto preamble_end = static_cast<std::size_t>(out.tellp());
+  out << "\n%prepare-defines " << std::quoted(prepared.path);
   if (prepared.context != prepared.path) {
     out << " --tu " << std::quoted(prepared.context);
   }
   out << '\n';
+  bool needs_stdexcept = false;
   for (const auto& [mangled, ref] : references.found) {
     if (resolved(mangled)) {
       emitted.erase(mangled);
       continue;
     }
-    std::string target, reason;
-    const bool callable = llvm::isa<clang::FunctionDecl>(ref.decl);
+    std::string target, reason, value;
     if (const auto* function = llvm::dyn_cast<clang::FunctionDecl>(ref.decl)) {
       target = signature(context, *function);
-      if (!hooks.definition(target, reason) && reason.empty()) {
-        reason = "unsupported callable";
+      if (!hooks.definition(target, reason)) {
+        if (reason.empty()) {
+          reason = "unsupported callable";
+        }
+      } else {
+        const auto type = function->getReturnType();
+        const bool nothrow = function->getType()->castAs<clang::FunctionProtoType>()->isNothrow();
+        const auto* record = type->getAsCXXRecordDecl();
+        if (!function->isNoReturn() && (type->isVoidType() || type->isScalarType())) {
+          value = type->isVoidType() ? "" : "return {};";
+        } else if ((!type->isVoidType() && type->isIncompleteType()) ||
+                   (record && record->hasDefinition() && record->isAbstract())) {
+          reason = "return type must be complete and concrete";
+        } else {
+          if (!function->isNoReturn() && !type->isVoidType() && !type->isReferenceType() &&
+              (!record || record->hasDefaultConstructor() || record->isAggregate())) {
+            const auto expression = typed_default(context, type);
+            value = "return " + expression + ";";
+            const auto check = nothrow ? "static_assert(noexcept(" + expression + ")); " + value
+                                       : value;
+            if (!can_define(target, true, check)) {
+              value.clear();
+            }
+          }
+          if (value.empty()) {
+            if (!nothrow && context.getLangOpts().CXXExceptions) {
+              value = "throw ::std::runtime_error(\"not implemented\");";
+              needs_stdexcept = true;
+            } else {
+              reason = "no default return available without throwing";
+            }
+          }
+        }
       }
     } else {
       target = unversioned_name(ref.decl->getQualifiedNameAsString());
@@ -473,6 +516,18 @@ std::string generate_definition_entries(clang::Interpreter& interpreter, Functio
       }
       if (ref.decl->getFormalLinkage() != clang::Linkage::External) {
         reason = "definition requires external linkage";
+      }
+      if (variable && reason.empty()) {
+        const auto type = llvm::cast<clang::VarDecl>(ref.decl)->getType();
+        value = "{}";
+        if (!type->isScalarType() && !can_define(target, false, value)) {
+          if (type->getAsCXXRecordDecl()) {
+            value = typed_default(context, type);
+          }
+          if (value == "{}" || !can_define(target, false, value)) {
+            reason = "no default initializer available";
+          }
+        }
       }
     }
     out << "\n// cpp-repl:begin " << mangled << '\n'
@@ -489,8 +544,7 @@ std::string generate_definition_entries(clang::Interpreter& interpreter, Functio
     if (!reason.empty()) {
       out << "// Unsupported: " << reason << '\n';
     } else {
-      out << "// %define " << target << " cpp`/* " << (callable ? "function body" : "initializer")
-          << " */`\n";
+      out << "%define " << target << " cpp`" << value << "`\n";
     }
     out << "// cpp-repl:end " << mangled << '\n';
     emitted.erase(mangled);
@@ -508,7 +562,11 @@ std::string generate_definition_entries(clang::Interpreter& interpreter, Functio
     }
   }
   out << "\n%commit-defines\n";
-  return out.str();
+  auto script = out.str();
+  if (needs_stdexcept) {
+    script.insert(preamble_end, exception_include.substr(0, exception_include.size() - 1));
+  }
+  return script;
 }
 
 bool write_definition_script(const std::string& path, const std::string& script, bool update,
@@ -535,24 +593,39 @@ bool write_definition_script(const std::string& path, const std::string& script,
       return false;
     }
     result = old;
-    std::vector<GeneratedRegion> stale;
+    std::vector<GeneratedRegion> replacements;
     for (const auto& [id, region] : *previous) {
       const auto current = fresh->find(id);
       if (current != fresh->end() && current->second.type == region.type) {
+        const auto& block = current->second.text;
+        const auto begin = block.find("\n%define ");
+        if (begin != std::string::npos && region.text.find("\n%define ") == std::string::npos) {
+          const auto line = block.substr(begin + 1, block.find('\n', begin + 1) - begin - 1);
+          const auto prefix = "\n// " + line.substr(0, line.find(" cpp`") + 5);
+          for (const auto* placeholder : {"/* function body */`\n", "/* initializer */`\n"}) {
+            const auto legacy = prefix + placeholder;
+            const auto pos = region.text.find(legacy);
+            if (pos != std::string::npos) {
+              replacements.push_back({region.begin + pos, region.begin + pos + legacy.size(),
+                                      "\n" + line + '\n', {}});
+              break;
+            }
+          }
+        }
         fresh->erase(current);
       } else {
-        stale.push_back(region);
+        std::istringstream lines(region.text);
+        std::string commented = "// Stale definition (review signature or provider change):\n", line;
+        while (std::getline(lines, line)) {
+          commented += "// " + line + '\n';
+        }
+        replacements.push_back({region.begin, region.end, std::move(commented), {}});
       }
     }
-    std::sort(stale.begin(), stale.end(),
+    std::sort(replacements.begin(), replacements.end(),
               [](const auto& a, const auto& b) { return a.begin > b.begin; });
-    for (const auto& region : stale) {
-      std::istringstream lines(region.text);
-      std::string commented = "// Stale definition (review signature or provider change):\n", line;
-      while (std::getline(lines, line)) {
-        commented += "// " + line + '\n';
-      }
-      result.replace(region.begin, region.end - region.begin, commented);
+    for (const auto& region : replacements) {
+      result.replace(region.begin, region.end - region.begin, region.text);
     }
     const auto commit = result.rfind("\n%commit-defines\n");
     if (commit == std::string::npos) {
@@ -564,6 +637,11 @@ bool write_definition_script(const std::string& path, const std::string& script,
       additions += "\n" + region.text + "\n";
     }
     result.insert(commit, additions);
+    const auto prepare = result.find("\n%prepare-defines ");
+    if (script.find(exception_include) != std::string::npos &&
+        result.find(exception_include) >= prepare) {
+      result.insert(prepare, exception_include.substr(0, exception_include.size() - 1));
+    }
   }
   struct stat before{};
   if (update && (lstat(path.c_str(), &before) != 0 || !S_ISREG(before.st_mode))) {

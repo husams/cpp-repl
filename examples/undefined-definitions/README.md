@@ -59,9 +59,9 @@ example's startup script does not run:
 %generate-defines examples/undefined-definitions/consumer.cpp --output definitions.repl
 ```
 
-Edit the generated file, supplying the body and initializer and uncommenting
-the `%define` entries. It already contains `%prepare-defines` and
-`%commit-defines` in the required order. Replay the commands at the prompt,
+The generated file defines `adjust` to return `0` and initializes `bias` to `0`.
+Edit the `%define` entries if you want different values. The file contains
+`%prepare-defines` and `%commit-defines` in the required order. Replay the commands at the prompt,
 or save the completed script under a project's `.cpp-repl/10-definitions.repl`
 and start a new session in that project.
 

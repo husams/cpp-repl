@@ -45,7 +45,9 @@ std::optional<std::string>
 isolated_definition_scan(const std::function<std::optional<std::string>(std::string&)>& scan,
                          std::string& error);
 std::string generate_definition_entries(clang::Interpreter& interpreter, FunctionHooks& hooks,
-                                        llvm::orc::LLJIT& jit, const PreparedDefinitions& prepared);
+                                        llvm::orc::LLJIT& jit, const PreparedDefinitions& prepared,
+                                        const std::function<bool(const std::string&, bool,
+                                                                 const std::string&)>& can_define);
 bool write_definition_script(const std::string& path, const std::string& script, bool update,
                              std::string& error);
 } // namespace example

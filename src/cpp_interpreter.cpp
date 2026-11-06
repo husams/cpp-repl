@@ -49,6 +49,7 @@
 #include "clang/Interpreter/IncrementalExecutor.h"
 #endif
 #include "llvm/ADT/ScopeExit.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Demangle/Demangle.h"
 #include "llvm/ExecutionEngine/Orc/Debugging/DebuggerSupport.h"
 #include "llvm/ExecutionEngine/Orc/LLJIT.h"
@@ -355,13 +356,15 @@ bool value_pending(const clang::PartialTranslationUnit& ptu) {
 // The external symbols `module` refers to that the JIT cannot resolve (from
 // earlier inputs, loaded libraries or the process), demangled.
 std::vector<std::string> missing_symbols(llvm::orc::LLJIT& jit,
-                                         const llvm::Module& module) {
+                                         const llvm::Module& module,
+                                         const llvm::StringSet<>* staged = nullptr) {
   std::vector<std::string> missing;
   auto check = [&](const llvm::GlobalValue& gv) {
     if (!gv.isDeclaration() || gv.hasExternalWeakLinkage() || !gv.hasName()) return;
     if (const auto* f = llvm::dyn_cast<llvm::Function>(&gv); f != nullptr && f->isIntrinsic()) {
       return;
     }
+    if (staged && staged->contains(gv.getName())) return;
     auto addr = lookup_symbol(jit, gv.getName());
     if (addr) return;
     llvm::consumeError(addr.takeError());
@@ -808,7 +811,14 @@ bool CppInterpreter::stage_definition_input(const std::string& code) {
   }
   auto parsed = parse_input(*interp_, code);
   if (!parsed) {
+    if (check_generated_default_) {
+      llvm::consumeError(parsed.takeError());
+      return false;
+    }
     return report(parsed.takeError());
+  }
+  if (check_generated_default_ && !check_generated_default_(*parsed)) {
+    return false;
   }
   prepared_definitions_->inputs.push_back(&*parsed);
   semantic_context_ = nullptr;
@@ -892,7 +902,44 @@ std::optional<std::string> CppInterpreter::generate_defines(const std::string& p
           failure = result.message;
           return std::nullopt;
         }
-        auto script = generate_definition_entries(*interp_, hooks_, jit_, *prepared_definitions_);
+        std::optional<llvm::StringSet<>> staged;
+        const auto remember_definitions = [&](const llvm::Module& module) {
+          for (const auto& symbol : module.global_values()) {
+            if (!symbol.isDeclarationForLinker() && !symbol.hasLocalLinkage()) {
+              staged->insert(symbol.getName());
+            }
+          }
+        };
+        check_generated_default_ = [&](clang::PartialTranslationUnit& input) {
+          if (!staged) {
+            staged.emplace();
+            for (const auto* source : prepared_definitions_->inputs) {
+              if (source->TheModule) remember_definitions(*source->TheModule);
+            }
+          }
+          if (input.TheModule && missing_symbols(jit_, *input.TheModule, &*staged).empty()) {
+            remember_definitions(*input.TheModule);
+            return true;
+          }
+          if (auto error = undo_input(*interp_, input.TUPart)) {
+            failure = "could not discard a rejected generated default: " +
+                      llvm::toString(std::move(error));
+          }
+          return false;
+        };
+        auto script = generate_definition_entries(
+            *interp_, hooks_, jit_, *prepared_definitions_,
+            [&](const std::string& target, bool callable, const std::string& value) {
+              if (!failure.empty()) return false;
+              DiagnosticClientScope diagnostics(interp_->getCompilerInstance()->getDiagnostics(),
+                                                std::make_unique<clang::IgnoringDiagConsumer>(),
+                                                true);
+              std::string ignored;
+              return callable ? define_callable(target, value, ignored)
+                              : define_variable(target, value, ignored);
+            });
+        check_generated_default_ = {};
+        if (!failure.empty()) return std::nullopt;
         const auto& option_file = prepared_definitions_->context;
         std::string option_error;
         if (const auto options = describe_compile_options(option_error, option_file)) {

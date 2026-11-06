@@ -516,10 +516,14 @@ A leading `!` selects the shell; parenthesize a C++ negation, such as `(!x)`.
   Referenced candidates are distinguished from unresolved emitted dependencies;
   declarations without references are omitted, resolved providers are excluded,
   and unsupported targets/support symbols are reported separately.
-  Generated entries are commented until you supply their bodies or initializers.
+  Generated `%define` entries return default values, use empty `void` bodies,
+  or throw `std::runtime_error("not implemented")` when no default return is
+  available and the function can throw. Variables and constants get default
+  initializers where available. The report marks entries that need manual definitions.
   The script prepares declarations first and commits only after the definitions.
   New output files never overwrite existing files. `--update` preserves edited
-  definition regions and handwritten text, adds new entries, and comments stale
+  definition regions and handwritten text, fills untouched legacy placeholders,
+  adds new entries, and comments stale
   entries when their types change or their dependencies disappear. Keep the
   generated region markers intact. Updates require the same input and `--tu`
   context and reject symlinks and handwritten files. Analysis is bounded to
