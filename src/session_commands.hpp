@@ -13,9 +13,10 @@ struct CommandResult {
   bool ok = true;
 };
 
-// Shared command execution for interactive input and startup configuration.
+// Shared command execution for interactive input and scripts.
 // C++ inputs are handled separately by the interactive REPL.
 CommandResult execute_command(LibraryManager& libs, CppInterpreter& cpp,
-                              const ParsedCommand& command, std::ostream& out);
+                              const ParsedCommand& command, std::ostream& out,
+                              unsigned source_depth = 0);
 
 }  // namespace example

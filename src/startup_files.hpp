@@ -7,6 +7,7 @@ namespace example {
 
 class CppInterpreter;
 class LibraryManager;
+struct CommandResult;
 
 struct StartupFilesResult {
   bool found = false;
@@ -15,6 +16,11 @@ struct StartupFilesResult {
   unsigned failed = 0;
   bool quit = false;
 };
+
+// Run one script in the current session, stopping at the first error.
+CommandResult source_repl_file(LibraryManager& libs, CppInterpreter& cpp,
+                               std::ostream& output, const std::string& filename,
+                               unsigned source_depth);
 
 // Load <number>-<name>.repl files from a directory in numeric order, breaking
 // ties by filename. Scripts contain C++ input and %commands, as at the prompt;

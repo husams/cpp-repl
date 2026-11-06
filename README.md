@@ -362,6 +362,10 @@ A leading `!` selects the shell; parenthesize a C++ negation, such as `(!x)`.
   loading resumes with the next script. `%quit` exits immediately, skipping
   later inputs and scripts.
 
+- `%source <file.repl>` - run C++ and REPL commands from a script in the current
+  session. Quote paths with spaces. Relative paths use the session's working
+  directory. Execution stops at the first error and cancels any uncommitted
+  definitions prepared by the script.
 - `%add [path ...]` - parse and run C++ source files in the session, as if
   each were `#include`d. Diagnostics then point into the file, and its own
   `#include "..."` lines resolve next to it. Each file can be added once. Its

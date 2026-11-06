@@ -61,8 +61,9 @@ example's startup script does not run:
 
 The generated file defines `adjust` to return `0` and initializes `bias` to `0`.
 Edit the `%define` entries if you want different values. The file contains
-`%prepare-defines` and `%commit-defines` in the required order. Replay the commands at the prompt,
-or save the completed script under a project's `.cpp-repl/10-definitions.repl`
+`%prepare-defines` and `%commit-defines` in the required order. Run
+`%source definitions.repl` at the prompt to replay the script, or save it under
+a project's `.cpp-repl/10-definitions.repl`
 and start a new session in that project.
 
 Use `--update` with the same input and output to refresh a generated file.

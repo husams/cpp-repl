@@ -221,6 +221,15 @@ TEST(Grammar, AddTakesBlankSeparatedSourceFiles) {
   EXPECT_EQ(parse_command("%add-path /tmp").kind, CommandKind::AddPath);  // not %add
 }
 
+TEST(Grammar, SourceTakesOneScriptFilename) {
+  const auto cmd = parse_command(R"(%source "my definitions.repl")");
+  EXPECT_EQ(cmd.kind, CommandKind::Source);
+  EXPECT_TRUE(cmd.error.empty()) << cmd.error;
+  EXPECT_EQ(values(cmd), (std::vector<std::string>{"my definitions.repl"}));
+  EXPECT_FALSE(parse_command("%source").error.empty());
+  EXPECT_FALSE(parse_command("%source first.repl second.repl").error.empty());
+}
+
 TEST(Grammar, CompileOptionsSupportGlobalAndFileScopesWithoutSeparators) {
   auto cmd = parse_command("%compile-opts");
   EXPECT_EQ(cmd.kind, CommandKind::CompileOpts);
